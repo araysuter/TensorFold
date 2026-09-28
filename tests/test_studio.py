@@ -235,3 +235,42 @@ def test_reply_anchors_persist_across_restart(tmp_path):
     k=auto_job(2,[response,{'role':'user','content':'file.py'}]);restored.submit(k)
     assert restored.jobs['2']==0
     assert restored.snapshot()['slots'][1]['state']=='empty'
+
+
+def test_streamed_tool_ids_not_reparsed_ids_keep_vscode_followup_in_same_slot():
+    from http_fakes import post
+    from test_server_openai_compat import FakeApp
+    from tensorfold.server.studio import reply_fingerprint
+
+    class TrackingTools(FakeApp):
+        accepts_sampling = True
+        streams_prose_with_tools = True
+        def __init__(self):
+            super().__init__()
+            self.scheduler = SimpleNamespace(studio=Studio(8))
+            self.counter = 0
+        def chat(self, messages, *, sampling=None, on_delta=None, **kwargs):
+            self.counter += 1
+            j = job(self.counter, key=sampling['conversation_id'])
+            j.conversation_replies = sampling['conversation_replies']
+            self.scheduler.studio.submit(j)
+            if on_delta:
+                on_delta({'tool_calls': [{'index': 0, 'id': 'wire-call-123', 'type': 'function',
+                                         'function': {'name': 'lookup', 'arguments': ''}}]})
+                on_delta({'tool_calls': [{'index': 0, 'function': {'arguments': '{"q":'}}]})
+                on_delta({'tool_calls': [{'index': 0, 'function': {'arguments': '"test"}'}}]})
+            self.scheduler.studio.finish(j)
+            return dict(content='<tool_call>{"name":"lookup","arguments":{"q":"test"}}</tool_call>',
+                        tool_calls_streamed=True, finish_reason='tool_calls', prompt_tokens=3, completion_tokens=5)
+
+    app = TrackingTools()
+    tools = [{'type': 'function', 'function': {'name': 'lookup', 'parameters': {'type': 'object'}}}]
+    first = [{'role': 'user', 'content': 'find test'}]
+    status, body = post(app, dict(messages=first, tools=tools, stream=True))
+    assert status == 200
+    assistant = {'role': 'assistant', 'tool_calls': [{'id': 'wire-call-123', 'type': 'function',
+                    'function': {'name': 'lookup', 'arguments': '{"q":"test"}'}}]}
+    assert reply_fingerprint(assistant) in app.scheduler.studio.replies[0]
+    status, _ = post(app, dict(messages=first + [assistant, {'role': 'tool', 'tool_call_id': 'wire-call-123',
+                              'content': 'found it'}], tools=tools, stream=True))
+    assert status == 200 and len(app.scheduler.studio.prompts) == 1

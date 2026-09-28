@@ -357,8 +357,21 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     self.end_headers()
 
                     with _StreamWriter(self.wfile) as writer:
+                        sent_calls: dict[int, dict[str, Any]] = {}
+
                         def emit(payload: dict[str, Any]) -> None:
                             writer.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                            # Track the IDs/arguments actually delivered to the client. The final
+                            # tool-envelope parser may manufacture different IDs for the same call.
+                            for choice in payload.get("choices", []):
+                                for delta in (choice.get("delta") or {}).get("tool_calls", []):
+                                    index = int(delta.get("index", 0))
+                                    call = sent_calls.setdefault(index, {"type": "function", "function": {"name": "", "arguments": ""}})
+                                    if delta.get("id"):
+                                        call["id"] = delta["id"]
+                                    for field in ("name", "arguments"):
+                                        call["function"][field] += (delta.get("function") or {}).get(field, "")
+
 
                         def finish_stream(
                             finish_reason: str | None,
@@ -453,7 +466,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                             except BrokenPipeError:
                                 pass
                             return
-                        remember_reply(reply)
+                        remember_reply({**reply, "tool_calls": [sent_calls[i] for i in sorted(sent_calls)]} if sent_calls else reply)
                         extras = response_extras(reply)
                         if "prompt_tokens" in reply and "completion_tokens" in reply:
                             # Clients that time the stream count tokens from here.
