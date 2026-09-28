@@ -205,8 +205,9 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                                                         "thinking_budget", "ignore_eos", "stop")
                                    if k in body}
                 if getattr(getattr(app, "scheduler", None), "studio", None) is not None:
-                    from tensorfold.server.studio import conversation_key
+                    from tensorfold.server.studio import conversation_key, conversation_replies
                     sampling_fields["conversation_id"] = conversation_key(messages, self.headers.get("X-Conversation-ID"))
+                    sampling_fields["conversation_replies"] = conversation_replies(messages)
                 if tools and tool_choice_requires_call(body.get("tool_choice")):
                     sampling_fields["tool_call_required"] = True     # the engine opens the answer with a call
                 template_kwargs = body.get("chat_template_kwargs") or {}
@@ -267,6 +268,11 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 if reply.get("pass_economics"):
                     extras["pass_economics"] = reply["pass_economics"]
                 return extras
+
+            def remember_reply(reply):
+                studio = getattr(getattr(app, "scheduler", None), "studio", None)
+                if studio is not None:
+                    studio.record_reply(sampling_fields["conversation_id"], reply)
 
             def attach_tool_calls(reply: dict[str, Any]) -> dict[str, Any]:
                 return tool_policy.finish(reply, tools, parse_tool_calls_from_content)
@@ -411,6 +417,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         except BrokenPipeError:
                             pass
                         return
+                    remember_reply(reply)
                     extras = response_extras(reply)
                     if "prompt_tokens" in reply and "completion_tokens" in reply:
                         # Clients that time the stream count tokens from here.
@@ -429,6 +436,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         **raw_kw,
                     )
                 )
+                remember_reply(reply)
                 if is_text_completion:
                     self._send_json(
                         {

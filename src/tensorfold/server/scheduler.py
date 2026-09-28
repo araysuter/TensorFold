@@ -24,6 +24,7 @@ class ChatJob:
     max_tokens: int
     temperature: float
     conversation_id: str = ""
+    conversation_replies: tuple[str, ...] = ()
     history_len: int = 0
     # Snapshot system-and-tools blocks for reuse across sessions; history boundaries already include session-specific text.
     shared_prefix_lens: tuple[int, ...] = ()

@@ -396,6 +396,7 @@ class ChatApp(RequestOptions):
                 temperature=float(temperature),
                 history_len=history_len,
                 conversation_id=str(fields.get("conversation_id", "")),
+                conversation_replies=tuple(fields.get("conversation_replies", ())),
                 # Snapshot before the system block ends to retain reusable prefixes when session-specific tails differ.
                 shared_prefix_lens=tuple(n for n in (system_len - 2048, system_len - 512, system_len)
                                          if n >= 512) if system_len else (),

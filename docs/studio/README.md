@@ -49,16 +49,28 @@ entry is replaced, its disk snapshot remains reusable until normal disk-budget p
 These are conversation entries, not user accounts or eight reserved cache files. Several
 prefix checkpoints can belong to one conversation. RAM figures in a slot are retained
 idle checkpoints; process memory also includes working streams, model weights and scratch
-buffers. Shared prefixes can appear in multiple slot counts and must not be summed as
-unique GPU memory.
+buffers. Shared prefixes are reported in a separate pool instead of being charged to multiple slots.
 
-Clients should send a stable, unique `X-Conversation-ID` for each conversation. Clients
-without it are matched by a hash of their messages through the first user message.
-Identical openings are ambiguous: explicit IDs avoid this. Changing system instructions
-or compaction can create another entry. Only one pending request per conversation ID is
-allowed. IDs select inventory entries only; cache reuse still requires an exact token
-prefix and compatible model/runtime metadata. Prompt text, token IDs and conversation
-IDs are never returned by monitoring endpoints.
+Clients should send a stable, unique `X-Conversation-ID` for each conversation. Without
+one, the monitor follows fingerprints of assistant replies already returned by this server,
+including tool calls. Changes to system/editor context do not create another identity when
+a unique latest reply identifies the continuation. New chats with identical openings stay
+separate. Ambiguous branches, histories with no recognized reply, and auxiliary requests
+are separate entries; the server never identifies a chat merely by shared cached tokens.
+Explicit IDs remain the only guaranteed identity across compaction or rewritten history.
+
+Tracking format 2 discards the older, unreliable inventory on its first startup. This only
+resets monitor entries, never safetensors snapshots or the historical metrics database.
+The entries repopulate as requests arrive. Restarting persists the new reply fingerprints.
+No prompt text, token IDs, conversation IDs or reply fingerprints appear in monitoring APIs.
+
+Cache accounting assigns each retained checkpoint record to exactly one matching entry,
+a shared pool, or an unassigned pool. A shared prefix is not billed independently to every
+matching entry. Slot `prompt_tokens` is the last request size, not resident cache occupancy.
+`checkpoint_tokens` is the longest exclusively assigned checkpoint; `shared_checkpoint_tokens`
+is the longest reusable shared checkpoint. Checkpoint bytes describe retained records, not
+unique physical allocations (underlying arrays may share storage). Host/process memory is
+the authoritative allocation measurement. Active working buffers are not idle checkpoints.
 
 Upstream saves evicted checkpoint tensors synchronously on the engine thread before their
 last references are released. Large saves/restores can pause other decoding during I/O.
@@ -75,7 +87,7 @@ completed reply. A crash may therefore lose a recent in-RAM-only prefix.
 
 ## Metrics and history
 
-States: empty, queued, restoring, prefilling, generating, saving, ram, ssd, uncached, error.
+States: empty, queued, restoring, prefilling, generating, saving, ram, ssd, uncached, error, shared.
 Prompt speed measures the latest completed prefill chunk. Decode speed measures accepted
 output tokens over the latest engine round, per stream. Neither is a rolling average or
 a claim of instantaneous throughput. `rate_at` exposes reading age; no new work means no

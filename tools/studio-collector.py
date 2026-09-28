@@ -51,19 +51,22 @@ def host_metrics():
         pass
     return result
 
-STATES = ['empty', 'queued', 'restoring', 'prefilling', 'generating', 'saving', 'ram', 'ssd', 'uncached', 'error']
+STATES = ['empty', 'queued', 'restoring', 'prefilling', 'generating', 'saving', 'ram', 'ssd', 'uncached', 'error', 'shared']
 def tensorfold_metrics(data):
     slots = data['slots']
-    result = dict(tensorfold_version=1, slots_total=len(slots), parallel=data['parallel'], context=data['context'])
+    result = dict(tracking_version=data.get('tracking_version', 1), tensorfold_version=1, slots_total=len(slots), parallel=data['parallel'], context=data['context'])
     for item in slots:
         sid = int(item['slot'])
         if not 1 <= sid <= 256:
             continue
         result[f'slot_{sid}_state'] = STATES.index(item['state']) if item['state'] in STATES else 9
-        for key in ('last_used', 'prompt_tokens', 'cached_tokens', 'generated_tokens', 'prompt_tps', 'decode_tps', 'rate_at', 'ram_bytes', 'ssd_bytes', 'checkpoint_tokens'):
+        for key in ('last_used', 'prompt_tokens', 'cached_tokens', 'generated_tokens', 'prompt_tps', 'decode_tps', 'rate_at', 'ram_bytes', 'ssd_bytes', 'checkpoint_tokens', 'shared_checkpoint_tokens', 'shared_ram', 'shared_ssd'):
             value = item.get(key)
             if isinstance(value, (float, int)) and math.isfinite(value):
                 result[f'slot_{sid}_{key}'] = value
+    for key, value in data.get('cache_stats', {}).items():
+        if isinstance(value, (float, int)) and math.isfinite(value):
+            result['checkpoint_' + key] = value
     for key, value in data.get('memory', {}).items():
         if isinstance(value, (float, int)) and math.isfinite(value):
             result['mlx_' + key] = value
