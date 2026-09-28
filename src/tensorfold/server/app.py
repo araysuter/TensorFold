@@ -81,6 +81,7 @@ class ChatApp(RequestOptions):
         checkpoint_slots: int | None = None,
         checkpoint_budget_bytes: int | None = 16 * 1024**3,
         spill_bytes: int = 0,
+        conversation_slots: int = 0,
         memory_budget_bytes: int | None = None,
         memory_runtime: Any = None,
         model_aliases: list[str] | None = None,
@@ -170,12 +171,22 @@ class ChatApp(RequestOptions):
             model_id=model_id,
             prompt_memory=self.prompt_memory,
         )
+        if conversation_slots:
+            from tensorfold.server.studio import Studio
+            self.scheduler.studio = Studio(conversation_slots, self.scheduler.session_dir, model_id)
+            self.scheduler._refresh_studio()
         # evicted conversations go to disk (``spill_bytes`` of this model's files at most) and come back on demand
         self.spill_bytes = int(spill_bytes) if self.checkpoints is not None and self.scheduler.session_dir else 0
         if self.spill_bytes > 0:
             session_dir, spill_limit = Path(self.scheduler.session_dir), self.spill_bytes
-            self.checkpoints.on_evict = lambda entry: spill_conversation(entry, session_dir, model_id,
-                                                                         limit_bytes=spill_limit)
+            def spill(entry):
+                if self.scheduler.studio is not None:
+                    self.scheduler.studio.saving(entry)
+                try:
+                    return spill_conversation(entry, session_dir, model_id, limit_bytes=spill_limit)
+                finally:
+                    self.scheduler._refresh_studio()
+            self.checkpoints.on_evict = spill
         loaded_count = 0
         if snapshot_dir is not None and self.checkpoints is not None:
             from tensorfold.engine.prefix_snapshots import load_snapshots
@@ -384,6 +395,7 @@ class ChatApp(RequestOptions):
                 max_tokens=limit,
                 temperature=float(temperature),
                 history_len=history_len,
+                conversation_id=str(fields.get("conversation_id", "")),
                 # Snapshot before the system block ends to retain reusable prefixes when session-specific tails differ.
                 shared_prefix_lens=tuple(n for n in (system_len - 2048, system_len - 512, system_len)
                                          if n >= 512) if system_len else (),

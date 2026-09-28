@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import time
@@ -74,8 +75,40 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             # Tolerate query strings, trailing slashes and client URLs with or without the /v1 prefix.
             return self.path.split("?", 1)[0].rstrip("/")
 
+        def _authorized(self) -> bool:
+            key = getattr(app, "api_key", None)
+            if key is None or hmac.compare_digest(self.headers.get("Authorization", "").encode(),
+                                                  ("Bearer " + key).encode()):
+                return True
+            self.close_connection = True
+            self._send_json({"error": {"message": "Unauthorized"}}, status=401)
+            return False
+
         def do_GET(self) -> None:
+            # Public shell has no data; all API and monitoring data require the configured key.
+            if self._route() == "/studio":
+                from tensorfold.server.studio_page import PAGE
+                body = PAGE.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if not self._authorized():
+                return
             route = self._route()
+            if route == "/studio/metrics":
+                studio = getattr(getattr(app, "scheduler", None), "studio", None)
+                if studio is None:
+                    self._send_json({"error": {"message": "Enable --conversation-slots"}}, status=404)
+                else:
+                    payload = studio.snapshot()
+                    payload.update(model=app.served_name, parallel=app.max_batch_size,
+                                   context=app.context_window, memory=_memory(False, admission=app.prompt_memory))
+                    self._send_json(payload)
+                return
             if route in {"", "/health"}:
                 self._send_json(
                     {
@@ -136,6 +169,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             return self._legacy_prompt_to_text(prompt)
 
         def do_POST(self) -> None:
+            if not self._authorized():
+                return
             route = self._route()
             is_chat_completion = route.endswith("/chat/completions")
             is_text_completion = route.endswith("/completions") and not is_chat_completion
@@ -169,6 +204,9 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "seed", "priority", "draft",
                                                         "thinking_budget", "ignore_eos", "stop")
                                    if k in body}
+                if getattr(getattr(app, "scheduler", None), "studio", None) is not None:
+                    from tensorfold.server.studio import conversation_key
+                    sampling_fields["conversation_id"] = conversation_key(messages, self.headers.get("X-Conversation-ID"))
                 if tools and tool_choice_requires_call(body.get("tool_choice")):
                     sampling_fields["tool_call_required"] = True     # the engine opens the answer with a call
                 template_kwargs = body.get("chat_template_kwargs") or {}

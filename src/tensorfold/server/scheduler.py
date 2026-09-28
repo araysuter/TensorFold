@@ -23,6 +23,7 @@ class ChatJob:
     prompt_ids: list[int]
     max_tokens: int
     temperature: float
+    conversation_id: str = ""
     history_len: int = 0
     # Snapshot system-and-tools blocks for reuse across sessions; history boundaries already include session-specific text.
     shared_prefix_lens: tuple[int, ...] = ()
@@ -116,6 +117,7 @@ class Scheduler:
                 self.disk_blocks = DiskBlocks(Path(snapshot_dir), model_id)
             if session_dir is not None:
                 self.session_blocks = DiskBlocks(Path(session_dir), model_id)
+        self.studio = None
         self.engine = engine
         self.lanes = int(lanes)
         self.eos_ids = eos_ids
@@ -183,6 +185,8 @@ class Scheduler:
     def submit(self, job: ChatJob) -> None:
         if self._stop.is_set():
             raise RuntimeError("the scheduler is closed")
+        if self.studio is not None and not job.job_id.startswith("warm-"):
+            self.studio.submit(job)
         self._queue.put(job)
 
     def cancel(self, cancellation: Cancellation) -> None:
@@ -255,7 +259,9 @@ class Scheduler:
                         continue
                 continue  # _admit starts it
             try:
+                round_started = time.perf_counter()
                 landed = self.engine.step()
+                round_seconds = time.perf_counter() - round_started
             except Exception as exc:  # noqa: BLE001 - one bad round must not kill the server
                 self.failed_rounds += 1
                 traceback.print_exception(exc)
@@ -288,6 +294,9 @@ class Scheduler:
                 if job is None:
                     continue
                 if tokens:
+                    if self.studio is not None:
+                        self.studio.update(job, state="generating", generated_tokens=len(job.stream.emitted),
+                                           decode_tps=len(tokens) / max(round_seconds, 1e-9), rate_at=time.time())
                     job.chunks.put(list(tokens))
                 if job.stream is not None and job.stream.finished:
                     del self._jobs[stream_id]
@@ -380,6 +389,8 @@ class Scheduler:
             started = time.perf_counter()
             if self.prompt_memory is not None and not self.prompt_memory.allow_load(found[0].stat().st_size):
                 return
+            if self.studio is not None and self._starting is not None:
+                self.studio.update(self._starting, state="restoring")
             loaded = load_snapshot(found[0], self.model_id)
             if loaded is None:
                 return
@@ -402,6 +413,9 @@ class Scheduler:
             if memory is not None:
                 memory.begin(len(job.prompt_ids), int(job.max_tokens), admit=self.checkpoints is None)
             self.engine.prefill_guard = PrefillGuard(job.cancellation, memory)
+            if self.studio is not None:
+                self.engine.prefill_guard.on_chunk = lambda n, seconds: self.studio.update(
+                    job, prompt_tps=n / max(seconds, 1e-9), rate_at=time.time())
             cache = None
             cached = 0
             last_prompt: list[int] | None = None
@@ -445,10 +459,14 @@ class Scheduler:
                 call_gate=job.call_gate,
             )
             job.stream = stream
+            if self.studio is not None:
+                self.studio.update(job, state="prefilling", cached_tokens=cached)
             self.engine.add_stream(stream, cache=cache, cached_tokens=cached, checkpoints_at=checkpoints_at)
             self._keep_checkpoints(job, shared_at)
             job.cancellation.check()
             job.prefilled_at = time.perf_counter()
+            if self.studio is not None:
+                self.studio.update(job, state="generating", prompt_tps=None)
             job.cached_tokens = int(stream.cached_tokens)      # 0 when a stored state was not at a chunk start
             if stream.emitted:
                 job.chunks.put(list(stream.emitted))
@@ -512,8 +530,22 @@ class Scheduler:
         self.completed += 1
         self._finish(job)
 
-    @staticmethod
-    def _finish(job: ChatJob) -> None:
+    def _refresh_studio(self) -> None:
+        if self.studio is None:
+            return
+        try:
+            entries = [] if self.checkpoints is None else list(self.checkpoints._entries)
+            blocks = [] if self.session_blocks is None else self.session_blocks.blocks()
+            self.studio.residency(entries, blocks)
+        except OSError:
+            pass  # monitoring must not fail a generation
+
+    def _finish(self, job: ChatJob) -> None:
+        if self.studio is not None:
+            self.studio.finish(job)
+            if threading.current_thread() is self._thread:
+                self._refresh_studio()
+            self.studio.save()
         job.finished_at = time.perf_counter()
         job.chunks.put(None)
         job.done.set()

@@ -44,20 +44,32 @@ def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
     if not names:
         loaded = load(str(model_dir))
         return loaded[0], loaded[1]
-    from mlx_lm.models.qwen3_5 import TextModel
+    from mlx_lm.models.qwen3_5 import TextModel, Model
 
     original = TextModel.sanitize
+    original_outer = Model.sanitize
+    swift = Path(model_dir).name == "82276731e47e1db4ac502f24c63cfaf886639be9"
+
+    def sanitize_text_only(self: Any, weights: dict[str, Any]) -> Any:
+        return original_outer(self, {k: v for k, v in weights.items() if not k.startswith("visual.")})
 
     def sanitize_without_mtp(self: Any, weights: dict[str, Any]) -> Any:
         kept = {k: v for k, v in weights.items() if not (k.startswith("mtp.") or ".mtp." in k)}
-        return original(self, kept)
+        kept = original(self, kept)
+        if swift:
+            from tensorfold.families.qwen3_5.swift import convert_norms
+            kept = convert_norms(kept)
+        return kept
 
+    if swift:
+        Model.sanitize = sanitize_text_only
     TextModel.sanitize = sanitize_without_mtp  # type: ignore[method-assign]
     try:
         loaded = load(str(model_dir))
         return loaded[0], loaded[1]
     finally:
-        TextModel.sanitize = original  # type: ignore[method-assign]
+        TextModel.sanitize = original
+        Model.sanitize = original_outer  # type: ignore[method-assign]
 
 
 def install_row_decoder(model: Any) -> bool:

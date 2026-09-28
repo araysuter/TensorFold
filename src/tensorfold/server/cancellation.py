@@ -49,14 +49,21 @@ def socket_cancellation(connection: socket.socket) -> Cancellation:
 class PrefillGuard:
     def __init__(self, cancellation: Cancellation, memory: Any = None):
         self.cancellation, self.memory = cancellation, memory
+        self.on_chunk = None
+        self._chunk_at = 0.0
 
     def before_chunk(self, cache: Any, tokens: int) -> None:
+        import time
         self.cancellation.check()
         if self.memory is not None:
             self.memory.before_chunk(cache, tokens)
         self.cancellation.check()
+        self._chunk_at = time.perf_counter()
 
     def after_chunk(self, cache: Any, tokens: int) -> None:
+        import time
+        if self.on_chunk is not None:
+            self.on_chunk(tokens, time.perf_counter() - self._chunk_at)
         self.cancellation.check()
         if self.memory is not None:
             self.memory.after_chunk(cache, tokens)

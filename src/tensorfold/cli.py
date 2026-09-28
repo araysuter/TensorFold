@@ -32,6 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("model", help="a Hugging Face repo id (downloaded on first use) or a model directory")
     endpoint = serve.add_argument_group("endpoint")
     endpoint.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0: every interface)")
+    endpoint.add_argument("--api-key-file", help="file containing the required Bearer key")
+    endpoint.add_argument("--conversation-slots", type=int, default=0, help="tracked conversations, 0 disables Studio monitoring")
     endpoint.add_argument("--port", type=int, default=8080)
     endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
@@ -395,6 +397,13 @@ def _parallel(value: Any) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
+    args._api_key = None
+    if args.api_key_file:
+        args._api_key = Path(args.api_key_file).expanduser().read_text().strip()
+        if not args._api_key or any(c.isspace() for c in args._api_key):
+            raise ValueError("API key file must contain one nonempty token")
+    if args.conversation_slots < 0:
+        raise ValueError("conversation slots cannot be negative")
     from tensorfold import families, hub
 
     if not args.no_update_check:
@@ -431,6 +440,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if needs_full_snapshot and check is not None:
         check(model_dir)                         # checks that need the complete index, such as an MTP head
     if backend == "cuda":
+        if args.api_key_file or args.conversation_slots:
+            raise ValueError("Studio authentication and conversation tracking currently require MLX")
         return _serve_cuda(args, family, model_dir, context)
     for key, value in getattr(family.package, "MLX_ENV", {}).items():
         os.environ.setdefault(key, value)       # before MLX starts: it reads them once
@@ -556,6 +567,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         checkpoint_slots=0 if budget <= 0 else args.checkpoint_slots,
         checkpoint_budget_bytes=budget if budget > 0 else None,
         spill_bytes=int(float(args.spill_gib) * 1024**3),
+        conversation_slots=args.conversation_slots,
         memory_budget_bytes=memory_limit,
         fit_context=args.context is None,
         use_proposer=not args.no_drafts,
@@ -569,6 +581,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     hook = getattr(family.package, "setup", None)
     if hook is not None:
         hook(app, model, **options)
+    app.api_key = getattr(args, "_api_key", None)
     server = Server((args.host, int(args.port)), make_handler(app))  # type: ignore[arg-type]
     shown = "greedy" if float(sampling.get("temperature", 0.0) or 0.0) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
