@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import time
+import threading
 import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +22,42 @@ from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
+
+
+class _StreamWriter:
+    """Serialize SSE writes and keep silent queue/prefill periods alive at proxies."""
+
+    def __init__(self, output: Any, interval: float = 15.0):
+        self.output = output
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.error: OSError | None = None
+        self.thread = threading.Thread(target=self._heartbeat, daemon=True)
+
+    def write(self, data: bytes) -> None:
+        with self.lock:
+            if self.error is not None:
+                raise self.error
+            self.output.write(data)
+            self.output.flush()
+
+    def _heartbeat(self) -> None:
+        while not self.stopped.wait(self.interval):
+            try:
+                self.write(b": keepalive\n\n")
+            except OSError as exc:
+                self.error = exc
+                self.stopped.set()
+
+    def __enter__(self) -> "_StreamWriter":
+        self.write(b": connected\n\n")
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.stopped.set()
+        self.thread.join(timeout=1)
 
 
 def _memory(reset_peak: bool, *, admission: Any = None) -> dict[str, int]:
@@ -314,117 +351,116 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 if stream:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
-                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Cache-Control", "no-cache, no-transform")
+                    self.send_header("X-Accel-Buffering", "no")
                     self.send_header("Connection", "close")
                     self.end_headers()
 
-                    def emit(payload: dict[str, Any]) -> None:
-                        self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
-                        self.wfile.flush()
+                    with _StreamWriter(self.wfile) as writer:
+                        def emit(payload: dict[str, Any]) -> None:
+                            writer.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
 
-                    def finish_stream(
-                        finish_reason: str | None,
-                        *,
-                        error: BaseException | None = None,
-                        extras: dict[str, Any] | None = None,
-                    ) -> None:
-                        if error is not None:
-                            payload = {"error": {"message": str(error), "type": "server_error"}}
-                        else:
-                            payload = stream_chunk("", finish_reason or "length")
-                            if extras:
-                                payload.update(extras)
-                        emit(payload)
-                        self.wfile.write(b"data: [DONE]\n\n")
-                        self.wfile.flush()
+                        def finish_stream(
+                            finish_reason: str | None,
+                            *,
+                            error: BaseException | None = None,
+                            extras: dict[str, Any] | None = None,
+                        ) -> None:
+                            if error is not None:
+                                payload = {"error": {"message": str(error), "type": "server_error"}}
+                            else:
+                                payload = stream_chunk("", finish_reason or "length")
+                                if extras:
+                                    payload.update(extras)
+                            emit(payload)
+                            writer.write(b"data: [DONE]\n\n")
 
-                    def on_delta(delta: str | dict[str, Any]) -> None:
-                        # Text completions carry content strings only, excluding reasoning deltas as non-streamed replies do.
-                        if is_text_completion and not isinstance(delta, str):
-                            return
-                        emit(stream_chunk(delta))
+                        def on_delta(delta: str | dict[str, Any]) -> None:
+                            # Text completions carry content strings only, excluding reasoning deltas as non-streamed replies do.
+                            if is_text_completion and not isinstance(delta, str):
+                                return
+                            emit(stream_chunk(delta))
 
-                    try:
-                        if tools:
-                            streamed = [False]
+                        try:
+                            if tools:
+                                streamed = [False]
 
-                            def on_prose(delta: str | dict[str, Any]) -> None:
-                                delta = tool_policy.delta(delta)
-                                if not delta:
-                                    return
-                                if not streamed[0]:
-                                    streamed[0] = True
+                                def on_prose(delta: str | dict[str, Any]) -> None:
+                                    delta = tool_policy.delta(delta)
+                                    if not delta:
+                                        return
+                                    if not streamed[0]:
+                                        streamed[0] = True
+                                        emit(stream_chunk({"role": "assistant"}))
+                                    emit(stream_chunk(delta))
+
+                                extra = (
+                                    {"on_delta": on_prose}
+                                    if getattr(app, "streams_prose_with_tools", False) else {}
+                                )
+                                reply = attach_tool_calls(
+                                    app.chat(
+                                        messages,
+                                        max_tokens=max_tokens,
+                                        temperature=temperature,
+                                        tools=tools,
+                                        **extra,
+                                        **sampling_kw,
+                                        **raw_kw,
+                                    )
+                                )
+                                tail = tool_policy.flush()
+                                if tail:
+                                    if not streamed[0]:
+                                        streamed[0] = True
+                                        emit(stream_chunk({"role": "assistant"}))
+                                    emit(stream_chunk(tail))
+                                tool_calls = reply.get("tool_calls")
+                                if tool_calls and not reply.get("tool_calls_streamed"):
+                                    # (calls the app already streamed as they were written are not sent twice)
                                     emit(stream_chunk({"role": "assistant"}))
-                                emit(stream_chunk(delta))
-
-                            extra = (
-                                {"on_delta": on_prose}
-                                if getattr(app, "streams_prose_with_tools", False) else {}
-                            )
-                            reply = attach_tool_calls(
-                                app.chat(
+                                    for delta in stream_tool_call_deltas(tool_calls):
+                                        emit(stream_chunk(delta))
+                                elif reply.get("content") and not streamed[0]:
+                                    emit(stream_chunk(str(reply["content"])))
+                            else:
+                                if is_chat_completion:
+                                    emit(stream_chunk({"role": "assistant"}))
+                                reply = app.chat(
                                     messages,
                                     max_tokens=max_tokens,
                                     temperature=temperature,
-                                    tools=tools,
-                                    **extra,
+                                    on_delta=on_delta,
                                     **sampling_kw,
                                     **raw_kw,
                                 )
+                        except (BrokenPipeError, ConnectionResetError):
+                            raise
+                        except RequestCancelled:
+                            return
+                        except RequestError as exc:
+                            emit({"error": {"message": str(exc), "type": "invalid_request_error"}})
+                            writer.write(b"data: [DONE]\n\n")
+                            return
+                        except Exception as exc:
+                            print(
+                                f"[tensorfold] stream error: {type(exc).__name__}: {exc}",
+                                flush=True,
                             )
-                            tail = tool_policy.flush()
-                            if tail:
-                                if not streamed[0]:
-                                    streamed[0] = True
-                                    emit(stream_chunk({"role": "assistant"}))
-                                emit(stream_chunk(tail))
-                            tool_calls = reply.get("tool_calls")
-                            if tool_calls and not reply.get("tool_calls_streamed"):
-                                # (calls the app already streamed as they were written are not sent twice)
-                                emit(stream_chunk({"role": "assistant"}))
-                                for delta in stream_tool_call_deltas(tool_calls):
-                                    emit(stream_chunk(delta))
-                            elif reply.get("content") and not streamed[0]:
-                                emit(stream_chunk(str(reply["content"])))
-                        else:
-                            if is_chat_completion:
-                                emit(stream_chunk({"role": "assistant"}))
-                            reply = app.chat(
-                                messages,
-                                max_tokens=max_tokens,
-                                temperature=temperature,
-                                on_delta=on_delta,
-                                **sampling_kw,
-                                **raw_kw,
-                            )
-                    except (BrokenPipeError, ConnectionResetError):
-                        raise
-                    except RequestCancelled:
+                            traceback.print_exc()
+                            try:
+                                finish_stream(None, error=exc)
+                            except BrokenPipeError:
+                                pass
+                            return
+                        remember_reply(reply)
+                        extras = response_extras(reply)
+                        if "prompt_tokens" in reply and "completion_tokens" in reply:
+                            # Clients that time the stream count tokens from here.
+                            extras["usage"] = usage_from_reply(
+                                {"cached_tokens": 0, **reply})
+                        finish_stream(reply.get("finish_reason") or "length", extras=extras)
                         return
-                    except RequestError as exc:
-                        emit({"error": {"message": str(exc), "type": "invalid_request_error"}})
-                        self.wfile.write(b"data: [DONE]\n\n")
-                        self.wfile.flush()
-                        return
-                    except Exception as exc:
-                        print(
-                            f"[tensorfold] stream error: {type(exc).__name__}: {exc}",
-                            flush=True,
-                        )
-                        traceback.print_exc()
-                        try:
-                            finish_stream(None, error=exc)
-                        except BrokenPipeError:
-                            pass
-                        return
-                    remember_reply(reply)
-                    extras = response_extras(reply)
-                    if "prompt_tokens" in reply and "completion_tokens" in reply:
-                        # Clients that time the stream count tokens from here.
-                        extras["usage"] = usage_from_reply(
-                            {"cached_tokens": 0, **reply})
-                    finish_stream(reply.get("finish_reason") or "length", extras=extras)
-                    return
 
                 reply = attach_tool_calls(
                     app.chat(

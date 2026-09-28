@@ -107,3 +107,13 @@ Inspect `cached_tokens`, restored prefix length and SSD/RAM transitions. Compare
 continuation with an uninterrupted run of the same token history, temperature and seed.
 Test two active long conversations before increasing context. Monitor swap and memory;
 short-prompt throughput does not establish long-context or concurrent performance.
+
+### Long requests through Cloudflare
+
+Use `stream: true` for long-running inference through the public API. Streaming
+responses send an immediate SSE comment and a keepalive comment every 15 seconds,
+including while queued or prefilling. These comments contain no generated tokens
+and standard SSE clients ignore them. Final usage and TensorFold timing metrics
+remain in the final data event. Non-streaming requests still wait for the whole
+response and can exceed the proxy read timeout; increasing a client's timeout
+alone does not change that limit.

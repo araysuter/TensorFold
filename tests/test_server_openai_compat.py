@@ -295,3 +295,44 @@ def test_chat_completions_streams_tool_call_deltas() -> None:
     assert '"finish_reason": "tool_calls"' in body
     assert "<tool_call>" not in body
     assert "data: [DONE]" in body
+
+
+def test_stream_sends_heartbeats_before_slow_prefill_finishes(monkeypatch) -> None:
+    import tensorfold.server.http as server_http
+
+    writer_class = server_http._StreamWriter
+    writers = []
+
+    def fast_writer(output):
+        writer = writer_class(output, interval=0.02)
+        writers.append(writer)
+        return writer
+
+    monkeypatch.setattr(server_http, '_StreamWriter', fast_writer)
+    release = threading.Event()
+
+    class SlowApp(FakeApp):
+        def chat(self, *args, **kwargs):
+            assert release.wait(3)
+            return super().chat(*args, **kwargs)
+
+    server = serve_fake(SlowApp())
+    conn = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+    try:
+        conn.request('POST', '/v1/completions', json.dumps(
+            {'model': 'fake-model', 'prompt': 'Hi', 'stream': True, 'max_tokens': 8}),
+            {'Content-Type': 'application/json'})
+        response = conn.getresponse()
+        assert response.readline() == b': connected\n'
+        assert response.readline() == b'\n'
+        assert response.readline() == b': keepalive\n'
+        release.set()
+        body = response.read().decode()
+        assert 'data: [DONE]' in body
+        assert '"completion_tokens": 2' in body
+    finally:
+        release.set()
+        conn.close()
+        server.shutdown()
+        server.server_close()
+    assert all(not writer.thread.is_alive() for writer in writers)
