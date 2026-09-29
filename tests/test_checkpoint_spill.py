@@ -107,3 +107,36 @@ def test_the_spill_directory_keeps_the_newest_within_its_byte_limit(tmp_path):
                        limit_bytes=int(2.5 * one))
     assert len(list(tmp_path.glob("*.safetensors"))) == 2
     assert not files[0].exists() and not files[1].exists()
+
+
+def test_cleanup_only_removes_identifiable_model_caches(tmp_path):
+    from tensorfold.engine.prefix_snapshots import save_snapshot
+    from tensorfold.server.checkpoints import clear_snapshots
+
+    old = save_snapshot(tmp_path, '/models/swift|old-runtime', [1], [Layer(1)])
+    other = save_snapshot(tmp_path, '/models/other|runtime', [1], [Layer(1)])
+    unknown = tmp_path / 'unrelated.txt'
+    unknown.write_text('keep')
+    assert clear_snapshots(tmp_path, '/models/swift|new-runtime') == 1
+    assert not old.exists()
+    assert other.exists() and unknown.exists()
+    assert clear_snapshots(tmp_path, '/models/swift|new-runtime') == 0
+
+
+def test_shutdown_cleanup_replaces_save_and_runs_on_scheduler_thread():
+    from tensorfold.server.app import ChatApp
+    from types import SimpleNamespace
+
+    app = object.__new__(ChatApp)
+    calls = []
+    app.clear_cache_on_exit = True
+    app.clear_disk_cache = lambda: calls.append('clear')
+    app.save_sessions = lambda: calls.append('save')
+    scheduler = SimpleNamespace(on_stop=None)
+    scheduler.stop = lambda **kwargs: scheduler.on_stop()
+    app.scheduler = scheduler
+    app.close()
+    assert calls == ['clear']
+    app.clear_cache_on_exit = False
+    app.close()
+    assert calls == ['clear', 'save']

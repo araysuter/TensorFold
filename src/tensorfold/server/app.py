@@ -81,6 +81,7 @@ class ChatApp(RequestOptions):
         checkpoint_slots: int | None = None,
         checkpoint_budget_bytes: int | None = 16 * 1024**3,
         spill_bytes: int = 0,
+        clear_cache_on_exit: bool = False,
         conversation_slots: int = 0,
         memory_budget_bytes: int | None = None,
         memory_runtime: Any = None,
@@ -95,6 +96,7 @@ class ChatApp(RequestOptions):
         # three candidate entries per conversation (history boundary, stable prefix, reply end)
         if checkpoint_slots is None:
             checkpoint_slots = max(3 * int(lanes), 8)
+        self.clear_cache_on_exit = clear_cache_on_exit
         self._model = model
         self.served_name = served_name
         self.model_ids = served_model_ids(served_name, model_aliases)
@@ -589,8 +591,19 @@ class ChatApp(RequestOptions):
                 f"rows={sum(r.width for r in stats) / n:.1f} ")
 
     def close(self) -> None:
-        self.scheduler.on_stop = self.save_sessions    # saved by the scheduler thread, which owns the arrays
+        # Run only after the scheduler stops touching snapshot files.
+        self.scheduler.on_stop = self.clear_disk_cache if self.clear_cache_on_exit else self.save_sessions
         self.scheduler.stop(timeout=120.0)
+
+    def clear_disk_cache(self) -> int:
+        """Remove this model's inference snapshots, never its downloaded weights."""
+        from .checkpoints import clear_snapshots
+
+        removed = 0
+        for directory in {self.scheduler.snapshot_dir, self.scheduler.session_dir} - {None}:
+            removed += clear_snapshots(Path(directory), self.scheduler.model_id)
+        print(f"[tensorfold] removed {removed} inference cache files on shutdown", flush=True)
+        return removed
 
     def save_sessions(self) -> int:
         """At shutdown, the most recent conversations' checkpoints to disk (read back on demand)."""

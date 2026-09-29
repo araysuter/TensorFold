@@ -77,6 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     speed.add_argument("--spill-gib", type=float, default=0.0,
                        help="write evicted conversation prefixes to disk, up to this many GiB, and read them back on "
                             "demand instead of prefilling again (0: off; needs --snapshot-dir)")
+    speed.add_argument("--clear-cache-on-exit", action="store_true",
+                       help="delete this model's prefix and session snapshots on graceful shutdown instead of saving them")
     speed.add_argument("--snapshot-dir", default=str(Path.home() / ".cache" / "tensorfold" / "prefix-snapshots"),
                        help="where system-block and conversation snapshots are kept ('none': in memory only)")
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
@@ -567,6 +569,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         checkpoint_slots=0 if budget <= 0 else args.checkpoint_slots,
         checkpoint_budget_bytes=budget if budget > 0 else None,
         spill_bytes=int(float(args.spill_gib) * 1024**3),
+        clear_cache_on_exit=args.clear_cache_on_exit,
         conversation_slots=args.conversation_slots,
         memory_budget_bytes=memory_limit,
         fit_context=args.context is None,

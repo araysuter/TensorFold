@@ -257,3 +257,29 @@ class CheckpointStore:
             self.evictions += 1
         self._evicted([gone])
         return True
+
+
+def clear_snapshots(directory: Path, model_id: str) -> int:
+    """Delete identifiable snapshots for this model, including older runtime versions.
+
+    Leave unknown files, other models and unreadable partial writes alone. Only the
+    configured cache directories are inspected; the Hugging Face cache is untouched.
+    """
+    from tensorfold.engine.prefix_snapshots import read_metadata
+
+    if not model_id:
+        return 0
+    removed = 0
+    for path in directory.glob("*.safetensors"):
+        if path.is_symlink():
+            continue
+        try:
+            metadata = read_metadata(path)
+            if (str(metadata.get("model", "")).split("|")[0] != model_id.split("|")[0]
+                    or "tokens" not in metadata or "layers" not in metadata):
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"[tensorfold] cache cleanup skipped {path.name}: {exc}", flush=True)
+    return removed
