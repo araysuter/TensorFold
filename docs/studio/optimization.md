@@ -41,12 +41,27 @@ positions, draft search and target verification rules. This aims to reduce copyi
 and temporary allocations during both prefill and decode.
 
 No tests, model runs or benchmarks were executed on the development machine.
-These are performance candidates; speed and full-model parity remain unverified.
+Whole-model throughput and representative output parity still need the full Studio
+benchmark and workload checks below.
 
 ## Studio validation
 
-Use the Studio's normal environment and launch commands. The following are commands
-for the Studio, not checks already performed. Focused regressions cover partial GPU
+On September 29, 2026, the Studio (M5 Max, 64 GiB, macOS 27.0, MLX 0.32.2,
+mlx-lm 0.31.3) passed all **261** focused tests in **57.39 seconds**, including all
+12 tiled-prefill checks. The startup comparison enabled the kernel. The initial
+compilation failures were fixed by composing MLX's weight loader (Metal disallows
+class inheritance) and passing the dimension buffer's values into the helper
+(its original constant-address-space references cannot bind a device buffer).
+
+Targeted GPU probes compared the previous untile-plus-native matmul with the direct
+tiled reader at 129, 256, 512 and 1,024 prompt rows. Both large Swift MLP projections
+(17,408 by 5,120 and its reverse) showed about **6–30% faster kernel execution**;
+this includes removal of the weight conversion and is not a whole-model speedup.
+The probes checked exact native-MLX output bits before timing. Wider 128-row or
+128-column TensorOps tiles were generally slower, so the 64-by-64 layout is retained.
+Small projections showed smaller and more variable differences.
+
+Use the Studio's normal environment and launch commands. Focused regressions cover partial GPU
 tiles, native-MLX bit parity, avoiding the weight conversion, selected DFlash rows and
 positions, authenticated Responses requests, and monitoring through chunked prefill:
 

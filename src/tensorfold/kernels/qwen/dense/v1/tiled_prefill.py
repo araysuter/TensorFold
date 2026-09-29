@@ -23,22 +23,24 @@ _kernel: Any = None
 _LOADER = r"""
 template <int NT, typename T, short BROWS, short BCOLS, short dst_ld,
           short reduction_dim, short tgp_size, short group_size, short bits>
-struct TFTiledBlockLoader : QuantizedBlockLoader<T, BROWS, BCOLS, dst_ld,
-                                                reduction_dim, tgp_size, group_size, bits> {
+struct TFTiledBlockLoader {
   using Base = QuantizedBlockLoader<T, BROWS, BCOLS, dst_ld, reduction_dim,
                                     tgp_size, group_size, bits>;
+  Base reader;
   static_assert(group_size == 64 && BCOLS == 64 && bits == 4 && reduction_dim == 1);
   static_assert(BROWS == 64 && (NT == 32 || NT == 64));
   TFTiledBlockLoader(const device uint8_t* w, const device T* s, const device T* b,
                     int K, threadgroup T* dst, ushort sg, ushort lane) thread
-      : Base(w, s, b, K, dst, sg, lane) {
+      : reader(w, s, b, K, dst, sg, lane) {
     // tile_weight stores [N/NT, K/64, NT, 32 packed bytes]. Scales stay [N, K/64].
-    this->src = w + (int64_t(this->bi / NT) * (K / 64) * NT + this->bi % NT) * 32 + this->bj;
+    reader.src = w + (int64_t(reader.bi / NT) * (K / 64) * NT + reader.bi % NT) * 32 + reader.bj;
   }
+  void load_unsafe() const thread { reader.load_unsafe(); }
+  void load_safe(short2 dims) const thread { reader.load_safe(dims); }
   void next() thread {
-    this->src += NT * 32;
-    this->scales++;
-    this->biases++;
+    reader.src += NT * 32;
+    reader.scales++;
+    reader.biases++;
   }
 };
 """
@@ -68,7 +70,11 @@ def _helper(source: str) -> str:
         raise ValueError("unrecognized MLX prompt weight loader")
     return (helper.replace("template <", "template <int NT,", 1)
             .replace("qmm_t_nax_tgp_impl", "tf_tiled_qmm_impl", 1)
-            .replace("using loader_w_t = QuantizedBlockLoader<", "using loader_w_t = TFTiledBlockLoader<NT,", 1))
+            .replace("using loader_w_t = QuantizedBlockLoader<", "using loader_w_t = TFTiledBlockLoader<NT,", 1)
+            # metal_kernel supplies dimensions in a device buffer; pass their values into the native helper.
+            .replace("const constant int& K", "const int K", 1)
+            .replace("const constant int& N", "const int N", 1)
+            .replace("const constant int& M", "const int M", 1))
 
 
 def _build() -> Any:
