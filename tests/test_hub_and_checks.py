@@ -166,24 +166,60 @@ def write_checkpoint(folder: Path, bits: int, group: int, mtp: bool) -> Path:
     return folder
 
 
-def test_flash_next_refuses_other_quantizations_and_notes_a_missing_mtp_head(tmp_path, capsys):
+def test_flash_next_reads_affine_widths_and_notes_a_missing_mtp_head(tmp_path, capsys):
     from tensorfold.families import qwen4_exp
 
     good = write_checkpoint(tmp_path / "good", 4, 32, mtp=True)
     qwen4_exp.check(good)
     assert qwen4_exp.has_mtp(good)
-    with pytest.raises(ValueError, match="Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP"):
-        qwen4_exp.check(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))
+    qwen4_exp.check(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))          # every MLX affine width reads
     plain = write_checkpoint(tmp_path / "plain", 4, 32, mtp=False)
     qwen4_exp.check(plain)
     assert not qwen4_exp.has_mtp(plain) and "no MTP head" in capsys.readouterr().out
 
 
+def test_flash_next_reads_the_nvfp4_checkpoint_and_refuses_other_fp4_blocks(tmp_path):
+    from tensorfold.families import qwen4_exp
+
+    # a ModelOpt NVFP4 export (RadixArk's): the CUDA engine reads its experts in blocks of 16
+    nvfp4 = {"model_type": "qwen4_exp",
+             "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4",
+                                     "config_groups": {"group_0": {"weights": {"group_size": 16}}}}}
+    (tmp_path / "config.json").write_text(json.dumps(nvfp4))
+    qwen4_exp.check(tmp_path)
+    other_group = json.loads(json.dumps(nvfp4))
+    other_group["quantization_config"]["config_groups"]["group_0"]["weights"]["group_size"] = 32
+    other_algo = json.loads(json.dumps(nvfp4))
+    other_algo["quantization_config"]["quant_algo"] = "MXFP4"
+    # local-inference-lab's export: MIXED_PRECISION, MXFP8 DeltaNet / attention / shared experts, NVFP4 experts
+    mixed = {"model_type": "qwen4_exp",
+             "quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION",
+                                     "quantized_layers": {"model.language_model.layers.0.linear_attn.out_proj":
+                                                          {"quant_algo": "MXFP8", "group_size": 32},
+                                                          "model.language_model.layers.0.mlp.experts":
+                                                          {"quant_algo": "NVFP4", "group_size": 16},
+                                                          "mtp.layers.0.mlp.experts":
+                                                          {"quant_algo": "W4A16_NVFP4", "group_size": 16}},
+                                     "config_groups": {"mx": {"weights": {"num_bits": 8, "group_size": 32}},
+                                                       "fp4": {"weights": {"num_bits": 4, "group_size": 16}}}}}
+    (tmp_path / "config.json").write_text(json.dumps(mixed))
+    qwen4_exp.check(tmp_path)
+    per_tensor = json.loads(json.dumps(mixed))
+    per_tensor["quantization_config"]["quantized_layers"]["model.language_model.layers.0.linear_attn.out_proj"] = {
+        "quant_algo": "FP8"}
+    for other in (other_group, other_algo, per_tensor):
+        (tmp_path / "config.json").write_text(json.dumps(other))
+        with pytest.raises(ValueError, match="blocks of 16"):
+            qwen4_exp.check(tmp_path)
+
+
 def test_models_lists_the_tested_checkpoints(capsys):
     assert main(["models"]) == 0
     out = capsys.readouterr().out
-    for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",
-                 "Vontra/Qwen3.8-27B-MLX-4bit", "z-lab/Qwen3.8-27B-DFlash2", "mlx-community/gemma-4-26b-a4b-it-4bit"):
+    for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "local-inference-lab/Qwen3.8-Flash-Next-NVFP4",
+                 "RadixArk/Qwen3.8-Flash-Next-NVFP4",
+                 "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Vontra/Qwen3.8-27B-MLX-4bit",
+                 "z-lab/Qwen3.8-27B-DFlash2", "mlx-community/gemma-4-26b-a4b-it-4bit"):
         assert repo in out
     for folder in ("qwen/dense/v1", "qwen/flash_next/v1", "nemotron/lightning/v1", "gemma/v1"):
         assert f"kernels  {folder}" in out
@@ -210,7 +246,7 @@ def test_info_reads_a_local_config(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Qwen3.8 Flash Next" in out
     assert "kernels      qwen/flash_next/v1" in out
-    assert main(["info", str(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))]) == 1
+    assert main(["info", str(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))]) == 0
 
 
 def test_serve_finishes_a_config_only_cache_before_loading(tmp_path, monkeypatch, capfd):

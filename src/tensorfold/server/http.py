@@ -12,13 +12,16 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from tensorfold.engine import grammar
+from tensorfold.server import responses
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
-from tensorfold.server.errors import RequestError
-from tensorfold.server.request_options import parse_numbers
+from tensorfold.server.errors import CapacityError, RequestError
+from tensorfold.server.request_options import parse_numbers, thinking_fields
 from tensorfold.server.messages import normalize_messages, validate_modalities
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
+from tensorfold.server.stacks import Rearming
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
@@ -82,6 +85,18 @@ class Server(ThreadingHTTPServer):
     request_queue_size = 128
 
 
+def redact_images(value: Any) -> Any:
+    """A request body for the request log: every image part's URL or data replaced, the rest kept."""
+
+    if isinstance(value, list):
+        return [redact_images(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("type") == "image_url":
+        return {**value, "image_url": {"url": "<redacted>"}}
+    return {key: redact_images(item) for key, item in value.items()}
+
+
 def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list[str]:
     """Return the OpenAI model ids this endpoint advertises."""
 
@@ -94,7 +109,7 @@ def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list
 
 
 def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(Rearming):              # USR1's stack dump armed again after each request
         protocol_version = "HTTP/1.1"
 
         def log_message(self, format: str, *args: Any) -> None:
@@ -146,6 +161,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                                    context=app.context_window, memory=_memory(False, admission=app.prompt_memory))
                     self._send_json(payload)
                 return
+            if responses.route(route):
+                return responses.get(self, app, responses.route(route))
             if route in {"", "/health"}:
                 self._send_json(
                     {
@@ -205,10 +222,17 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return list(prompt)
             return self._legacy_prompt_to_text(prompt)
 
+        def do_DELETE(self) -> None:
+            if not self._authorized():
+                return
+            responses.delete(self, app, responses.route(self._route()))
+
         def do_POST(self) -> None:
             if not self._authorized():
                 return
             route = self._route()
+            if responses.route(route) == "":         # a Response: this handler's chat completion, translated
+                return responses.post(self, app)
             is_chat_completion = route.endswith("/chat/completions")
             is_text_completion = route.endswith("/completions") and not is_chat_completion
             if not is_chat_completion and not is_text_completion:
@@ -217,17 +241,19 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
 
             try:
                 length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= 32 * 1024**2:
+                    raise RequestError("request body exceeds the 32 MiB limit")
                 body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
                 validate_modalities(body)
                 if _REQUEST_LOG and body.get("priority") != "background":   # batch jobs are not client traffic
                     with open(_REQUEST_LOG, "a") as handle:
-                        handle.write(json.dumps(body) + "\n")
+                        handle.write(json.dumps(redact_images(body)) + "\n")
                 raw_kw: dict[str, Any] = {}
                 if is_chat_completion:
-                    messages = normalize_messages(body.get("messages"))
+                    messages = normalize_messages(body.get("messages"), allow_images=getattr(app, "vision", None) is not None)
                     tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
                 elif isinstance(body.get("messages"), list) and body["messages"]:
-                    messages, tools = normalize_messages(body["messages"]), []    # a completion sent as a chat
+                    messages, tools = normalize_messages(body["messages"], allow_images=getattr(app, "vision", None) is not None), []
                 elif getattr(app, "accepts_raw_prompt", False):
                     # a text completion reads its prompt raw, as vLLM and mlx_lm do: no chat template, no think block
                     messages, tools = [], []
@@ -238,29 +264,20 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 max_tokens = body.get("max_tokens") or body.get("max_completion_tokens")
                 temperature = float(body.get("temperature") or 0.0)
                 # Preserve raw sampling and scheduling options; an absent temperature differs from temperature zero.
-                sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "seed", "priority", "draft",
-                                                        "thinking_budget", "ignore_eos", "stop")
+                sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "min_p", "seed", "priority",
+                                                        "draft", "thinking_budget", "ignore_eos", "stop",
+                                                        *grammar.FIELDS)
                                    if k in body}
                 if getattr(getattr(app, "scheduler", None), "studio", None) is not None:
                     from tensorfold.server.studio import conversation_key, conversation_replies
                     sampling_fields["conversation_id"] = conversation_key(messages, self.headers.get("X-Conversation-ID"))
                     sampling_fields["conversation_replies"] = conversation_replies(messages)
+                problem = grammar.refusal(body, app)        # compiled before a stream's headers: a bad grammar is a 400
+                if problem:
+                    raise RequestError(problem)
                 if tools and tool_choice_requires_call(body.get("tool_choice")):
                     sampling_fields["tool_call_required"] = True     # the engine opens the answer with a call
-                template_kwargs = body.get("chat_template_kwargs") or {}
-                effort = body.get("reasoning_effort")
-                if effort is None and isinstance(template_kwargs, dict):
-                    effort = template_kwargs.get("reasoning_effort")    # where vLLM's clients put it
-                if effort is not None:
-                    # null means the server's default; OpenAI's "minimal" is the template's "low"
-                    if effort not in ("none", "minimal", "low", "medium", "high", "xhigh"):
-                        raise ValueError("reasoning_effort must be none, minimal, low, medium, high or xhigh")
-                    sampling_fields["reasoning_effort"] = {"high": "xhigh", "minimal": "low"}.get(effort, effort)
-                    sampling_fields["enable_thinking"] = effort != "none"
-                if isinstance(template_kwargs, dict) and "enable_thinking" in template_kwargs:
-                    sampling_fields["enable_thinking"] = bool(template_kwargs["enable_thinking"])
-                    if sampling_fields["enable_thinking"] and sampling_fields.get("reasoning_effort") == "none":
-                        sampling_fields.pop("reasoning_effort")
+                sampling_fields.update(thinking_fields(body, getattr(app, "effort_levels", frozenset())))
                 sampling_kw = ({"sampling": sampling_fields}
                                if getattr(app, "accepts_sampling", False) else {})
                 if getattr(app, "accepts_cancellation", False):
@@ -268,7 +285,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 stream = bool(body.get("stream", False))
                 tool_policy = ToolCallPolicy(body)
             except RequestError as exc:
-                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}},
+                                status=503 if isinstance(exc, CapacityError) else 400)
                 return
             except Exception as exc:
                 self._send_json({"error": {"message": str(exc)}}, status=400)
@@ -287,6 +305,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     "completion_tokens": reply["completion_tokens"],
                     "total_tokens": reply["prompt_tokens"] + reply["completion_tokens"],
                     "prompt_tokens_details": {"cached_tokens": reply["cached_tokens"]},
+                    "completion_tokens_details": {"reasoning_tokens": reply.get("reasoning_tokens", 0)},
                 }
 
             def response_extras(reply: dict[str, Any]) -> dict[str, Any]:

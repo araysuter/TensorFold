@@ -6,7 +6,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from tensorfold.kernels.qwen.flash_next.v1.base import kernel, padded
+from tensorfold.kernels.qwen.flash_next.v1.base import AFFINE_HEADER, QDOT_HEADER, edited, kernel, padded
 
 _PLE_LOOKUP = r"""
   // Thread (d, h, r): dim d of head h of row r. Row id IDS[r][h] lies in one of 8 table groups (row starts GSTART);
@@ -81,6 +81,106 @@ _RMS_ROWS = r"""
 """
 
 
+_PLE_GATE = r"""
+  // Threadgroup (s, r), 256 threads: stream s of row r. keys = norm(key projection), queries = norm(streams), each
+  // (1 + w) RMSNorm in fp32 to bf16; gate = sum of bf16(key * query) (fp32, bf16), / bf16(sqrt D), signed sqrt,
+  // sigmoid (bf16 each); gated = bf16(sigmoid * value); normed = the conv norm of gated. Sums: each thread's dims in
+  // order, simd_sum, the simdgroups in order.
+  const uint t = thread_position_in_threadgroup.x;
+  const uint lane = thread_index_in_simdgroup, sg = simdgroup_index_in_threadgroup;
+  const int s = int(threadgroup_position_in_grid.x), r = int(threadgroup_position_in_grid.y);
+  constexpr int W = S * D, PER = D / 256;
+  threadgroup float red[3][8];
+  float k[PER], q[PER], v[PER];
+  float sk = 0.0f, sq = 0.0f;
+  for (int i = 0; i < PER; i++) {
+    const int d = int(t) + 256 * i;
+    k[i] = float(KV[size_t(r) * (W + D) + s * D + d]);
+    q[i] = float(H[size_t(r) * W + s * D + d]);
+    v[i] = float(KV[size_t(r) * (W + D) + W + d]);
+    sk = fma(k[i], k[i], sk);
+    sq = fma(q[i], q[i], sq);
+  }
+  sk = simd_sum(sk); sq = simd_sum(sq);
+  if (lane == 0) { red[0][sg] = sk; red[1][sg] = sq; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float tk = 0.0f, tq = 0.0f;
+  for (int j = 0; j < 8; j++) { tk += red[0][j]; tq += red[1][j]; }
+  const float rk = metal::rsqrt(tk / float(D) + eps[0]), rq = metal::rsqrt(tq / float(D) + eps[0]);
+  float dot = 0.0f;
+  for (int i = 0; i < PER; i++) {
+    const int e = s * D + int(t) + 256 * i;
+    const float kn = float(bfloat((k[i] * rk) * KS[e])), qn = float(bfloat((q[i] * rq) * QS[e]));
+    dot += float(bfloat(kn * qn));
+  }
+  dot = simd_sum(dot);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (lane == 0) red[2][sg] = dot;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float gd = 0.0f;
+  for (int j = 0; j < 8; j++) gd += red[2][j];
+  const float g1 = float(bfloat(float(bfloat(gd)) / float(bfloat(metal::precise::sqrt(float(D))))));
+  const float root = float(bfloat(metal::precise::sqrt(metal::max(metal::abs(g1), 1e-6f))));
+  const float g2 = float(bfloat(metal::sign(g1) * root));
+  const float sig = bsig(g2);
+  float sc = 0.0f;
+  for (int i = 0; i < PER; i++) {
+    v[i] = float(bfloat(sig * v[i]));
+    sc = fma(v[i], v[i], sc);
+  }
+  sc = simd_sum(sc);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (lane == 0) red[0][sg] = sc;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float tc = 0.0f;
+  for (int j = 0; j < 8; j++) tc += red[0][j];
+  const float rc = metal::rsqrt(tc / float(D) + eps[0]);
+  for (int i = 0; i < PER; i++) {
+    const int e = s * D + int(t) + 256 * i;
+    GATED[size_t(r) * W + e] = bfloat(v[i]);
+    NORMED[size_t(r) * W + e] = bfloat((v[i] * rc) * CS[e]);
+  }
+"""
+
+_PLE_CONV = r"""
+  // Thread (c, r): channel c of row r. The depthwise conv over [tail ; normed] rows r + DIL j (fp32 in j order,
+  // bf16), SiLU (bf16 sigmoid, bf16 product), then h + (gated + silu) in bf16.
+  const int c = int(thread_position_in_grid.x), r = int(thread_position_in_grid.y);
+  constexpr int W = S * D;
+  float y = 0.0f;
+  for (int j = 0; j < TAPS; j++) y = fma(CW[c * TAPS + j], float(CIN[size_t(r + DIL * j) * W + c]), y);
+  const float yb = float(bfloat(y));
+  const float silu = float(bfloat(yb * bsig(yb)));
+  const size_t at = size_t(r) * W + c;
+  HOUT[at] = bfloat(float(H[at]) + float(bfloat(float(GATED[at]) + silu)));
+"""
+
+# The lookups for any MLX affine width: value d of a row's bit stream, its group's scale and bias.
+_CODE = ("const bfloat q = bfloat(float((word >> (4 * (d % 8))) & 0xFu));",
+         "const bfloat q = bfloat(float(code_at<BITS>(W + ROW * (DIMS * BITS / 32), d)));")
+_PLE_LOOKUP_Q = edited(_PLE_LOOKUP, [("  const uint word = W[row * (DIMS / 8) + d / 8];\n", ""),
+                                     (_CODE[0], _CODE[1].replace("ROW", "row")), (
+    "const bfloat sc = SC[row * (DIMS / 32) + d / 32], bi = BI[row * (DIMS / 32) + d / 32];",
+    "const bfloat sc = SC[row * (DIMS / GS) + d / GS], bi = BI[row * (DIMS / GS) + d / GS];")])
+_PLE_ROWS_Q = edited(_PLE_ROWS, [("  const uint word = W[i * (DIMS / 8) + d / 8];\n", ""),
+                                 (_CODE[0], _CODE[1].replace("ROW", "i")), (
+    "const bfloat sc = SC[i * (DIMS / 32) + d / 32], bi = BI[i * (DIMS / 32) + d / 32];",
+    "const bfloat sc = SC[i * (DIMS / GS) + d / GS], bi = BI[i * (DIMS / GS) + d / GS];")])
+_EMBED_ROWS_Q = edited(_EMBED_ROWS, [("  const uint word = W[row * (DIMS / 8) + d / 8];\n", ""),
+                                     (_CODE[0], _CODE[1].replace("ROW", "row")), (
+    "const bfloat v = SC[row * (DIMS / 32) + d / 32] * q + BI[row * (DIMS / 32) + d / 32];",
+    "const bfloat v = SC[row * (DIMS / GS) + d / GS] * q + BI[row * (DIMS / GS) + d / GS];")])
+
+
+def _lookup(name: str, q4: Any, generic: Any, inputs: list[str], bits: int, group: int) -> tuple[Any, list]:
+    """The 4-bit group-32 kernel, or the any-width one with its format as template constants."""
+
+    if (bits, group) == (4, 32):
+        return kernel(f"q4_{name}", q4, inputs, ["OUT"]), []
+    return (kernel(f"qa_{name}", generic, inputs, ["OUT"], header=QDOT_HEADER + AFFINE_HEADER),
+            [("BITS", bits), ("GS", group)])
+
+
 class PleTables:
     """Keep n-gram shards as views into eight GPU groups, or use the host table with its checkpoint memory-mapped."""
 
@@ -88,10 +188,13 @@ class PleTables:
 
     def __init__(self, emb: Any) -> None:
         self.dims = int(emb.dims)
+        self.bits, self.group = int(getattr(emb, "quant_bits", 4)), int(getattr(emb, "quant_group", 32))
         self.host = getattr(emb, "host", None)
         if self.host is not None:
             return
         shards = emb.shards
+        if any((int(sh.bits), int(sh.group_size)) != (self.bits, self.group) for sh in shards):
+            raise ValueError("the n-gram shards must share one quantization format")
         per = -(-len(shards) // self.groups)
         self.weights, self.scales, self.biases, starts = [], [], [], [0]
         for g in range(self.groups):
@@ -123,17 +226,17 @@ def ple_lookup(ids: Any, tables: PleTables) -> mx.array:
     rows, heads = ids.shape
     if tables.host is not None:
         words, scales, biases = tables.host.gather(ids)
-        run = kernel("q4_ple_rows", _PLE_ROWS, ["W", "SC", "BI"], ["OUT"])
+        run, fmt = _lookup("ple_rows", _PLE_ROWS, _PLE_ROWS_Q, ["W", "SC", "BI"], tables.bits, tables.group)
         return run(inputs=[mx.array(words), mx.array(scales).view(mx.bfloat16), mx.array(biases).view(mx.bfloat16)],
-                   template=[("DIMS", tables.dims)], grid=(tables.dims, rows * heads, 1),
+                   template=[("DIMS", tables.dims), *fmt], grid=(tables.dims, rows * heads, 1),
                    threadgroup=(tables.dims, 1, 1), output_shapes=[(rows, heads * tables.dims)],
                    output_dtypes=[mx.bfloat16])[0]
     names = ["IDS", "GSTART"] + [f"{k}{g}" for g in range(8) for k in ("W", "S", "B")]
-    run = kernel("q4_ple_lookup", _PLE_LOOKUP, names, ["OUT"])
+    run, fmt = _lookup("ple_lookup", _PLE_LOOKUP, _PLE_LOOKUP_Q, names, tables.bits, tables.group)
     arrays = [mx.array(ids.astype(np.uint32)), tables.starts]
     for g in range(8):
         arrays += [tables.weights[g], tables.scales[g], tables.biases[g]]
-    return run(inputs=arrays, template=[("H", heads), ("DIMS", tables.dims)],
+    return run(inputs=arrays, template=[("H", heads), ("DIMS", tables.dims), *fmt],
                   grid=(tables.dims, heads, rows), threadgroup=(tables.dims, 1, 1),
                   output_shapes=[(rows, heads * tables.dims)], output_dtypes=[mx.bfloat16])[0]
 
@@ -145,10 +248,12 @@ def embed_rows(ids: Any, embedding: Any, *, tile: int = 1) -> mx.array:
     if not isinstance(ids, mx.array):
         ids = mx.array(np.asarray(ids, dtype=np.uint32).reshape(-1))
     rows = int(ids.size)
-    dims = int(embedding.weight.shape[1]) * 8
-    run = kernel("q4_embed_rows", _EMBED_ROWS, ["IDS", "W", "SC", "BI"], ["OUT"])
+    bits, group = int(getattr(embedding, "bits", 4)), int(getattr(embedding, "group_size", 32))
+    dims = int(embedding.weight.shape[1]) * 32 // bits
+    run, fmt = _lookup("embed_rows", _EMBED_ROWS, _EMBED_ROWS_Q, ["IDS", "W", "SC", "BI"], bits, group)
     return run(inputs=[padded(ids.reshape(-1).astype(mx.uint32)), embedding.weight, embedding.scales, embedding.biases],
-                  template=[("DIMS", dims), ("TILE", tile)], grid=(dims, rows, 1), threadgroup=(min(dims, 256), 1, 1),
+                  template=[("DIMS", dims), ("TILE", tile), *fmt], grid=(dims, rows, 1),
+                  threadgroup=(min(dims, 256), 1, 1),
                   output_shapes=[(rows, tile * dims)], output_dtypes=[mx.bfloat16])[0]
 
 def rms_norm_rows(x: mx.array, scale: mx.array, eps: mx.array, *, group: int | None = None) -> mx.array:
@@ -160,3 +265,35 @@ def rms_norm_rows(x: mx.array, scale: mx.array, eps: mx.array, *, group: int | N
     return run(inputs=[x, scale, eps], template=[("W", width), ("G", g), ("SW", int(scale.shape[-1]))],
                   grid=(1024 * (width // g), rows, 1), threadgroup=(1024, 1, 1),
                   output_shapes=[(rows, width)], output_dtypes=[mx.bfloat16])[0]
+
+
+def ple_gate(kv: mx.array, h: mx.array, key_scale: mx.array, query_scale: mx.array, conv_scale: mx.array,
+             eps: mx.array, *, streams: int) -> tuple[mx.array, mx.array]:
+    """PLE's gate from the stacked key|value rows [R, S*D + D] and the streams [R, S*D]: (gated, conv-normed)."""
+
+    rows, wide = h.shape
+    dims = wide // streams
+    if dims % 256:
+        raise ValueError("ple_gate: D must be a multiple of 256")
+    from tensorfold.kernels.qwen.flash_next.v1.base import QDOT_HEADER
+
+    run = kernel("q4_ple_gate", _PLE_GATE, ["KV", "H", "KS", "QS", "CS", "eps"], ["GATED", "NORMED"],
+                 header=QDOT_HEADER)
+    return tuple(run(inputs=[kv, h, key_scale, query_scale, conv_scale, eps], template=[("S", streams), ("D", dims)],
+                     grid=(256 * streams, rows, 1), threadgroup=(256, 1, 1),
+                     output_shapes=[(rows, wide), (rows, wide)], output_dtypes=[mx.bfloat16, mx.bfloat16]))
+
+
+def ple_conv(conv_in: mx.array, weight: mx.array, gated: mx.array, h: mx.array, *, streams: int,
+             dilation: int) -> mx.array:
+    """h + gated + SiLU(depthwise conv) for the rows after ``conv_in``'s tail: h_new [R, S*D] bf16."""
+
+    rows, wide = h.shape
+    taps = int(weight.shape[-1])
+    from tensorfold.kernels.qwen.flash_next.v1.base import QDOT_HEADER
+
+    run = kernel("q4_ple_conv", _PLE_CONV, ["CIN", "CW", "GATED", "H"], ["HOUT"], header=QDOT_HEADER)
+    return run(inputs=[conv_in, weight, gated, h],
+               template=[("S", streams), ("D", wide // streams), ("TAPS", taps), ("DIL", dilation)],
+               grid=(wide, rows, 1), threadgroup=(256, 1, 1), output_shapes=[(rows, wide)],
+               output_dtypes=[mx.bfloat16])[0]

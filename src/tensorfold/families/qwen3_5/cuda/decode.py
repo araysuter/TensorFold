@@ -20,6 +20,7 @@ def clone_state(st: State) -> State:
 
     other = object.__new__(State)
     other.pos, other.limit = st.pos, st.limit
+    other.rope_delta = st.rope_delta
     other.conv = st.conv.copy()
     other.rec = st.rec.copy()
     other.kv = st.kv.copy()
@@ -31,23 +32,25 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
 
 
 def prefill_stops(w: Weights, prompt: Sequence[int], st: State, draft=None, *, stops: Sequence[int] = (),
-                  keep: Callable | None = None, tp: bool = False) -> torch.Tensor:
-    """Commit the rest of the prompt into ``st``, handing ``keep(p, state, drafter context)`` the state after each stop."""
+                  keep: Callable | None = None, tp: bool = False, keep_at: int | None = None, vision=None):
+    """Commit the rest of the prompt into ``st``, handing ``keep(p, state, drafter context)`` the state after each stop (``keep_at``: ``prefill_state``'s)."""
 
     from .prefill import prefill_state
 
+    if vision is not None and stops:
+        raise ValueError("an image prompt keeps no prompt states")
     for p in stops:
         if st.pos < p < len(prompt) and keep is not None:
             prefill_state(w, prompt[:p], st, tp=tp, draft=draft)
             keep(p, clone_state(st), draft.snapshot() if draft is not None else None)
-    return prefill_state(w, prompt, st, tp=tp, draft=draft)
+    return prefill_state(w, prompt, st, tp=tp, draft=draft, keep_at=keep_at, vision=vision)
 
 
 @torch.no_grad()
 def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
             draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
-            keep: Callable | None = None) -> tuple[State, int]:
-    """Commit the prompt and sample the first token; resuming a kept ``state`` gives a fresh prefill's bits."""
+            keep: Callable | None = None, keep_at: int | None = None, vision=None, constraint=None):
+    """Commit the prompt and sample the first token; resuming a kept ``state`` gives a fresh prefill's bits (``keep_at`` adds a third item: the state after prompt[:keep_at] and the drafter's snapshot there)."""
 
     from .forward import _mm
 
@@ -58,9 +61,15 @@ def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
         st.limit = limit                    # a fresh state's attention caches stop here; a resumed one keeps its own
     if st.pos >= len(prompt):
         raise ValueError("a reused state must leave at least one prompt token to process")
-    normed = prefill_stops(w, prompt, st, draft, stops=stops, keep=keep)
-    pending = sample_rows(_mm(normed, w.head), [len(prompt)], sampling)[0]
-    return st, pending
+    out = prefill_stops(w, prompt, st, draft, stops=stops, keep=keep, keep_at=keep_at, vision=vision)
+    normed = out if keep_at is None else out[0]
+    logits = _mm(normed, w.head)
+    if constraint is not None:                  # a reply's grammar (tensorfold.engine.grammar): masked, then followed
+        constraint.mask(logits)
+    pending = sample_rows(logits, [len(prompt)], sampling)[0]
+    if constraint is not None:
+        constraint.advance([pending])
+    return (st, pending) if keep_at is None else (st, pending, out[1])
 
 
 @dataclass
@@ -185,15 +194,15 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
                  *, max_rows: int = 128, tree_rows: int | None = None,
                  allow_copy: bool = True, stop_eos: bool = True,
                  on_tokens: Callable[[list[int]], bool | None] | None = None,
-                 trace: list | None = None) -> DecodeResult:
-    """Verify trees and replay matching paths, with optional host-only trace records that leave output tokens unchanged."""
+                 trace: list | None = None, inplace: bool = False, constraint=None) -> DecodeResult:
+    """Verify trees and replay matching paths (host-only traces leave tokens unchanged); ``inplace``: commit into ``st`` itself, which nothing else holds."""
 
     if count < 1 or not 1 <= max_rows <= 128:
         raise ValueError("count >= 1 and 1 <= max_rows <= 128 required")
     tree_rows = max_rows if tree_rows is None else tree_rows
     if not 1 <= tree_rows <= max_rows:
         raise ValueError("tree_rows must be between 1 and max_rows")
-    st = clone_state(st)
+    st = st if inplace else clone_state(st)
     out = [pending]
     context = list(prompt) + out
     copies = CopyIndex() if allow_copy else None
@@ -215,6 +224,10 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
             guesses, parents = [], []
         tokens = [out[-1]] + guesses
         tree_parents = [-1] + [0 if p < 0 else p + 1 for p in parents]
+        window = None
+        if constraint is not None:           # a grammar drops drafts no path can keep, then masks each row by its path
+            window = constraint.window(tokens, tree_parents)
+            tokens, tree_parents = window.tokens, window.parents
         torch.cuda.synchronize()
         spent = {"draft": time.perf_counter() - stage}
         stages["draft"] += spent["draft"]
@@ -225,6 +238,8 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
         spent["verify"] = time.perf_counter() - stage
         stages["verify"] += spent["verify"]
         stage = time.perf_counter()
+        if window is not None:
+            constraint.mask(logits, window)
         depths, _ = _paths(tree_parents)
         sampled = sample_rows(logits, [st.pos + d + 1 for d in depths], sampling)
         children: dict[tuple[int, int], int] = {}
@@ -243,6 +258,8 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
                 break
             path.append(child)
             terminal = sampled[child]
+        if constraint is not None:
+            constraint.advance([tokens[row] for row in path[1:]] + [terminal])
         spent["sample"] = time.perf_counter() - stage
         stages["sample"] += spent["sample"]
         if trace is not None:
@@ -261,7 +278,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
         if trace is not None:
             trace[-1]["commit_ms"] = round(1000 * (time.perf_counter() - stage), 3)
         rounds += 1
-        drafted_rows += len(guesses)
+        drafted_rows += len(tokens) - 1
         accepted_drafts += len(path) - 1
         widths.append(len(tokens))
         if on_tokens is not None:

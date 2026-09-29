@@ -11,8 +11,8 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from safetensors import safe_open
 
+from tensorfold.cuda.direct_read import SafeTensors
 from tensorfold.engine.exact_sampling import Sampling
 
 from .draft_tree import best_first
@@ -20,7 +20,7 @@ from .glue import embedding, swiglu
 from .draft_attention import append, block_attention
 from .qmm import group_sums
 from .qmm_fast import matmul, matmul_rows, rows, tile, untile
-from .weights import Exl3, QLinear, Weights
+from .weights import Exl3, Plain, QLinear, Weights
 
 
 @triton.jit
@@ -144,6 +144,19 @@ def quantize4(w: torch.Tensor) -> QLinear:
     return QLinear(words, scale.contiguous(), bias.contiguous())
 
 
+def _sub_parts(head, spans: tuple[tuple[int, int], ...]) -> list[tuple[object, int, int]]:
+    """An NVFP4 checkpoint's head rows for ``spans``: views of whole 64-row tiles (bf16 rows as they are), each span's columns."""
+
+    parts = []
+    for a, b in spans:
+        if isinstance(head, Plain):
+            parts.append((Plain(head.weight[a:b]), 0, b - a))
+        else:
+            t0, t1 = a // 64, -(-b // 64)
+            parts.append((head.tiles(t0, t1), a - 64 * t0, b - 64 * t0))
+    return parts
+
+
 def _exl3_sub_head(layer, spans: tuple[tuple[int, int], ...]):
     """The EXL3 head's strips holding ``spans`` as stored (the target's own logits, bit for bit), and the span columns."""
 
@@ -191,14 +204,15 @@ class DFlash2:
         self.target_embed = target.embed
         self.device = target.norm.device
         self.weights: dict[str, torch.Tensor] = {}
-        with safe_open(str(path / "model.safetensors"), framework="pt", device="cpu") as f:
-            for name in f.keys():
-                tensor = f.get_tensor(name)
-                if name in ("candidate_selector.predecessor_codebook",
-                            "candidate_selector.successor_codebook"):
-                    self.weights[name] = tensor.float().numpy().copy()
-                else:
-                    self.weights[name] = tensor              # on the host until packed: no bf16 copy on the device
+        f = SafeTensors([path / "model.safetensors"])
+        for name in f.keys():
+            tensor = f.get(name)
+            if name in ("candidate_selector.predecessor_codebook",
+                        "candidate_selector.successor_codebook"):
+                self.weights[name] = tensor.float().numpy().copy()
+            else:
+                self.weights[name] = tensor                  # on the host until packed: no bf16 copy on the device
+        del f
         self.inv_freq = (1.0 / self.theta **
                          (torch.arange(self.head_dim // 2, device=self.device,
                                        dtype=torch.float32) * 2 / self.head_dim))
@@ -208,7 +222,12 @@ class DFlash2:
         self.head_ids = torch.cat([torch.arange(a, b, device=self.device) for a, b in spans])
         self.head_cols: torch.Tensor | None = None           # an EXL3 head's span columns in its sliced strips
         self.sub_rows: list[QLinear] | None = None           # one GPU, tiled head: its rows as views, no copy
-        if isinstance(target.head, Exl3):
+        self.sub_parts: list | None = None                   # an NVFP4 checkpoint's head: tile views and span columns
+        if target.quant == "nvfp4":
+            if world != 1:
+                raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
+            self.sub_parts = _sub_parts(target.head, spans)
+        elif isinstance(target.head, Exl3):
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
             sub, self.head_cols = _exl3_sub_head(target.head.layer, spans)
@@ -499,7 +518,10 @@ class DFlash2:
                 hs.append(_norm(y[1:], self.weights["norm.weight"], self.eps))
             h = torch.cat(hs)
         projected = self._lin(h, "candidate_selector.hidden_projection.weight").float()
-        if self.head_cols is not None:
+        if self.sub_parts is not None:
+            h = h.contiguous()
+            logits = torch.cat([part(h)[:, lo:hi] for part, lo, hi in self.sub_parts], dim=1)
+        elif self.head_cols is not None:
             logits = self.sub_head(h.contiguous()).index_select(1, self.head_cols)
         elif self.sub_rows is not None:
             logits = matmul_rows(h, self.sub_rows)

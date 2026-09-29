@@ -13,9 +13,12 @@ import traceback
 from typing import Any, Callable
 
 from tensorfold.engine.lane_engine import LaneStream
-from tensorfold.server.cancellation import Cancellation, PrefillGuard, RequestCancelled
+from tensorfold.server.cancellation import Cancellation, RequestCancelled
 from tensorfold.server.checkpoints import CheckpointStore, choose_checkpoints
 from tensorfold.server.errors import RequestError, RoundError
+from tensorfold.server.live import ChunkRate, Meter
+from tensorfold.server.prompt_fill import Filling, PromptFill
+from tensorfold.server.stream_gate import StreamGate
 
 @dataclass
 class ChatJob:
@@ -54,6 +57,8 @@ class ChatJob:
     ignore_eos: bool = False
     stop_check: Callable[[list[int]], bool] | None = None
     call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
+    constraint: Any = None                  # response_format's grammar (engine.grammar.Constraint), or None
+    vision: Any = None
 
 
 class _JobQueue(queue.PriorityQueue):
@@ -84,7 +89,7 @@ class _JobQueue(queue.PriorityQueue):
             return removed
 
 
-class Scheduler:
+class Scheduler(PromptFill):
     """Owns the engine on one thread: admits jobs, steps rounds, delivers tokens."""
 
     def __init__(
@@ -101,9 +106,12 @@ class Scheduler:
         model_id: str = "",
         admission: Any = None,
         prompt_memory: Any = None,
+        decode_share: float = 0.25,
     ) -> None:
         if lanes < 1:
             raise ValueError("lanes must be positive")
+        if decode_share < 0:
+            raise ValueError("decode_share must be 0 or more")
         # ``engine.memory.Admission``: a job starts beside live streams only while the projected memory fits
         self.admission = admission
         self.snapshot_dir = snapshot_dir
@@ -139,12 +147,22 @@ class Scheduler:
         self.cancelled = 0
         self.starts = 0
         self._starting: ChatJob | None = None
+        self._filling: Filling | None = None
+        # while a prompt fills, rounds get decode_share of each chunk's time, at most fill_rounds between two chunks
+        self.decode_share = float(decode_share)
+        self.fill_rounds = 32
+        self._credit, self._rounds_left = 0.0, 0
         self._released_at = 0            # ``starts`` when MLX's freed buffers were last handed back
         # Evaluate and save cache arrays on the scheduler thread that owns their streams during shutdown.
         self.on_stop: Callable[[], Any] | None = None
+        # streams take memory as they grow: the newest waits, or ends, when the next round's growth can't fit
+        self.gate = (StreamGate(prompt_memory, admission.memory.per_token, admission.memory.round_bytes,
+                                admission.budget, lanes=self.lanes)
+                     if admission is not None and prompt_memory is not None and self.lanes > 1 else None)
         self.stall_s = 120.0            # no round, start or finish while requests wait: dump stacks
         self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
+        self.decoded, self.prefilled = Meter(), ChunkRate()       # the live line's decode and prefill tok/s
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:
@@ -215,6 +233,8 @@ class Scheduler:
         if self._held is not None and self._held.cancellation.cancelled:
             self._finish_cancelled(self._held)
             self._held = None
+        if self._filling is not None and self._filling.job.cancellation.cancelled:
+            self._fill(abort=RequestCancelled("request cancelled"))      # stops between chunks, progress kept
         for job in list(self._jobs.values()):
             if job.cancellation.cancelled:
                 self._discard_job(job)
@@ -222,6 +242,19 @@ class Scheduler:
     @property
     def active(self) -> int:
         return len(self._jobs)
+
+    @property
+    def waiting(self) -> int:
+        """Requests not started yet: queued, or held until they fit."""
+
+        return self._queue.qsize() + (self._held is not None)
+
+    @property
+    def filling(self) -> Any:
+        """The job whose prompt is prefilling, or None."""
+
+        filling = self._filling
+        return None if filling is None else filling.job
 
     @staticmethod
     def finish_job(job: ChatJob, reason: str = "stop") -> None:
@@ -238,6 +271,8 @@ class Scheduler:
         try:
             self._loop()
         finally:
+            if self._filling is not None:
+                self._fill(abort=RequestCancelled("server stopping"))
             if self.on_stop is not None:
                 try:
                     self.on_stop()
@@ -249,16 +284,24 @@ class Scheduler:
             self._cancel_active()
             self._preempt_background()
             self._admit()
-            self._starting = None
+            self._starting = None if self._filling is None else self._filling.job
             self._retire_externally_finished()
+            if self._filling is not None and (self.engine.active_count == 0 or self._rounds_had_turn()):
+                self._fill()
+                continue
             if self.engine.active_count == 0:
-                if self._held is None:
+                if self._held is None and self._filling is None:
                     self._release_idle()
                     try:
                         self._held = self._queue.get(timeout=self.idle_wait)
                     except queue.Empty:
                         continue
                 continue  # _admit starts it
+            if self._filling is None:
+                self._credit, self._rounds_left = 0.0, 0     # no prompt waits: rounds owe nothing
+            if self.gate is not None:
+                self._gate_round()
+            started = self.clock()
             try:
                 round_started = time.perf_counter()
                 landed = self.engine.step()
@@ -282,6 +325,8 @@ class Scheduler:
                 job = landed = tokens = None
                 continue
             self.rounds += 1
+            self._spend_round(self.clock() - started)
+            self.decoded.add(sum(len(t) for t in landed.values()))
             self._cancel_active()
             if self.engine.round_stats:
                 last = self.engine.round_stats[-1]
@@ -309,6 +354,7 @@ class Scheduler:
 
         if self.prompt_memory is not None and self._released_at != self.starts and self._queue.empty():
             self._released_at = self.starts
+            getattr(self.engine, "release_rounds", lambda: None)()
             self.prompt_memory.release_freed()
 
     def _preempt_background(self) -> None:
@@ -319,6 +365,8 @@ class Scheduler:
             waiting = self._queue.peek_foreground()
         if waiting is None or waiting.cancellation.cancelled:
             return
+        if self._filling is not None and self._filling.job.background:
+            self._preempt_filling()                   # the foreground job waits for the one prompt slot
         for job in self._jobs.values():
             if self.engine.active_count < self.lanes and self._fits(waiting):
                 break
@@ -336,9 +384,9 @@ class Scheduler:
                 self._retire(job)
 
     def _admit(self) -> None:
-        """Admit fitting jobs before the next round, prefilling each prompt separately to preserve its individual prefill bits."""
+        """Admit fitting jobs, one prompt filling at a time in its own chunks; the loop runs rounds between chunks."""
 
-        while self.engine.active_count < self.lanes:
+        while self._filling is None and self.engine.active_count < self.lanes:
             job = self._held
             self._held = None
             if job is not None and job.background and self._queue.foreground_waiting():
@@ -355,21 +403,58 @@ class Scheduler:
             if job.cancellation.cancelled:
                 self._finish_cancelled(job)
                 continue
-            self._start_job(job)
+            if self.decode_share <= 0:
+                self._start_job(job)                  # decode_share 0: each prompt whole before any round (0.3.6.2)
+                continue
+            self._open_job(job)
+            if self._filling is not None and (self.engine.active_count == 0 or self._rounds_had_turn()):
+                self._fill()                     # a one-chunk prompt starts now, as before
 
     def _fits(self, job: ChatJob) -> bool:
         """Start alone for prompt admission to validate memory, or beside streams only when prompt memory and admission projections fit."""
 
         if self.engine.active_count == 0:
             return True
+        reply = self._reserved(int(job.max_tokens))
         memory = self.prompt_memory
-        if memory is not None and not memory.would_fit(len(job.prompt_ids), int(job.max_tokens)):
+        if memory is not None and not memory.would_fit(len(job.prompt_ids), reply):
             return False
         if self.admission is None:
             return True
-        live = [(len(j.stream.context), len(j.prompt_ids) + int(j.max_tokens)) for j in self._jobs.values()
-                if j.stream is not None and not j.stream.finished]
-        return self.admission.admits(len(job.prompt_ids), len(job.prompt_ids) + int(job.max_tokens), live)
+        live = [(n, min(len(j.prompt_ids) + int(j.max_tokens), n + self._reserved(int(j.max_tokens))))
+                for j in self._jobs.values() if j.stream is not None and not j.stream.finished
+                for n in [len(j.stream.context)]]
+        return self.admission.admits(len(job.prompt_ids), len(job.prompt_ids) + reply, live)
+
+    def _reserved(self, reply: int) -> int:
+        """The reply tokens a stream holds memory for ahead of its length: the gate's horizon when it guards rounds."""
+
+        return reply if self.gate is None else min(reply, self.gate.horizon)
+
+    def _gate_round(self) -> None:
+        """Hold back the newest streams whose growth can't fit, or end the newest when even the oldest can't grow."""
+
+        live = sorted((j for j in self._jobs.values() if j.stream is not None and not j.stream.finished),
+                      key=lambda j: j.started_at)
+        plan = self.gate.plan([(j.stream.stream_id, len(j.stream.context), len(j.prompt_ids) + int(j.max_tokens))
+                               for j in live])
+        if set(plan.paused) != self.engine.paused:
+            print(f"[tensorfold] memory: {len(plan.paused)} of {len(live)} streams wait for room (newest first)",
+                  flush=True)
+        self.engine.paused = set(plan.paused)
+        for job in (j for j in live if j.stream.stream_id in plan.ended):
+            job.error = RequestError(
+                f"This server ran out of memory with {len(live)} streams decoding, so the newest (this request, "
+                f"after {len(job.stream.emitted)} tokens) was stopped for the older ones to finish. Retry it, "
+                "shorten the prompt or max_tokens, or start the server with a smaller --parallel.")
+            print(f"[tensorfold] memory: ended {job.job_id}, the newest of {len(live)} streams", flush=True)
+            self.engine.discard_stream(job.stream)
+            job.stream.finish_reason = "error"
+            job.stream.history_checkpoints = []
+            del self._jobs[job.stream.stream_id]
+            self._finish(job)
+            if self.prompt_memory is not None:
+                self.prompt_memory.release_freed()      # its arrays are free now: the next plan sees the room
 
     def _read_disk_block(self, prompt: list[int], usable: Any = None) -> None:
         """Put the longest stored prefix ``usable`` accepts (system blocks, saved conversations) in the store."""
@@ -404,6 +489,15 @@ class Scheduler:
             print(f"[tensorfold] snapshot read failed: {type(exc).__name__}: {exc}", flush=True)
 
     def _start_job(self, job: ChatJob) -> None:
+        """Open ``job`` and prefill its whole prompt now (the loop's admissions run rounds between chunks)."""
+
+        self._open_job(job)
+        while self._filling is not None and self._filling.job is job:
+            self._fill()
+
+    def _open_job(self, job: ChatJob) -> None:
+        """Find its stored prefix, reserve its memory and make its stream; its prompt then fills a chunk a step."""
+
         job.started_at = time.perf_counter()
         self.starts += 1
         self._starting = job
@@ -412,11 +506,11 @@ class Scheduler:
             job.cancellation.check()
             memory = self.prompt_memory
             if memory is not None:
-                memory.begin(len(job.prompt_ids), int(job.max_tokens), admit=self.checkpoints is None)
-            self.engine.prefill_guard = PrefillGuard(job.cancellation, memory)
-            if self.studio is not None:
-                self.engine.prefill_guard.on_chunk = lambda n, seconds: self.studio.update(
-                    job, prompt_tps=n / max(seconds, 1e-9), rate_at=time.time())
+                getattr(self.engine, "release_rounds", lambda: None)()     # no stream live: rows are nobody's (#95)
+                memory.begin(len(job.prompt_ids), self._reserved(int(job.max_tokens)),
+                             admit=self.checkpoints is None or job.vision is not None)
+                if job.vision is not None:
+                    memory.require_workspace(self.engine.model.vision.estimate_workspace_bytes(job.vision))
             cache = None
             cached = 0
             last_prompt: list[int] | None = None
@@ -424,7 +518,7 @@ class Scheduler:
             # checkpoints sit at the prompt's chunk starts: a shared prefix is kept at the start at or before its end
             starts = self.engine.prompt_chunks(job.prompt_ids)
             shared_at = {starts.floor(n) for n in job.shared_prefix_lens} - {0}
-            if self.checkpoints is not None:
+            if self.checkpoints is not None and job.vision is None:
                 usable = lambda n: n in starts
                 self._read_disk_block(job.prompt_ids, usable)
                 entry = self.checkpoints.peek(job.prompt_ids, usable=usable)
@@ -434,6 +528,7 @@ class Scheduler:
                     memory.require(current_cache=None if entry is None else entry.cache, keep=entry)
                     take = entry is not None and not memory.fits_now()
                 hit = self.checkpoints.match(job.prompt_ids, usable=usable, take=take)
+                entry = None        # held through the prefill, a stored prefix evicted for this prompt's copy stays
                 if hit is not None:
                     cached, cache, last_prompt = hit
                     if self.disk_blocks is not None and cached in shared_at:
@@ -458,42 +553,24 @@ class Scheduler:
                 think_end=int(job.think_end),
                 think_open=bool(job.think_budget),
                 call_gate=job.call_gate,
+                constraint=job.constraint,
+                prompt_data=job.vision,
+                retain=job.vision is None,
             )
             job.stream = stream
             if self.studio is not None:
                 self.studio.update(job, state="prefilling", cached_tokens=cached)
-            self.engine.add_stream(stream, cache=cache, cached_tokens=cached, checkpoints_at=checkpoints_at)
-            self._keep_checkpoints(job, shared_at)
-            job.cancellation.check()
-            job.prefilled_at = time.perf_counter()
-            if self.studio is not None:
-                self.studio.update(job, state="generating", prompt_tps=None)
-            job.cached_tokens = int(stream.cached_tokens)      # 0 when a stored state was not at a chunk start
-            if stream.emitted:
-                job.chunks.put(list(stream.emitted))
-            if stream.finished:
-                self._retire(job)
-            else:
-                self._jobs[stream.stream_id] = job
-        except RequestCancelled:
-            self._keep_checkpoints(job, shared_at)      # a prefill stopped between chunks: a retry resumes there
-            self._discard_job(job)
-        except Exception as exc:  # noqa: BLE001 - reported to the waiting request
-            job.error = exc.with_traceback(None) if isinstance(exc, RequestError) else exc
-            self._keep_checkpoints(job, shared_at)
-            print(f"[tensorfold] start failed {job.job_id} cached={job.cached_tokens}: {type(exc).__name__}: {exc}",
-                  flush=True)
-            self._finish(job)
-        finally:
-            self.engine.prefill_guard = None
-            if self.prompt_memory is not None:
-                self.prompt_memory.end()
+            steps = self.engine.begin_stream(stream, cache=cache, cached_tokens=cached, checkpoints_at=checkpoints_at)
+        except Exception as exc:  # noqa: BLE001 - reported to the waiting request, as a failed prefill is
+            self._end_fill(job, shared_at, exc)
+            return
+        self._filling = Filling(job, steps, shared_at)
 
     def _keep_checkpoints(self, job: ChatJob, shared_at: set[int]) -> None:
         """Store the prefixes the job's prefill kept (system blocks pinned and saved to disk), once."""
 
         stream = job.stream
-        if stream is None:
+        if stream is None or job.vision is not None:
             return
         kept, stream.history_checkpoints = stream.history_checkpoints, []
         for tokens, snapshot in kept if self.checkpoints is not None else ():
@@ -521,8 +598,10 @@ class Scheduler:
             self._discard_job(job)
             return
         stream = job.stream
+        if stream is not None and getattr(stream, "error", None) is not None and job.error is None:
+            job.error = stream.error                  # its grammar failed: this request alone answers with the error
         retained = self.engine.finished_caches.pop(job.job_id, None)
-        if retained is not None and self.checkpoints is not None:
+        if retained is not None and self.checkpoints is not None and job.vision is None:
             tokens, cache = retained
             if len(tokens) > len(job.prompt_ids):
                 self.checkpoints.insert(tokens, cache, last_prompt=job.prompt_ids)

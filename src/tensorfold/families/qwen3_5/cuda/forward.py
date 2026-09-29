@@ -100,6 +100,8 @@ Record = GDNRecord | AttentionRecord
 class State:
     """Cloned states share growable KV buffers whose rows below ``pos`` remain committed, so writes preserve shorter clones but invalidate longer cached extensions."""
 
+    rope_delta = 0                      # an image prompt's rotary shift past its tokens; text has none
+
     def __init__(self, w: Weights):
         c = w.config
         device = w.norm.device
@@ -192,7 +194,8 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
         aoffs, windows = staged.aoffs, staged.windows
     else:
         ids = tokens.to(torch.int32)
-        pos = torch.tensor([st.pos + d for d in depths], device=tokens.device, dtype=torch.int32)
+        pos = torch.tensor([st.pos + st.rope_delta + d for d in depths], device=tokens.device,
+                           dtype=torch.int32)
         plan = deltanet.plan([parents], tokens.device)
         softmax = [i for i, layer in enumerate(w.layers) if not layer.linear]
         aplan = tree_attention.plan([parents], [st.pos], c.heads // c.kv_heads, tokens.device)
@@ -268,8 +271,9 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
 
 @torch.no_grad()
 def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequence[int], State]], *,
-                       full_logits: bool = True, tp: bool = False, capture_taps: bool = False):
-    """Several streams' windows in one forward, each row with the bits of its stream's own ``tree_forward``."""
+                       full_logits: bool = True, tp: bool = False, capture_taps: bool = False,
+                       hidden: bool = False):
+    """Several streams' windows in one forward, each row with the bits of its stream's own ``tree_forward`` (``hidden``: the rows' final normed states third)."""
 
     c = w.config
     device = w.norm.device
@@ -288,7 +292,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             rows.append(tail + [keep + base + row])
         windows.extend(rows)
         ids.extend(int(t) for t in tokens)
-        positions.extend(st.pos + d for d in depths)
+        positions.extend(st.pos + st.rope_delta + d for d in depths)
         sids.extend([s] * len(parents))
         local.append(parents)
         states.append(st)
@@ -365,7 +369,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
         if len(taps) != 5:
             raise ValueError("DFlash2 taps require the complete 64-layer target")
         return logits, record, torch.cat(taps, dim=-1), starts
-    return logits, record, None, starts
+    return logits, record, h if hidden else None, starts
 
 
 @torch.no_grad()
