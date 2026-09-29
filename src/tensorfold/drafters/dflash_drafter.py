@@ -74,12 +74,17 @@ class DFlashDrafter:
 
         return [RotatingKVCache(max_size=1 << 30, keep=0) if type(c) is KVCache else c for c in self.model.make_cache()]
 
-    def taps(self) -> mx.array | None:
-        """The last target forward's taps, [batch, rows, 5 * hidden]."""
+    def taps(self, rows: Any = None) -> mx.array | None:
+        """The last forward's taps; select rows before joining layers to avoid copying rejected rows."""
 
         states = getattr(self.target, "_hidden_states", None)
         if not states or any(s is None for s in states):
             return None
+        if isinstance(rows, slice):
+            states = [s[:, rows] for s in states]
+        elif rows is not None:
+            selected = mx.array([int(r) for r in rows], dtype=mx.int32)
+            states = [mx.take(s, selected, axis=1) for s in states]
         return mx.concatenate(states, axis=-1)
 
     def release_taps(self) -> None:

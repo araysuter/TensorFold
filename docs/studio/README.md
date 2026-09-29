@@ -8,6 +8,9 @@ SSD spill budget. Idle RAM checkpoints remain until the cache limit or memory ad
 requires eviction. There is no fixed reservation of two complete 128k windows: the
 existing memory controller can queue the second request when both would not fit.
 
+The Swift optimization branch and its Studio validation steps are described in
+[optimization.md](optimization.md).
+
 ## Install on the Studio
 
 Stop the running TensorFold, and stop Caddy (or llama.cpp) if it owns 8080. Keep cloudflared

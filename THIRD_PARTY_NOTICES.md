@@ -9,6 +9,10 @@ They are installed as dependencies.
 The DeltaNet implementations in `src/tensorfold/kernels/qwen/dense/v1/lane_gdn.py` and
 `lane_tree.py` adapt mlx-lm's `qwen3_5` and `gated_delta` model math and kernels under its MIT License.
 
+`src/tensorfold/kernels/qwen/dense/v1/tiled_prefill.py` adapts the packed-weight addresses in MLX's
+`QuantizedBlockLoader` and uses the installed `qmm_t_nax_tgp_impl` and Metal headers under MLX's MIT License,
+Copyright © 2023-2025 Apple Inc. The matmul math remains in the installed dependency.
+
 ## Qwen Flash Next
 
 The n-gram ID helpers in `src/tensorfold/families/qwen4_exp/model.py` and `cuda/ngram.py` translate

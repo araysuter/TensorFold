@@ -114,19 +114,20 @@ class DFlashHead:
     def absorb(self, cache: list[Any], first: int, rows: int, row: int = 0) -> None:
         """Absorb forward rows [row, row + rows), starting at position first, into the stream's drafter context."""
 
-        taps = self.drafter.taps()
+        window = self.drafter.window
+        skip = max(0, rows - window) if window else 0
+        taps = self.drafter.taps(slice(row + skip, row + rows))
         if taps is None:
             return
-        taps = taps[:, row:row + rows]
+        first += skip
         proposer = cache[-1].get(getattr(cache[-1].proposer, "sampling", None))
-        window = self.drafter.window
         if not proposer.ready:
-            if window and rows > window:
-                taps, first = taps[:, -window:], first + rows - window
             for item in proposer.cache:
                 item.offset = first
             proposer.context, proposer.ready = mx.contiguous(taps), True
         else:
+            for item in proposer.cache:
+                item.offset += skip
             proposer.absorb(taps)
             held = int(proposer.context.shape[1])
             if window and held > window:
@@ -140,9 +141,12 @@ class DFlashHead:
         """Absorb the stream's kept rows and committed follow tokens, with the new pending token last."""
 
         proposer = cache[-1].get(sampling)
-        taps = self.drafter.taps()
+        selected = [int(r) for r in rows]
+        take = (slice(selected[0], selected[-1] + 1)
+                if selected and selected == list(range(selected[0], selected[-1] + 1)) else selected)
+        taps = self.drafter.taps(take) if selected else None
         if taps is not None and rows:
-            proposer.absorb(mx.take(taps, mx.array([int(r) for r in rows], dtype=mx.int32), axis=1))
+            proposer.absorb(taps)
         cache[-1].kept = [int(t) for t in follow]
         cache[-1].anchor = cache[-1].kept[-1]
 

@@ -364,10 +364,14 @@ def _call(self: Any, x: mx.array) -> mx.array:
             object.__setattr__(self, "_lane_sbt", sbt)
         y = lane_matmul(x, self["weight"], sbt, tiled=tiled, nt=nt, group=self.group_size)
     elif tiled:
-        # wider than the lane kernel takes (MLX's chunked prefill): MLX's layout, rebuilt for this call
-        weight = untile_weight(self["weight"], nt, self.group_size, bits=self.bits)
-        y = mx.quantized_matmul(x, weight, self["scales"], self["biases"], transpose=True, group_size=self.group_size,
-                                bits=self.bits)
+        from tensorfold.kernels.qwen.dense.v1 import tiled_prefill
+
+        if enabled and tiled_prefill.active(x, self["weight"], self.bits, self.group_size, nt):
+            y = tiled_prefill.matmul(x, self["weight"], self["scales"], self["biases"], nt)
+        else:
+            weight = untile_weight(self["weight"], nt, self.group_size, bits=self.bits)
+            y = mx.quantized_matmul(x, weight, self["scales"], self["biases"], transpose=True,
+                                    group_size=self.group_size, bits=self.bits)
     else:
         return _ORIG(self, x)
     if "bias" in self:

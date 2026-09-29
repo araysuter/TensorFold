@@ -29,6 +29,16 @@ python benchmarks/studio/benchmark.py \
 
 Use a new output directory for each run. Increase `--reps` to 3 for repeated trials. The output includes JSON, CSV, SVG charts and an HTML report. Generation speed is the server-reported per-request rate; effective input throughput includes queue/prefill waiting. Combined output throughput includes the entire batch wall time.
 
+For the same four-panel layout as the published Swift and Qwen charts, render a new run:
+
+```bash
+python benchmarks/studio/plot_run.py benchmark-results-swift \
+  --title 'TensorFold · Swift 1.5 performance candidate'
+```
+
+This writes `benchmark.svg` and `benchmark.png` in that results directory. Failed cells
+remain gaps. It does not replace the historical README charts.
+
 ## Reproduce the README sheets
 
 The committed `studio-benchmark-*` directories contain the source results used for the published charts, with no API credentials. From the repository root:

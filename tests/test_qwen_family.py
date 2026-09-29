@@ -73,7 +73,8 @@ def test_a_prefill_holds_only_the_drafter_windows_taps_not_every_chunks():
             self.context, self.ready, self.sampling = None, False, None
 
     taps: list = [None]
-    drafter = SimpleNamespace(window=7, taps=lambda: taps[0], proposer=lambda copy=None, sampling=None: Proposer())
+    drafter = SimpleNamespace(window=7, taps=lambda rows: taps[0][:, rows],
+                             proposer=lambda copy=None, sampling=None: Proposer())
     head, cache = DFlashHead(drafter), [DraftSlot(drafter)]
     chunk = 64 * 4096 * 2                                            # a chunk's taps: 64 rows of 4,096 halves
     mx.eval(mx.zeros((1,)))
@@ -88,6 +89,56 @@ def test_a_prefill_holds_only_the_drafter_windows_taps_not_every_chunks():
     assert mx.get_active_memory() - before < 4 * chunk               # not 40 chunks' taps
     assert context.shape == (1, 7, 4096) and bool(mx.all(context == 39))
     assert cache[-1].proposer.cache[0].offset == 40 * 64 - 7
+
+
+def test_draft_taps_select_the_same_rows_before_joining_layers():
+    from tensorfold.drafters.dflash_drafter import DFlashDrafter
+
+    drafter = DFlashDrafter.__new__(DFlashDrafter)
+    states = [mx.arange(24).reshape(1, 8, 3), mx.arange(16).reshape(1, 8, 2)]
+    drafter.target = SimpleNamespace(_hidden_states=states)
+    joined = mx.concatenate(states, axis=-1)
+    for rows in (slice(2, 5), [6, 1, 4], []):
+        expect = joined[:, rows] if isinstance(rows, slice) else mx.take(joined, mx.array(rows, dtype=mx.int32), axis=1)
+        assert bool(mx.array_equal(drafter.taps(rows), expect).item())
+    assert bool(mx.array_equal(drafter.taps(), joined).item())
+    drafter.target._hidden_states = [states[0], None]
+    assert drafter.taps(slice(0, 1)) is None
+
+
+def test_prompt_tap_trimming_keeps_positions_across_small_and_large_chunks():
+    from tensorfold.drafters.dflash_drafter import DFlashDrafter
+    from tensorfold.drafters.dflash_proposer import DFlashProposer
+
+    class Proposer:
+        absorb = DFlashProposer.absorb
+
+        def __init__(self):
+            self.cache = [SimpleNamespace(offset=0)]
+            self.context, self.ready, self.sampling = None, False, None
+
+    drafter = DFlashDrafter.__new__(DFlashDrafter)
+    drafter.window = 7
+    drafter.target = SimpleNamespace(_hidden_states=[])
+    drafter.proposer = lambda copy=None, sampling=None: Proposer()
+    head, cache = DFlashHead(drafter), [DraftSlot(drafter)]
+    first = 40
+    for rows in (3, 2, 15, 4):
+        values = mx.arange(first, first + rows).reshape(1, rows, 1)
+        # The stream's prompt rows start after other rows in this forward.
+        drafter.target._hidden_states = [mx.concatenate([mx.zeros((1, 2, 1)), values], axis=1)]
+        head.absorb(cache, first, rows, row=2)
+        first += rows
+        held = min(7, first - 40)
+        proposer = cache[-1].proposer
+        assert proposer.cache[0].offset == first - held
+        assert bool(mx.array_equal(proposer.context, mx.arange(first - held, first).reshape(1, held, 1)).item())
+    drafter.target._hidden_states = [mx.arange(8).reshape(1, 8, 1)]
+    for selected in ([1, 2, 3], [6, 1, 4]):
+        cache[-1].proposer.context = None
+        head.read(cache, selected, [31, 32], None)
+        assert bool(mx.array_equal(cache[-1].proposer.context, mx.array(selected).reshape(1, len(selected), 1)).item())
+        assert cache[-1].kept == [31, 32] and cache[-1].anchor == 32
 
 
 def test_start_trees_batches_equal_blocks_and_runs_the_rest_alone(monkeypatch):
