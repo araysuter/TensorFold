@@ -74,13 +74,13 @@ Provision `~/.config/tensorfold/api-key` before launching if the old llama.cpp k
 
 ## Benchmarks
 
-[Run the benchmark suite and regenerate these charts](benchmarks/studio/README.md). Charts are embedded SVGs, so GitHub renders them directly and they stay sharp when enlarged.
+[Run the benchmark suite and regenerate these charts](benchmarks/studio/README.md).
 
-### Swift 1.5 4-bit
+### [Swift 1.5 4-bit](https://huggingface.co/ukisai/Swift-1.5-4bit-MLX)
 
 ![Swift benchmark](benchmarks/studio/charts/tensorfold-studio-benchmark.svg)
 
-### Qwen3.8 27B 4-bit
+### [Qwen3.8 27B 4-bit](https://huggingface.co/Vontra/Qwen3.8-27B-MLX-4bit)
 
 ![Qwen benchmark](benchmarks/studio/charts/tensorfold-qwen-benchmark.svg)
 
