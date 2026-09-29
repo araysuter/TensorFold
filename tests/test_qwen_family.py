@@ -169,6 +169,39 @@ def test_a_tree_comes_most_likely_first_parents_before_children():
     assert chances == [0.9, 0.8, 0.5, 0.5]                  # a child is at most as likely as its parent
 
 
+@pytest.mark.parametrize("lanes,enabled,context_rows,expected_blocks", [
+    (True, "1", 3, [8]),
+    (False, "1", 3, [16, 12]),
+    (True, "0", 3, [16, 12]),
+    (True, "1", 65, [16, 12]),
+])
+def test_shared_trained_blocks_batch_without_changing_solo_or_prompt_lattices(
+        monkeypatch, lanes, enabled, context_rows, expected_blocks):
+    class Proposer:
+        def __init__(self, block, rows):
+            self.block, self.context = block, mx.zeros((1, rows, 4))
+
+        def _tree_prelude(self, context, nodes):
+            return ("need", self.block, [], nodes)
+
+        def _lattice(self, context, block):
+            blocks.append(block)
+            return (0, 0, 0)
+
+    blocks = []
+    monkeypatch.setenv("TF_DRAFT_BATCH_BLOCK", enabled)
+    monkeypatch.setattr(dflash_batch, "batched_lattices",
+                        lambda drafter, ps, cs, block: blocks.append(block) or [(1, 1, 1)] * len(ps))
+    drafter = SimpleNamespace(block_size=8, target=SimpleNamespace(_tensorfold_lanes=lanes))
+    a, b = Proposer(16, context_rows), Proposer(12, context_rows)
+    states = dflash_batch.start_trees(drafter, [(a, [1], 15), (b, [1], 11)])
+    assert blocks == expected_blocks
+    assert [s[5] for s in states] == [15, 11]             # limit positions, not proposed tree nodes
+    blocks.clear()
+    dflash_batch.start_trees(drafter, [(a, [1], 15)])
+    assert blocks == [16]
+
+
 def test_the_head_queues_drafts_with_their_chances():
     slot = DraftSlot(object())
     slot.proposer = SimpleNamespace(last_scores=[-0.7, -0.1, -0.2])

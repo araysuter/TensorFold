@@ -40,6 +40,20 @@ that survives the drafter's context window. It preserves the retained rows, thei
 positions, draft search and target verification rules. This aims to reduce copying
 and temporary allocations during both prefill and decode.
 
+Prompt chunks also retain their existing MLX token arrays through the target forward,
+instead of synchronously reading them back into Python and uploading them again.
+Token dtype, ordering and the cache's prompt position are preserved. The isolated
+host conversion step for 2,048 tokens fell from about 84 to 1.4 microseconds; its
+contribution to whole-model latency is small.
+
+For concurrent M5 requests, eligible DFlash lattices use the trained eight-position
+block when at least two short-context lattices can share a batch. This can combine
+otherwise unequal block lengths and keep two blocks inside one 16-row TensorOps
+tile. Solo calls and lattices with more than 64 newly supplied context rows retain
+the existing block choice, as do non-M5 decoders. Tree-node budgets and complete
+target verification are unchanged.
+`TF_DRAFT_BATCH_BLOCK=0` disables this batching change independently.
+
 No tests, model runs or benchmarks were executed on the development machine.
 Whole-model throughput and representative output parity still need the full Studio
 benchmark and workload checks below.
@@ -53,6 +67,9 @@ compilation failures were fixed by composing MLX's weight loader (Metal disallow
 class inheritance) and passing the dimension buffer's values into the helper
 (its original constant-address-space references cannot bind a device buffer).
 
+The final expanded suite, including the concurrent-drafter qualification checks,
+tree search and draft vocabulary coverage, passed **279 tests in 15.28 seconds**.
+
 Targeted GPU probes compared the previous untile-plus-native matmul with the direct
 tiled reader at 129, 256, 512 and 1,024 prompt rows. Both large Swift MLP projections
 (17,408 by 5,120 and its reverse) showed about **6–30% faster kernel execution**;
@@ -60,6 +77,40 @@ this includes removal of the weight conversion and is not a whole-model speedup.
 The probes checked exact native-MLX output bits before timing. Wider 128-row or
 128-column TensorOps tiles were generally slower, so the 64-by-64 layout is retained.
 Small projections showed smaller and more variable differences.
+
+Further probes at the normal 2,048-row chunk size showed smaller gains, including
+small regressions in some measurements. Combining gate/up prefill
+projections gave about 0–1% difference. Changing the decode pipeline interval from
+four layers gave no consistent improvement, and adding native prefill pipelining
+saved only about 0.3% at 2,048 rows. Those additional changes were left out.
+After retaining GPU prompt arrays, another 56 family, prompt-fill, Studio, spill and
+cancellation checks passed. A coding smoke request with 1,226 prompt tokens produced
+the same 18 generated tokens with drafting on and off (target hash `c7c468890b2d`).
+Its roughly 879 cold input tokens/s and 113 draft decode tokens/s are short-workload
+observations, not comparisons with the historical long-context benchmark.
+
+A controlled local-HTTP ablation sent identical 4,096-token prompts with drafting
+enabled but only one generated token, six requests per mode, all with zero cached
+tokens. After excluding each mode's first warmup request, median server-reported
+prefill time was **4.1603 s** with `TF_TILED_PREFILL=0` and **4.0952 s** with it
+enabled: about **1.6% faster whole-model prefill** for this workload. All six
+target-token hashes matched between modes. This isolates the tiled reader; both
+modes include the upstream integration, DFlash copy changes and GPU token arrays.
+It does not measure long-context decode or the total improvement over the old fork.
+
+Three short coding tasks (2,048 input tokens, up to 256 generated tokens) checked
+solo and two-request runs. Always shrinking draft blocks to eight slightly hurt
+solo throughput, so that change was rejected. The shared-only candidate reproduced
+all nine baseline token hashes and reply texts. Its two-request aggregate throughput
+(output tokens divided by the slower request's elapsed time, including prefill)
+changed by **-0.4%, +2.8%, and +1.3%** across the three tasks. Solo decode remained
+about 97, 106 and 118 tokens/s. These are small diagnostic runs; request order can
+strongly skew an individual request's reported decode rate. The full context and
+concurrency sweep is still needed to qualify the shared batching gain.
+
+A final two-request sampling check (temperature 0.7, top-k 20, top-p 0.95,
+seed 17, 128 generated tokens per request) also reproduced both undrafted
+target-token hashes and reply texts with drafting enabled.
 
 Use the Studio's normal environment and launch commands. Focused regressions cover partial GPU
 tiles, native-MLX bit parity, avoiding the weight conversion, selected DFlash rows and
@@ -69,7 +120,8 @@ positions, authenticated Responses requests, and monitoring through chunked pref
 python -m pytest -q tests/test_tiled_prefill.py tests/test_lane_qmm.py \
   tests/test_qwen_family.py tests/test_prompt_fill.py tests/test_studio.py \
   tests/test_responses_api.py tests/test_server_openai_compat.py \
-  tests/test_checkpoint_spill.py tests/test_cancellation.py
+  tests/test_checkpoint_spill.py tests/test_cancellation.py \
+  tests/test_dflash_tree_search.py tests/test_dflash_draft_vocab.py
 ```
 
 Use a separate client machine for throughput measurements, as in the existing

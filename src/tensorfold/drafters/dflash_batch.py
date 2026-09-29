@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Sequence
 
@@ -17,6 +18,19 @@ def start_trees(drafter: Any, items: Sequence[tuple[Any, Sequence[int], int]]) -
     """Return each proposer's ``_finish_tree`` state, batching eligible lattices with matching block lengths."""
 
     states: list[Any] = [proposer._tree_prelude(context, nodes) for proposer, context, nodes in items]
+    # On the M5, two trained eight-position blocks fit the lane matmul's
+    # 16-row tile. Longer, unequal blocks can double that work or miss batching.
+    # Keep solo and large prompt lattices unchanged, and retain every tree's node budget.
+    if (os.environ.get("TF_DRAFT_BATCH_BLOCK", "1") != "0"
+            and getattr(drafter, "block_size", 0) == 8
+            and getattr(getattr(drafter, "target", None), "_tensorfold_lanes", False)):
+        eligible = [i for i, state in enumerate(states)
+                    if state[0] == "need" and items[i][0].context is not None
+                    and int(items[i][0].context.shape[1]) <= CONTEXT_ROWS]
+        if len(eligible) > 1:
+            for i in eligible:
+                kind, block, branch, nodes = states[i]
+                states[i] = (kind, min(block, 8), branch, nodes)
     groups: dict[int, list[int]] = {}
     for i, state in enumerate(states):
         proposer = items[i][0]

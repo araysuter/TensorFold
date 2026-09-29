@@ -97,9 +97,17 @@ class Qwen35Family:
 
         import mlx.core as mx
 
-        tokens, layers = _tokens(inputs), self._layers(cache)
-        self._last = {id(cache): (None, len(tokens), self._position(layers), 0)}
-        return self.core(mx.array([tokens], dtype=mx.uint32), cache=layers)
+        layers = self._layers(cache)
+        if isinstance(inputs, mx.array):
+            # Prompt chunks already arrive as GPU token arrays. Reading them back
+            # to Python would synchronize the GPU just to upload the same tokens.
+            prompt = inputs.reshape(1, -1)
+            if prompt.dtype != mx.uint32:
+                prompt = prompt.astype(mx.uint32)
+        else:
+            prompt = mx.array([_tokens(inputs)], dtype=mx.uint32)
+        self._last = {id(cache): (None, int(prompt.shape[1]), self._position(layers), 0)}
+        return self.core(prompt, cache=layers)
 
     def encode_vision(self, prepared: Any, cache: list[Any]) -> Any:
         encoded = self.vision.encode(prepared)
