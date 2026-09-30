@@ -232,7 +232,8 @@ def load_drafter(model: Any, drafter: str, drafter_bits: int = 4) -> Any:
 def install_lane_kernels(model: Any) -> None:
     """Install lane matmul, fused projections and lane attention, compiling every variant before requests arrive."""
 
-    from tensorfold.kernels.qwen.dense.v1 import exact_attention, lane_attention, lane_fuse, lane_qmm, tiled_prefill
+    from tensorfold.kernels.qwen.dense.v1 import (exact_attention, lane_attention, lane_fuse, lane_qmm,
+                                                prefill_gdn, prompt_attention, tiled_prefill)
 
     exact_attention.install()      # verify windows attend query by query, as one-row steps do
     # TF_LANE_TILE=0 keeps MLX's weight layout without changing results.
@@ -245,6 +246,8 @@ def install_lane_kernels(model: Any) -> None:
     lane_attention.install()
     lane_attention.warm(max_queries=lane_attention.MAX_QUERIES)
     tiled_prefill.prepare()
+    prefill_gdn.prepare()
+    print(f"[tensorfold] {prompt_attention.identity()}", flush=True)
     print(f"[tensorfold] lane kernels on: {warmed} matmul shapes warmed, fused projections {fused}", flush=True)
 
 
@@ -269,13 +272,14 @@ def kernel_version(model: Any) -> str:
                  *(path.read_text() for path in sorted(folder.glob("*.py")))]
         return "row-forward-" + hashlib.sha256("\n".join(parts).encode()).hexdigest()[:12]
     from tensorfold.kernels.qwen.dense.v1 import (lane_attention, lane_fuse, lane_glue, lane_qmm, lane_widen,
-                                                  stream_attention, stream_gdn, tiled_prefill)
+                                                  prefill_gdn, prompt_attention, stream_attention, stream_gdn,
+                                                  tiled_prefill)
 
     sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, *lane_widen.sources().values(), lane_qmm._XSUM,
                lane_attention._PARTIAL, *stream_attention.sources().values(), lane_attention._MERGE,
                lane_glue._NORM_XS, lane_glue._GDN_PRE, lane_glue._GDN_POST, lane_glue._MLP_ACT,
                *stream_gdn.sources().values(), repr((lane_attention.CHUNK, lane_attention.TILE)),
-               tiled_prefill.identity()]
+               tiled_prefill.identity(), prompt_attention.identity(), prefill_gdn.identity()]
     if lane_fuse.enabled:
         sources += [text for _, text in sorted(lane_fuse.sources().items())]
     folder = Path(lane_qmm.__file__).parent

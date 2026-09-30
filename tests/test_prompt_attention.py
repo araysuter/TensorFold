@@ -31,3 +31,24 @@ def test_bounded_prompt_matches_stock_causal_bits(rows, total, dtype):
     parts = prompt_attention.attend(q, k, v, 256**-0.5)
     mx.eval(parts)
     assert bool(mx.array_equal(parts.view(mx.uint16), stock.view(mx.uint16)).item())
+
+
+@pytest.mark.parametrize("rows,total", [(2048, 32768), (2048, 128000), (273, 8193)])
+def test_native_m5_long_prompt_matches_one_fused_call(monkeypatch, rows, total):
+    if not prompt_attention.native_m5():
+        pytest.skip("qualified M5 runtime required")
+    monkeypatch.delenv("TF_NATIVE_PREFILL_ATTENTION", raising=False)
+    q = mx.random.normal((1, 24, rows, 256), key=mx.random.key(41)).astype(mx.bfloat16)
+    k = mx.random.normal((1, 4, total, 256), key=mx.random.key(42)).astype(mx.bfloat16)
+    v = mx.random.normal((1, 4, total, 256), key=mx.random.key(43)).astype(mx.bfloat16)
+    stock = mx.fast.scaled_dot_product_attention(q, k, v, scale=256**-0.5, mask="causal")
+    actual = prompt_attention.attend(q, k, v, 256**-0.5)
+    assert bool(mx.array_equal(actual.view(mx.uint16), stock.view(mx.uint16)).item())
+
+
+def test_attention_mode_names_the_snapshot_arithmetic(monkeypatch):
+    monkeypatch.setattr(prompt_attention, "native_m5", lambda: True)
+    monkeypatch.delenv("TF_NATIVE_PREFILL_ATTENTION", raising=False)
+    native = prompt_attention.identity()
+    monkeypatch.setenv("TF_NATIVE_PREFILL_ATTENTION", "0")
+    assert native != prompt_attention.identity()
