@@ -7,8 +7,8 @@ from threading import RLock
 from typing import Any
 
 from tensorfold.server.errors import RequestError
-from tensorfold.server.memory_budget import (PROCESS_BYTES, CacheMemory, GIB, budget_ceiling, cache_nbytes,
-                                             process_footprint, raise_hint)
+from tensorfold.server.memory_budget import (PROBE_REPEATS, PROCESS_BYTES, CacheMemory, GIB, budget_ceiling,
+                                             cache_nbytes, process_footprint, raise_hint)
 
 
 def attention_geometry(model: Any) -> tuple[int, int]:
@@ -77,7 +77,9 @@ class PromptMemory:
         self.window = int(window_tokens)
         self.chunk_rows = max(1, int(chunk_rows))     # a full prompt chunk: only its peak sizes the workspace
         self.affordable: int | None = None
+        self.resumable: int | None = None
         self.carry, self._probe_base = 0, None
+        self.stream_per_token = 0      # a live stream's growth a token, beyond its cache (a draft model's context)
         self.heads, self.score_rows = attention_geometry(model)
         self.workspace_per_token = int(getattr(model, "prefill_workspace_per_token", 0) or 0)
         self.profile: CacheMemory | None = None
@@ -158,11 +160,19 @@ class PromptMemory:
         if not self.fits(current_cache, keep=keep):
             raise self._refusal(current_cache)
 
+    def require_workspace(self, size: int) -> None:
+        """Reserve image encoder workspace beside the complete prompt and reply cache before encoding."""
+        if type(size) is not int or size < 0:
+            raise ValueError("workspace size must be a nonnegative byte count")
+        with self._memory_lock:
+            if not self._make_room(size):
+                raise RequestError("image encoding and this prompt exceed the memory budget; reduce image "
+                                   "resolution or count, shorten the prompt, or use a smaller checkpoint")
+
     def fits(self, current_cache: Any = None, *, keep: Any = None) -> bool:
-        while self.projected(self.prompt, current_cache=current_cache) > self.budget:
-            if not self._reclaim(keep=keep):
-                return False
-        return True
+        """Reclaim for the prompt, never ``keep``, only while what is left to free could still make room."""
+
+        return self._make_room(0, current_cache, keep=keep)
 
     def would_fit(self, prompt: int, reply: int) -> bool:
         """Whether a request would fit now once every retained prefix and freed buffer is released; no side effects."""
@@ -245,10 +255,14 @@ class PromptMemory:
         text = [int(t) for t in tokens or ()] or [1000 + i for i in range(self.chunk_rows + 64)]
         probe = (text * (-(-(self.chunk_rows + 64) // len(text))))[:self.chunk_rows + 64]
         previous, engine.prefill_guard = engine.prefill_guard, PrefillGuard(Cancellation(), self)
-        self.runtime.clear_cache()
-        self._probe_base, self.workspace_profiled = int(self.runtime.get_active_memory()), False
+        works = []
         try:
-            engine.prefill_prefix(probe, cache=None, cached_tokens=0)
+            for _ in range(PROBE_REPEATS):         # the worst of a few (memory_budget.PROBE_REPEATS)
+                self.runtime.clear_cache()
+                self._probe_base, self.workspace_profiled = int(self.runtime.get_active_memory()), False
+                engine.prefill_prefix(probe, cache=None, cached_tokens=0)
+                works.append(self.observed_work)
+            self.observed_work = max(works)
         finally:
             engine.prefill_guard, self._probe_base = previous, None
             self.runtime.clear_cache()
@@ -260,6 +274,8 @@ class PromptMemory:
 
         try:
             measured = probes()
+            stream = getattr(measured, "memory", None)
+            self.stream_per_token = int(getattr(stream, "per_token", 0) or 0)
             release = getattr(engine, "release_rounds", None)
             if release is not None:
                 release()                      # the probes' last shared round: no stream keeps rows of it
@@ -287,6 +303,7 @@ class PromptMemory:
             raise ValueError(self._no_room())
         # with prompts retained, the next turn resumes only if this one's prompt can be kept beside the working cache
         kept = self.largest_window(window, resumable=True) if self.store is not None else None
+        self.resumable = kept                 # the longest request whose prompt is kept for the next turn
         resumable = kept or self.affordable
         fitted = bool(fit) and (not window or resumable < window)
         if fitted:
@@ -306,9 +323,11 @@ class PromptMemory:
             retained = self.store.nbytes if self.store is not None else 0
             floor = max(0, int(self.runtime.get_active_memory()) - retained) + self.carry
             kept = 2 if resumable else 1
+            beyond = max(0, self.stream_per_token - self.profile.bytes_per_token)   # the live stream's, not kept
 
             def fits(tokens: int) -> bool:
-                return floor + kept * self.profile.cache_bytes(tokens) + self._work(tokens) <= self.budget
+                return (floor + kept * self.profile.cache_bytes(tokens) + beyond * int(tokens) + self._work(tokens)
+                        <= self.budget)
 
             if not fits(0):
                 return 0
@@ -323,22 +342,32 @@ class PromptMemory:
         return (store is not None and store.budget_bytes is not None and size > store.budget_bytes
                 and not store.admit_oversize)
 
+    def _extra_fits_after_reclaim(self, size: int, *, current_cache: Any = None, keep: Any = None) -> bool:
+        """Do not evict prefixes for a copy or a prompt that still cannot fit with every reclaimable buffer gone."""
+
+        store = self.store
+        stored = 0 if store is None else store.nbytes - sum(e.nbytes for e in store._entries if e is keep)
+        freeable = int(self.runtime.get_cache_memory()) + stored
+        return self.projected(self.prompt, current_cache=current_cache, extra_bytes=size) - freeable <= self.budget
+
+    def _make_room(self, size: int, current_cache: Any = None, *, keep: Any = None) -> bool:
+        """Reclaim for ``size`` more bytes, first checking at every step that what is left to free could make room."""
+
+        while self.projected(self.prompt, current_cache=current_cache, extra_bytes=size) > self.budget:
+            # an eviction that freed less than its entry's size (arrays still held elsewhere) stops the next ones
+            if (not self._extra_fits_after_reclaim(size, current_cache=current_cache, keep=keep)
+                    or not self._reclaim(keep=keep)):
+                return False
+        return True
+
     def allow_checkpoint(self, cache: Any) -> bool:
         size = cache_nbytes(cache)
         if self.store is None or self._over_store_budget(size):
             return False
-        while self.projected(self.prompt, current_cache=cache, extra_bytes=size) > self.budget:
-            if not self._reclaim():
-                return False
-        return True
+        return self._make_room(size, cache)
 
     def allow_load(self, size: int) -> bool:
-        if self._over_store_budget(size):
-            return False
-        while self.projected(self.prompt, extra_bytes=size) > self.budget:
-            if not self._reclaim():
-                return False
-        return True
+        return not self._over_store_budget(size) and self._make_room(size)
 
 
 __all__ = ["PromptMemory", "attention_geometry", "probe_tokens"]

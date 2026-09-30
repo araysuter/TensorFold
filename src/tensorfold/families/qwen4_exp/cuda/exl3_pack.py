@@ -33,9 +33,12 @@ def admission(geometry):
 
 
 class Pack:
-    """Tensors by name from the index's shards and the extra files, read with large sequential reads; ``release`` drops read pages."""
+    """Tensors by name from the index's shards and the extra files, read with large O_DIRECT reads where allowed; ``release`` drops read pages."""
 
     def __init__(self, model_dir: str | Path) -> None:
+        from tensorfold.cuda.direct_read import Reader
+
+        self.io = Reader()
         self.dir = Path(model_dir)
         self.where: dict[str, str] = dict(json.loads((self.dir / "model.safetensors.index.json").read_text())
                                           ["weight_map"])
@@ -70,16 +73,7 @@ class Pack:
         return file, base + begin, base + end, e["dtype"], list(e["shape"])
 
     def read(self, file: str, begin: int, end: int) -> torch.Tensor:
-        raw = torch.empty((end - begin,), dtype=torch.uint8)
-        view = memoryview(raw.numpy())
-        with open(self.dir / file, "rb", buffering=0) as f:
-            f.seek(begin)
-            at = 0
-            while at < len(view):
-                got = f.readinto(view[at:at + (64 << 20)])
-                if not got:
-                    raise IOError(f"short read of {file} at {begin + at}")
-                at += got
+        raw = self.io.read(self.dir / file, begin, end - begin)
         self.touched.add(file)
         return raw
 
@@ -144,6 +138,7 @@ class NgramTable:
         self.starts = np.array(starts, dtype=np.int64)
         self.rows = int(self.starts[-1])
         self.row_bytes = 2 * self.words_per_row
+        self.nbytes = sum(a.nbytes for a in self.words)      # what the startup prefetch sizes, as for every table
         self.head_bias = pk.get(base + "head_bias").to(torch.float16).to(device).contiguous()
         self.head_offsets = pk.get(base + "head_offsets").cpu().numpy()
         self.head_sizes = pk.get(base + "head_vocab_sizes").cpu().numpy()

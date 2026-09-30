@@ -9,6 +9,10 @@ They are installed as dependencies.
 The DeltaNet implementations in `src/tensorfold/kernels/qwen/dense/v1/lane_gdn.py` and
 `lane_tree.py` adapt mlx-lm's `qwen3_5` and `gated_delta` model math and kernels under its MIT License.
 
+`src/tensorfold/kernels/qwen/dense/v1/tiled_prefill.py` adapts the packed-weight addresses in MLX's
+`QuantizedBlockLoader` and uses the installed `qmm_t_nax_tgp_impl` and Metal headers under MLX's MIT License,
+Copyright © 2023-2025 Apple Inc. The matmul math remains in the installed dependency.
+
 ## Qwen Flash Next
 
 The n-gram ID helpers in `src/tensorfold/families/qwen4_exp/model.py` and `cuda/ngram.py` translate
@@ -80,6 +84,12 @@ Flash Next's optional int8 and int4 KV caches (`families/qwen4_exp/cuda/kvcache.
 
 `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified `dflash/model_mlx.py` from
 [z-lab/dflash](https://github.com/z-lab/dflash), MIT License, Copyright © 2026 Z Lab.
+
+`src/tensorfold/families/deepseek_v4/vendor/encoding_dsv4.py` is the unmodified `encoding/encoding_dsv4.py` of
+[deepseek-ai/DeepSeek-V4-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) (revision 60d8d70), and
+`tests/fixtures/deepseek_v4/` holds two of its test cases, MIT License, Copyright (c) 2023 DeepSeek.
+The MTP layer TensorFold drafts with comes from that checkpoint's last shard (MIT), converted by
+`families/deepseek_v4/convert.py`.
 
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
 The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use

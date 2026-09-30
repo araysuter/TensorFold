@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from tensorfold.cuda.reply_text import parse_tool_calls as parse_cuda_tool_calls
 from tensorfold.engine.tool_draft import ToolCallStreamer
 from tensorfold.server.http import parse_tool_calls_from_content
 
@@ -21,6 +22,16 @@ from tensorfold.server.http import parse_tool_calls_from_content
         ("string", "[1,2]", "[1,2]"),
         ("array", "invalid", "invalid"),
         ("array", '{"x":1}', '{"x":1}'),
+        # #87: a value one or more closers short is closed; one with too many, or cut inside a string, stays text
+        ("object", '{"name": "disk-check", "schema": {"trigger": {"script": "df -h /", "cron": "0 0 * * ?"}}',
+         {"name": "disk-check", "schema": {"trigger": {"script": "df -h /", "cron": "0 0 * * ?"}}}),
+        ("array", '[{"x": [1, 2]', [{"x": [1, 2]}]),
+        ("object", '{"a": "}{]"', {"a": "}{]"}),
+        ("object", '{"b": {"a": "\\"}"}', {"b": {"a": '"}'}}),
+        ("object", '{"a": 1}}', '{"a": 1}}'),
+        ("object", '{"a": "cut', '{"a": "cut'),
+        ("object", '{"a": 1,', '{"a": 1,'),
+        ("array", '{"x": 1', '{"x": 1'),
     ],
 )
 @pytest.mark.parametrize("step", [1, 7, 10000])
@@ -37,6 +48,9 @@ def test_parameter_type_matches_schema_in_both_paths(kind, value, expected, step
     text = f"<tool_call>\n<function=question>\n<parameter=questions>\n{value}\n</parameter>\n</function>\n</tool_call>"
     _, calls = parse_tool_calls_from_content(text, tools)
     assert json.loads(calls[0]["function"]["arguments"]) == {"questions": expected}
+    for max_calls in (None, 1):                                       # the CUDA server's parser, the same types
+        _, calls = parse_cuda_tool_calls(text, tools, max_calls=max_calls)
+        assert json.loads(calls[0]["function"]["arguments"]) == {"questions": expected}
     streamer = ToolCallStreamer(tools)
     deltas = []
     for n in range(1, len(text) + 1, step):

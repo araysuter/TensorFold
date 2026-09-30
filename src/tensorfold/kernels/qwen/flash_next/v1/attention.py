@@ -52,15 +52,6 @@ _ATTN_PREP = r"""
   else Kout[(r * NKV + head - NQ) * HD + d] = bfloat(out);
 """
 
-_ATTN_GATE = r"""
-  // attention output [R, H, D] (rows of heads) times sigmoid(gate) (bf16 ops); gate from the [q | gate] pairs
-  const uint i = thread_position_in_grid.x;
-  const int r = int(i) / (NQ * HD), c = int(i) % (NQ * HD);
-  const int head = c / HD, d = c % HD;
-  const float g = float(P[r * PW + head * 2 * HD + HD + d]);
-  OUT[i] = bfloat(float(A[i]) * bsig(g));
-"""
-
 _IDX_POOL = r"""
   // Threadgroup j (DI threads): block START + j's pooled indexer key: the mean of its 4 raw keys (fp32 in order,
   // bf16), RMSNorm with (1 + w) (fp32, bf16), RoPE (RD dims, non-interleaved halves) at the block's first position.
@@ -145,16 +136,22 @@ _IDX_SELECT = r"""
       if ((k & mask) == prefix) atomic_fetch_add_explicit(&hist[(k >> shift) & 255u], 1u, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (t == 0) {
-      uint above = 0u;
-      int bin = 255;
-      for (; bin > 0; bin--) {
-        const uint n = atomic_load_explicit(&hist[bin], memory_order_relaxed);
-        if (above + n >= need) break;
-        above += n;
+    if (sg == 0) {                            // the cut bin: lane l scans bins 255 - 8l down to 248 - 8l
+      uint c[8], mine = 0u;
+      for (int i = 0; i < 8; i++) {
+        c[i] = atomic_load_explicit(&hist[255 - 8 * int(lane) - i], memory_order_relaxed);
+        mine += c[i];
       }
-      cut_t = prefix | (uint(bin) << shift);
-      need_t = need - above;
+      uint above = simd_prefix_exclusive_sum(mine);
+      if (above < need && above + mine >= need) {
+        int bin = 248 - 8 * int(lane);
+        for (int i = 0; i < 8; i++) {
+          if (above + c[i] >= need) { bin = 255 - 8 * int(lane) - i; break; }
+          above += c[i];
+        }
+        cut_t = prefix | (uint(bin) << shift);
+        need_t = need - above;
+      }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     prefix = cut_t;
@@ -270,6 +267,12 @@ _ATTN_MERGE = r"""
   OUT[(size_t(r) * H + h) * D + d] = bfloat(acc / total);
 """
 
+# the merge, then the output gate: bf16(bf16(merged) * sigmoid(gate)) (bf16 ops), gate from the [q | gate] pairs
+_ATTN_MERGE_GATE = _ATTN_MERGE.replace(
+    "  OUT[(size_t(r) * H + h) * D + d] = bfloat(acc / total);\n",
+    "  const float g = float(GP[r * PW + h * 2 * D + D + d]);\n"
+    "  OUT[(size_t(r) * H + h) * D + d] = bfloat(float(bfloat(acc / total)) * bsig(g));\n")
+
 
 def attn_prep(projected: mx.array, positions: mx.array, q_norm: mx.array, k_norm: mx.array, index_norm: mx.array,
               eps: mx.array, *, q_heads: int, kv_heads: int, head_dim: int, index_heads: int, index_dim: int,
@@ -286,16 +289,6 @@ def attn_prep(projected: mx.array, positions: mx.array, q_norm: mx.array, k_norm
                         output_shapes=[(rows, q_heads, head_dim), (rows, kv_heads, head_dim),
                                        (rows, index_heads, index_dim)],
                         output_dtypes=[mx.bfloat16, mx.bfloat16, mx.bfloat16]))
-
-def attn_gate(attended: mx.array, projected: mx.array, *, q_heads: int, head_dim: int) -> mx.array:
-    """attended [R, NQ, HD] * sigmoid(gate) -> [R, NQ * HD] bf16."""
-
-    rows = int(attended.shape[0])
-    width = int(projected.shape[-1])
-    run = kernel("q4_attn_gate", _ATTN_GATE, ["A", "P"], ["OUT"])
-    return run(inputs=[attended, projected], template=[("NQ", q_heads), ("HD", head_dim), ("PW", width)],
-                  grid=(rows * q_heads * head_dim, 1, 1), threadgroup=(256, 1, 1),
-                  output_shapes=[(rows, q_heads * head_dim)], output_dtypes=[mx.bfloat16])[0]
 
 def index_pool(raw: mx.array, start: int, stop: int, norm: mx.array, eps: mx.array, *, rotary_dim: int,
                base: float) -> mx.array:
@@ -332,8 +325,8 @@ def select_blocks(scores: mx.array, complete: list[int], ends: list[int], *, top
                   output_shapes=[(rows, width)], output_dtypes=[mx.int32])[0]
 
 def attention_rows(q: mx.array, keys: mx.array, values: mx.array, counts: list[int], ids: mx.array | None,
-                   sparse: list[bool], scale: float, *, parts: int = 16) -> mx.array:
-    """Attend to each row's sparse ids or dense prefix, splitting by its own length and merging parts in order independently."""
+                   sparse: list[bool], scale: float, *, parts: int = 16, gate: mx.array | None = None) -> mx.array:
+    """Each row over its sparse ids or dense prefix, parts merged in order; ``gate``: the projected rows' gate."""
 
     rows, heads, dims = q.shape
     kv_heads = int(keys.shape[1])
@@ -351,10 +344,22 @@ def attention_rows(q: mx.array, keys: mx.array, values: mx.array, counts: list[i
                    grid=(256 * heads, rows, parts), threadgroup=(256, 1, 1),
                    output_shapes=[(rows, heads, parts, dims), (rows, heads, parts, 2)],
                    output_dtypes=[mx.float32, mx.float32])
-    merge = kernel("q4_attn_merge", _ATTN_MERGE, ["PO", "PM"], ["OUT"])
-    return merge(inputs=[po, pm], template=[("H", heads), ("D", dims), ("P", parts)],
+    return _merge(po, pm, gate, rows, heads, dims, parts)
+
+
+def _merge(po: mx.array, pm: mx.array, gate: mx.array | None, rows: int, heads: int, dims: int, parts: int) -> mx.array:
+    """The parts merged in order: [R, H, D], or with ``gate`` (the projected rows) gated, [R, H * D]."""
+
+    if gate is None:
+        merge = kernel("q4_attn_merge", _ATTN_MERGE, ["PO", "PM"], ["OUT"])
+        return merge(inputs=[po, pm], template=[("H", heads), ("D", dims), ("P", parts)],
+                     grid=(dims, heads, rows), threadgroup=(dims, 1, 1),
+                     output_shapes=[(rows, heads, dims)], output_dtypes=[mx.bfloat16])[0]
+    merge = kernel("q4_attn_merge_gate", _ATTN_MERGE_GATE, ["PO", "PM", "GP"], ["OUT"])
+    return merge(inputs=[po, pm, gate], template=[("H", heads), ("D", dims), ("P", parts),
+                                                  ("PW", int(gate.shape[-1]))],
                  grid=(dims, heads, rows), threadgroup=(dims, 1, 1),
-                 output_shapes=[(rows, heads, dims)], output_dtypes=[mx.bfloat16])[0]
+                 output_shapes=[(rows, heads * dims)], output_dtypes=[mx.bfloat16])[0]
 
 
 def _attn_source(streams: int) -> str:
@@ -376,7 +381,7 @@ def _attn_source(streams: int) -> str:
 
 def attention_rows_multi(q: mx.array, keys: Sequence[mx.array], values: Sequence[mx.array], stream_of_row: Sequence[int],
                          counts: Sequence[int], ids: mx.array | None, sparse: Sequence[bool], scale: float, *,
-                         parts: int = 16) -> mx.array:
+                         parts: int = 16, gate: mx.array | None = None) -> mx.array:
     """``attention_rows`` with row r reading the cache of its stream, stream_of_row[r]."""
 
     rows, heads, dims = q.shape
@@ -398,10 +403,7 @@ def attention_rows_multi(q: mx.array, keys: Sequence[mx.array], values: Sequence
                    grid=(256 * heads, rows, parts), threadgroup=(256, 1, 1),
                    output_shapes=[(rows, heads, parts, dims), (rows, heads, parts, 2)],
                    output_dtypes=[mx.float32, mx.float32])
-    merge = kernel("q4_attn_merge", _ATTN_MERGE, ["PO", "PM"], ["OUT"])
-    return merge(inputs=[po, pm], template=[("H", heads), ("D", dims), ("P", parts)],
-                 grid=(dims, heads, rows), threadgroup=(dims, 1, 1),
-                 output_shapes=[(rows, heads, dims)], output_dtypes=[mx.bfloat16])[0]
+    return _merge(po, pm, gate, rows, heads, dims, parts)
 
 def _scores_source(streams: int) -> str:
     src = _IDX_SCORES

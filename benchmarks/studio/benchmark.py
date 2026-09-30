@@ -159,6 +159,8 @@ def main():
     p.add_argument('--tokenizer', default='ukisai/Swift-1.5-4bit-MLX')
     p.add_argument('--revision', default='82276731e47e1db4ac502f24c63cfaf886639be9')
     p.add_argument('--contexts', nargs='+', type=int, default=[20000,40000,60000,80000,128000])
+    p.add_argument('--concurrency', nargs='+', type=int, choices=(1, 2), default=[1, 2],
+                   help='Request counts to test (default: both 1 and 2)')
     p.add_argument('--output-tokens', type=int, default=1024)
     p.add_argument('--context-limit', type=int, default=131072)
     p.add_argument('--reps', type=int, default=1, help='Trials per context/concurrency pair (default: 1; use 3 for more reliable medians)')
@@ -205,7 +207,7 @@ def main():
         print('Keeping completed groups: ' + ', '.join(f'{n:,} / {c} concurrent' for n,c in sorted(completed)), flush=True)
     print('Running sequential test groups; up to two concurrent requests. Results saved after each group.', flush=True)
     for n in args.contexts:
-        for c in (1,2):
+        for c in args.concurrency:
             if (n, c) in completed:
                 continue
             for rep in range(1,args.reps+1):

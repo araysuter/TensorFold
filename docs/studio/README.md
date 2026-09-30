@@ -1,12 +1,15 @@
 # Astra Studio configuration
 
-This fork adds conversation monitoring and Bearer authentication to TensorFold 0.3.6.2.
+This fork adds conversation monitoring and Bearer authentication to TensorFold 0.5.0.
 It reuses upstream `--spill-gib` for SSD snapshots. The BF16 cache and decoding kernels
 are unchanged. `tools/start-studio.sh` selects Swift's tested snapshot, two compute lanes,
 a 131,072-token prompt-plus-response limit, eight tracked conversations and a 128 GiB
 SSD spill budget. Idle RAM checkpoints remain until the cache limit or memory admission
 requires eviction. There is no fixed reservation of two complete 128k windows: the
 existing memory controller can queue the second request when both would not fit.
+
+The Swift optimization branch and its Studio validation steps are described in
+[optimization.md](optimization.md).
 
 ## Install on the Studio
 

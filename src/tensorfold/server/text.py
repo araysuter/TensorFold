@@ -10,8 +10,9 @@ _THINK_END = "</think>"
 # (what a reply writes to open its think block, what closes it): Qwen's prompt opens the block; Gemma 4's reply does
 THINK_MARKERS = ("", _THINK_END)
 CHANNEL_MARKERS = ("<|channel>thought", "<channel|>")
-# (opener, closer) of a tool call's markup: Qwen's, then Gemma 4's
-_CALLS = (("<tool_call>", "</tool_call>"), ("<|tool_call>", "<tool_call|>"))
+# (opener, closer) of a tool call's markup: Qwen's, Gemma 4's, DeepSeek-V4's DSML block
+_CALLS = (("<tool_call>", "</tool_call>"), ("<|tool_call>", "<tool_call|>"),
+          ("<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>"))
 
 
 def _partial_tag(text: str, tag: str) -> int:
@@ -44,6 +45,14 @@ def split_thinking(text: str, *, finished: bool, markers: tuple[str, str] = THIN
         return text, ""
     held = 0 if finished else max(_partial_tag(text, tag) for tag in (closer, *(opener for opener, _ in _CALLS)))
     return text[: len(text) - held], ""
+
+
+def reasoning_count(tokens: list[int], think_end: int | None) -> int:
+    """A thinking reply's reasoning tokens: through its close ``think_end`` (None or -1: not thinking), else all."""
+
+    if think_end is None or think_end < 0:
+        return 0
+    return tokens.index(think_end) + 1 if think_end in tokens else len(tokens)
 
 
 def think_markers(tokenizer: Any) -> tuple[str, str]:
@@ -96,6 +105,7 @@ def render_prompt_ids(
     kwargs: dict[str, Any] = {
         "add_generation_prompt": add_generation_prompt,
         "enable_thinking": enable_thinking,
+        "thinking_mode": "thinking" if enable_thinking else "chat",   # DeepSeek-V4's templates read this switch
     }
     if enable_thinking and reasoning_effort:
         kwargs["reasoning_effort"] = reasoning_effort
