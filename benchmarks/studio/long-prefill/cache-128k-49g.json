@@ -1,0 +1,116 @@
+[
+  {
+    "label": "chat-cold",
+    "usage": {
+      "prompt_tokens": 128066,
+      "completion_tokens": 128,
+      "total_tokens": 128194,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "f35e64b8732f",
+    "prefill_seconds": 198.50906570802908,
+    "speculative": {
+      "rounds": 34,
+      "drafted": 472,
+      "accepted": 93,
+      "acceptance_rate": 0.19703389830508475,
+      "tokens_per_round": 3.764705882352941,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Explanation\n\n1.  **Redundancy:** The module defines the exact same function `transform` hundreds of times. In Python, each subsequent definition overwrites the previous one in the module's namespace.\n2.  **Performance/Resource Risk:** While Python will only keep the *last* definition in memory at runtime (since they all have the same name), the act of parsing and compiling hundreds of identical function definitions is wasteful and can lead to:\n    *   **Slow import times:** The interpreter must parse and compile"
+      },
+      "finish_reason": "length"
+    },
+    "memory_after": {
+      "active": 28413163964,
+      "cache": 0,
+      "peak": 39585928044,
+      "budget": 52613349376,
+      "mlx_budget": 49392123904,
+      "footprint": 34563294296
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 56,
+        "Swapouts": 13348
+      },
+      "after": {
+        "Swapins": 56,
+        "Swapouts": 13348
+      }
+    },
+    "swap_after": "vm.swapusage: total = 1024.00M  used = 208.56M  free = 815.44M  (encrypted)"
+  },
+  {
+    "label": "chat-resumed",
+    "usage": {
+      "prompt_tokens": 128066,
+      "completion_tokens": 128,
+      "total_tokens": 128194,
+      "prompt_tokens_details": {
+        "cached_tokens": 124928
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "f35e64b8732f",
+    "prefill_seconds": 8.110742708027828,
+    "speculative": {
+      "rounds": 34,
+      "drafted": 470,
+      "accepted": 93,
+      "acceptance_rate": 0.19787234042553192,
+      "tokens_per_round": 3.764705882352941,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Explanation\n\n1.  **Redundancy:** The module defines the exact same function `transform` hundreds of times. In Python, each subsequent definition overwrites the previous one in the module's namespace.\n2.  **Performance/Resource Risk:** While Python will only keep the *last* definition in memory at runtime (since they all have the same name), the act of parsing and compiling hundreds of identical function definitions is wasteful and can lead to:\n    *   **Slow import times:** The interpreter must parse and compile"
+      },
+      "finish_reason": "length"
+    },
+    "memory_after": {
+      "active": 28589370284,
+      "cache": 0,
+      "peak": 39627135764,
+      "budget": 52613349376,
+      "mlx_budget": 49392123904,
+      "footprint": 35640689872
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 56,
+        "Swapouts": 13348
+      },
+      "after": {
+        "Swapins": 56,
+        "Swapouts": 13348
+      }
+    },
+    "swap_after": "vm.swapusage: total = 1024.00M  used = 208.56M  free = 815.44M  (encrypted)"
+  }
+]

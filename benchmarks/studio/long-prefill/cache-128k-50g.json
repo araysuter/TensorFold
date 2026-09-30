@@ -1,0 +1,116 @@
+[
+  {
+    "label": "chat-cold",
+    "usage": {
+      "prompt_tokens": 128058,
+      "completion_tokens": 128,
+      "total_tokens": 128186,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "7407476ae071",
+    "prefill_seconds": 198.5950666249846,
+    "speculative": {
+      "rounds": 32,
+      "drafted": 436,
+      "accepted": 95,
+      "acceptance_rate": 0.21788990825688073,
+      "tokens_per_round": 4.0,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Why this is a risk:\n\n1.  **Maintenance Hazard**: If a bug is found in the logic of `transform` (e.g., the sorting key is wrong, or it should handle `None` values), a developer must update **every single instance** of the function. Missing even one instance will result in inconsistent behavior depending on which definition is \"active\" (though in Python, the last definition wins, so only the final one is actually used at runtime).\n2.  **Code Bloat & Readability**:"
+      },
+      "finish_reason": "length"
+    },
+    "memory_after": {
+      "active": 28411050084,
+      "cache": 0,
+      "peak": 39585876332,
+      "budget": 53687091200,
+      "mlx_budget": 50465865728,
+      "footprint": 37035869056
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 56,
+        "Swapouts": 13348
+      },
+      "after": {
+        "Swapins": 56,
+        "Swapouts": 13348
+      }
+    },
+    "swap_after": "vm.swapusage: total = 1024.00M  used = 208.56M  free = 815.44M  (encrypted)"
+  },
+  {
+    "label": "chat-resumed",
+    "usage": {
+      "prompt_tokens": 128058,
+      "completion_tokens": 128,
+      "total_tokens": 128186,
+      "prompt_tokens_details": {
+        "cached_tokens": 124928
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "7407476ae071",
+    "prefill_seconds": 8.355868624988943,
+    "speculative": {
+      "rounds": 32,
+      "drafted": 436,
+      "accepted": 95,
+      "acceptance_rate": 0.21788990825688073,
+      "tokens_per_round": 4.0,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Why this is a risk:\n\n1.  **Maintenance Hazard**: If a bug is found in the logic of `transform` (e.g., the sorting key is wrong, or it should handle `None` values), a developer must update **every single instance** of the function. Missing even one instance will result in inconsistent behavior depending on which definition is \"active\" (though in Python, the last definition wins, so only the final one is actually used at runtime).\n2.  **Code Bloat & Readability**:"
+      },
+      "finish_reason": "length"
+    },
+    "memory_after": {
+      "active": 28587121980,
+      "cache": 0,
+      "peak": 39626918748,
+      "budget": 53687091200,
+      "mlx_budget": 50465865728,
+      "footprint": 32735331488
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 56,
+        "Swapouts": 13348
+      },
+      "after": {
+        "Swapins": 56,
+        "Swapouts": 13604
+      }
+    },
+    "swap_after": "vm.swapusage: total = 1024.00M  used = 212.56M  free = 811.44M  (encrypted)"
+  }
+]

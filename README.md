@@ -51,9 +51,10 @@ bash tools/start-studio.sh
 | History inventory | 8 histories; not a limit of 8 snapshot files |
 | RAM checkpoint cache | 2 checkpoints, 8 GiB budget |
 | SSD spill budget | 128 GiB per model in its configured session-cache directory |
-| Memory target | 58 GiB process / up to 55 GiB MLX; Metal may cap this lower |
 | Drafter | `z-lab/Qwen3.8-27B-DFlash2`, enabled by default |
 
+Swift defaults to **48 GiB process / 45 GiB MLX**, qualified with cold and cached 128K
+prompts. Qwen keeps its existing 58 GiB requested process budget, subject to Metal's cap.
 The observed Qwen startup cap was **51.8 GiB process / 48.8 GiB MLX**. These are budgets, not preallocated memory or a guarantee against swap. Clients do not need to enable drafting; explicitly sending `"draft": false` disables it for that request.
 
 The launcher copies the existing llama.cpp key if the TensorFold key is missing. Never put keys in this repository. If downloads need Hugging Face authentication, run `hf auth login` in the activated environment and supply a read token interactively.
@@ -73,6 +74,19 @@ python -m pip install -e .
 Provision `~/.config/tensorfold/api-key` before launching if the old llama.cpp key is unavailable. The public hostname requires the existing tunnel; cloning this repo does not configure it.
 
 ## Benchmarks
+
+### Long prompt processing · September 30, 2026
+
+On the M5 Max, two cold trials per size reduced prompt time from 22.19 to 20.63 seconds
+at 20K tokens, 83.81 to 73.16 seconds at 60K, and 267.33 to 197.02 seconds at 128K.
+The 128K result is 26.3% less prompt time with about 99% GPU utilization. The branch
+includes upstream 0.6.0 and M5 attention and DeltaNet prompt optimizations. In one
+queued-request comparison, a short prompt began responding in 1.92 seconds instead
+of 21.03 seconds while a long prompt was being processed.
+
+[Measurements, runtime qualification and reproduction commands](benchmarks/studio/long-prefill/README.md).
+Fused attention changes rounding; three of six greedy replies differed from the
+previous path. These synthetic measurements do not establish equivalent answer quality.
 
 [Run the benchmark suite and regenerate these charts](benchmarks/studio/README.md).
 

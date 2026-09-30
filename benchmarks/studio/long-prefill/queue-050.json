@@ -1,0 +1,62 @@
+[
+  {
+    "label": "optimized-050",
+    "tokens": 20000,
+    "wall_seconds": 21.157248999981675,
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 32,
+      "total_tokens": 20032,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "metrics": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 67.32112325162716,
+      "seconds": 21.11664316698443,
+      "prefill_seconds": 20.656163625011686,
+      "time_to_first_token": 20.6566096249735,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "c0809513c176",
+      "min_rows": 2
+    },
+    "text": "The code is a Python function named `transform` that takes a list of dictionaries called `rows` as input. It sorts the list based on the value of"
+  },
+  {
+    "label": "optimized-050",
+    "tokens": 1024,
+    "wall_seconds": 21.51448262500344,
+    "usage": {
+      "prompt_tokens": 1024,
+      "completion_tokens": 32,
+      "total_tokens": 1056,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "metrics": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 71.09570625096335,
+      "seconds": 21.461570792016573,
+      "prefill_seconds": 21.02553883404471,
+      "time_to_first_token": 21.02581595798256,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "db83afc6e37b",
+      "min_rows": 2
+    },
+    "text": "The code defines the same function `transform` many times. In Python, later definitions override earlier ones, so only the last definition is used. This is a"
+  }
+]

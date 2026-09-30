@@ -31,6 +31,12 @@ def swap_usage() -> str | None:
         return None
 
 
+def swap_counters() -> dict[str, int]:
+    output = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True, timeout=3).stdout
+    return {name: int(hit[1]) for name in ("Swapins", "Swapouts")
+            if (hit := re.search(name + r":\s*(\d+)", output))}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8080")
@@ -43,6 +49,7 @@ def main() -> None:
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--label", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--first-token-base", type=int, default=1000)
     args = parser.parse_args()
     if args.reps < 1 or min(args.contexts) < 128 or args.max_tokens < 1:
         parser.error("reps and max-tokens must be positive; contexts must be at least 128")
@@ -73,12 +80,13 @@ def main() -> None:
     records = []
     (args.out / "config.json").write_text(json.dumps({"label": args.label, "model": args.model,
                 "tokenizer": args.tokenizer, "contexts": args.contexts, "reps": args.reps,
-                "max_tokens": args.max_tokens, "temperature": 0, "seed": 17, "draft": True}, indent=2) + "\n")
+                "max_tokens": args.max_tokens, "temperature": 0, "seed": 17, "draft": True,
+                "first_token_base": args.first_token_base}, indent=2) + "\n")
     for size in args.contexts:
         for trial in range(args.reps):
             # Different first token on every request prevents RAM and disk prefix reuse.
             # Every server variant receives exactly the same IDs and sampling seed.
-            first = 1000 + args.contexts.index(size) * args.reps + trial
+            first = args.first_token_base + args.contexts.index(size) * args.reps + trial
             prefix = [first] + tokenizer.encode(f"Run {trial}: inspect this synthetic Python repository.\n",
                                                 add_special_tokens=False)
             room = size - len(prefix) - len(suffix)
@@ -98,6 +106,7 @@ def main() -> None:
             watcher = threading.Thread(target=monitor, daemon=True)
             watcher.start()
             before = swap_usage()
+            swap_before_counts = swap_counters()
             began = time.perf_counter()
             try:
                 request = urllib.request.Request(args.url.rstrip("/") + "/v1/completions",
@@ -123,7 +132,8 @@ def main() -> None:
                       "completion_tokens": usage["completion_tokens"], "token_sha": metrics["token_sha"],
                       "decode_tps": metrics.get("tokens_per_second"), "memory_after": memory,
                       "text": reply["choices"][0]["text"], "gpu_utilization": readings,
-                      "swap_before": before, "swap_after": swap_usage()}
+                      "swap_before": before, "swap_after": swap_usage(),
+                      "swap_counts_before": swap_before_counts, "swap_counts_after": swap_counters()}
             records.append(record)
             (args.out / "results.json").write_text(json.dumps(records, indent=2) + "\n")
             printable = {k: v for k, v in record.items() if k not in ("text", "gpu_utilization")}

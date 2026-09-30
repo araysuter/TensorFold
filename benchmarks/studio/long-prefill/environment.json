@@ -11,7 +11,8 @@
     "python": "3.14",
     "mlx": "0.32.2",
     "mlx-metal": "0.32.2",
-    "mlx-lm": "0.31.3"
+    "mlx-lm": "0.31.3",
+    "tensorfold_source": "0.6.0"
   },
   "model": {
     "name": "swift-1.5",
@@ -30,12 +31,12 @@
     "active_benchmark_requests": 1,
     "prefill_chunk": 2048,
     "prompt_cache_gib": 8,
-    "process_budget_bytes": 55662788608,
-    "mlx_budget_bytes": 52441563136
+    "process_budget_bytes": 51539607552,
+    "mlx_budget_bytes": 48318382080
   },
   "comparison": {
     "baseline_fork_main": "25f8b0f70f72a6a6c60c68c73de8eb1db344c3ed",
-    "upstream_main": "9cd52ab4daba68ddd09be89be8f23ad43175e821",
+    "upstream_main": "c4646171139ee8a3c38103eaa1699dad226ec12b",
     "tested_attention_sha256": "b62f295388987a31790cdd7f7d844d02bc0474e8a100263bc23d187d9a5583e6",
     "tested_recurrence_sha256": "f7db442f09acc40269d9ee009f793514e112582fddc8efadf34170d0be236ce4",
     "baseline_flags": {
@@ -47,11 +48,23 @@
       "TF_PACKED_PREFILL_GDN": "1"
     },
     "repetitions_per_context": 2,
-    "cached_tokens": 0
+    "cached_tokens": 0,
+    "initial_upstream_main": "9cd52ab4daba68ddd09be89be8f23ad43175e821",
+    "candidate_code_tree": "ba22d05cdb169cc239237828466875709fba6185",
+    "cold_table_process_budget_bytes": 55662788608,
+    "cold_table_mlx_budget_bytes": 52441563136
   },
   "validation": {
-    "focused_tests_passed": 64,
+    "focused_tests_passed": 479,
     "concurrent_draft_equality": true,
-    "cached_chat_equality": true
+    "cached_chat_equality": true,
+    "initial_focused_tests_passed": 64,
+    "focused_tests_skipped": 2,
+    "final_budget_matched_cold_128k_seconds": 196.92506691697054,
+    "final_budget_cold_hash_matches": true,
+    "final_budget_cached_128k_seconds": 8.34669054101687,
+    "final_budget_cached_128k_tokens": 124928,
+    "final_budget_cached_reply_matches": true,
+    "final_budget_swapout_delta": 0
   }
 }
