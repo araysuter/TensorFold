@@ -126,7 +126,8 @@ def main() -> None:
                       "swap_before": before, "swap_after": swap_usage()}
             records.append(record)
             (args.out / "results.json").write_text(json.dumps(records, indent=2) + "\n")
-            print(json.dumps({k: v for k, v in record.items() if k not in ("text", "gpu_utilization")}), flush=True)
+            printable = {k: v for k, v in record.items() if k not in ("text", "gpu_utilization")}
+            print(json.dumps(printable), flush=True)
     summary = [{"tokens": size, "samples": args.reps,
                 "median_prefill_seconds": statistics.median(r["prefill_seconds"] for r in records if r["tokens"] == size),
                 "median_prompt_tps": statistics.median(r["prompt_tps"] for r in records if r["tokens"] == size)}

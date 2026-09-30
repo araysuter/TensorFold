@@ -134,7 +134,7 @@ def packed(q: Any, k: Any, v: Any, g: Any, beta: Any, state: Any) -> tuple[Any, 
 
 
 def dispatch(q: Any, k: Any, v: Any, g: Any, beta: Any, state: Any, mask: Any = None) -> tuple[Any, Any]:
-    if (_available and mask is None and q.shape[1] >= 128 and k.shape[-1] == 128 and v.shape[-1] % 8 == 0
+    if (_available and mask is None and q.shape[1] >= 128 and k.shape[-1] == 128 and v.shape[-1] == 128
             and g.ndim == 3 and g.dtype == mx.float32 and state.dtype == mx.float32
             and q.dtype in (mx.bfloat16, mx.float16, mx.float32) and mx.default_device() == mx.gpu):
         return packed(q, k, v, g, beta, state)

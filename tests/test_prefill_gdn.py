@@ -40,12 +40,14 @@ def test_prompt_state_resumes_with_identical_bits():
     assert_bits((mx.concatenate([first, tail], axis=1), resumed), (whole, final))
 
 
-@pytest.mark.parametrize("case", ["short", "mask", "vector", "disabled"])
+@pytest.mark.parametrize("case", ["short", "mask", "vector", "value_dim", "disabled"])
 def test_other_shapes_keep_the_installed_kernel(monkeypatch, case):
     q, k, v, g, beta, state = inputs(64 if case == "short" else 128, mx.bfloat16)
     mask = mx.ones((1, q.shape[1]), dtype=mx.bool_) if case == "mask" else None
     if case == "vector":
         g = mx.broadcast_to(g[..., None], (*g.shape, 128))
+    if case == "value_dim":
+        v, state = v[..., :64], state[:, :, :64]
     calls = []
     monkeypatch.setattr(prefill_gdn, "_available", case != "disabled")
     monkeypatch.setattr(prefill_gdn, "_STOCK", lambda *args: calls.append(args) or ("stock", "state"))

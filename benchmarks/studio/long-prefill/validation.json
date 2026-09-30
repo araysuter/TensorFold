@@ -1,0 +1,208 @@
+[
+  {
+    "label": "concurrent-draft-False-user-0",
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 128,
+      "total_tokens": 20128,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "083a0afc5a37",
+    "prefill_seconds": 20.74456125003053,
+    "speculative": {
+      "rounds": 127,
+      "drafted": 0,
+      "accepted": 0,
+      "acceptance_rate": 0.0,
+      "tokens_per_round": 1.0078740157480315
+    },
+    "choice": {
+      "index": 0,
+      "text": "To implement an asynchronous work queue with retries and cancellation, you can use Python's `asyncio` library. Here is an example implementation:\n\n```python\nimport asyncio\nfrom typing import Callable, Any, Optional\n\nclass WorkQueue:\n    def __init__(self, max_retries: int = 3):\n        self.queue: asyncio.Queue = asyncio.Queue()\n        self.max_retries = max_retries\n        self.active_tasks: dict = {}\n\n    async def add_task(self, func: Callable, *args: Any, **kwargs: Any) -> None:\n        \"\"\"Add a task to the",
+      "finish_reason": "length",
+      "logprobs": null
+    }
+  },
+  {
+    "label": "concurrent-draft-False-user-1",
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 128,
+      "total_tokens": 20128,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "92ea918e180a",
+    "prefill_seconds": 46.475676083995495,
+    "speculative": {
+      "rounds": 127,
+      "drafted": 0,
+      "accepted": 0,
+      "acceptance_rate": 0.0,
+      "tokens_per_round": 1.0078740157480315
+    },
+    "choice": {
+      "index": 0,
+      "text": "def transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row:",
+      "finish_reason": "length",
+      "logprobs": null
+    }
+  },
+  {
+    "label": "concurrent-draft-True-user-0",
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 128,
+      "total_tokens": 20128,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "083a0afc5a37",
+    "prefill_seconds": 41.87142058403697,
+    "speculative": {
+      "rounds": 22,
+      "drafted": 318,
+      "accepted": 105,
+      "acceptance_rate": 0.330188679245283,
+      "tokens_per_round": 5.818181818181818,
+      "proposer": {
+        "proposals": 2,
+        "proposed_tokens": 30,
+        "judged_tokens": 15,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "text": "To implement an asynchronous work queue with retries and cancellation, you can use Python's `asyncio` library. Here is an example implementation:\n\n```python\nimport asyncio\nfrom typing import Callable, Any, Optional\n\nclass WorkQueue:\n    def __init__(self, max_retries: int = 3):\n        self.queue: asyncio.Queue = asyncio.Queue()\n        self.max_retries = max_retries\n        self.active_tasks: dict = {}\n\n    async def add_task(self, func: Callable, *args: Any, **kwargs: Any) -> None:\n        \"\"\"Add a task to the",
+      "finish_reason": "length",
+      "logprobs": null
+    }
+  },
+  {
+    "label": "concurrent-draft-True-user-1",
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 128,
+      "total_tokens": 20128,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "92ea918e180a",
+    "prefill_seconds": 20.63174441701267,
+    "speculative": {
+      "rounds": 8,
+      "drafted": 202,
+      "accepted": 119,
+      "acceptance_rate": 0.5891089108910891,
+      "tokens_per_round": 16.0,
+      "proposer": {
+        "proposals": 14,
+        "proposed_tokens": 376,
+        "judged_tokens": 188,
+        "accepted_tokens": 110,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "text": "def transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row:",
+      "finish_reason": "length",
+      "logprobs": null
+    }
+  },
+  {
+    "label": "chat-cold",
+    "usage": {
+      "prompt_tokens": 20047,
+      "completion_tokens": 128,
+      "total_tokens": 20175,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "94b754cfda50",
+    "prefill_seconds": 21.359010292042512,
+    "speculative": {
+      "rounds": 35,
+      "drafted": 490,
+      "accepted": 92,
+      "acceptance_rate": 0.18775510204081633,
+      "tokens_per_round": 3.657142857142857,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Explanation:\n1.  **Redundancy and Maintenance Hazard**: The same function `def transform(rows): ...` is defined hundreds of times in a row. While Python will simply overwrite the previous definitions with the last one (so the *final* behavior is technically correct for a single call), this is a severe code smell.\n2.  **Performance/Startup Cost**: Defining the same function hundreds of times wastes CPU cycles and memory during module import/execution, as each `def` statement creates a new function object."
+      },
+      "finish_reason": "length"
+    }
+  },
+  {
+    "label": "chat-resumed",
+    "usage": {
+      "prompt_tokens": 20047,
+      "completion_tokens": 128,
+      "total_tokens": 20175,
+      "prompt_tokens_details": {
+        "cached_tokens": 20024
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "94b754cfda50",
+    "prefill_seconds": 0.08245304203592241,
+    "speculative": {
+      "rounds": 35,
+      "drafted": 483,
+      "accepted": 92,
+      "acceptance_rate": 0.19047619047619047,
+      "tokens_per_round": 3.657142857142857,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Explanation:\n1.  **Redundancy and Maintenance Hazard**: The same function `def transform(rows): ...` is defined hundreds of times in a row. While Python will simply overwrite the previous definitions with the last one (so the *final* behavior is technically correct for a single call), this is a severe code smell.\n2.  **Performance/Startup Cost**: Defining the same function hundreds of times wastes CPU cycles and memory during module import/execution, as each `def` statement creates a new function object."
+      },
+      "finish_reason": "length"
+    }
+  }
+]
