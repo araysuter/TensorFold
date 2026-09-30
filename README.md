@@ -78,12 +78,29 @@ Provision `~/.config/tensorfold/api-key` before launching if the old llama.cpp k
 
 ### [Swift 1.5 4-bit](https://huggingface.co/ukisai/Swift-1.5-4bit-MLX)
 
+#### Updated configuration · September 29, 2026
+
+![Updated Swift benchmark](benchmarks/studio/charts/swift-2026-09-29/swift-updated-benchmark.svg)
+
+#### Solo speeds: previous vs updated
+
+Blue is the previous configuration; pink is the updated configuration. Solo effective
+prompt throughput increased 1.2–2.9% across these recorded runs. Generation rates
+were mixed, including a 10.1% decrease at 80K and a 17.0% increase in the single
+128K trial. These are historical comparisons with differing trial counts.
+
+![Swift solo comparison](benchmarks/studio/charts/swift-2026-09-29/swift-solo-comparison.svg)
+
+[Source data, sample counts and reproduction instructions](benchmarks/studio/charts/swift-2026-09-29/README.md).
+
+#### Previous configuration
+
 ![Swift benchmark](benchmarks/studio/charts/tensorfold-studio-benchmark.svg)
 
 ### [Qwen3.8 27B 4-bit](https://huggingface.co/Vontra/Qwen3.8-27B-MLX-4bit)
 
 ![Qwen benchmark](benchmarks/studio/charts/tensorfold-qwen-benchmark.svg)
 
-These measure synthetic uncached throughput, not coding quality. Swift combines earlier runs with a higher-memory 128K rerun; Qwen uses one trial per configuration. They are not a controlled repeated-trial comparison. See the chart footnotes for timing definitions and sample counts.
+These measure synthetic uncached throughput, not coding quality. The previous Swift chart combines earlier runs with a higher-memory 128K rerun; Qwen uses one trial per configuration. They are not a controlled repeated-trial comparison. See the chart footnotes for timing definitions and sample counts.
 
 For general model/backend documentation, see the [preserved upstream README](UPSTREAM_README.md) and [runbook](RUNBOOK.md).
