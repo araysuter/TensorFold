@@ -92,6 +92,20 @@ previous path. These synthetic measurements do not establish equivalent answer q
 
 ### [Swift 1.5 4-bit](https://huggingface.co/ukisai/Swift-1.5-4bit-MLX)
 
+#### Single trial · September 30, 2026
+
+One attempt at each 20K–128K context with one request and two simultaneous requests.
+The four-panel sheet uses the same workload and layout as the earlier figures.
+
+![Swift single-trial benchmark](benchmarks/studio/charts/swift-2026-09-30/swift-updated-benchmark.svg)
+
+The solo comparison uses the original published Swift benchmark as its historical reference. Each September 30
+setting has one trial; paired whiskers show variation between the two users.
+
+![Swift solo comparison for September 30](benchmarks/studio/charts/swift-2026-09-30/swift-solo-comparison.svg)
+
+[Source measurements and reproduction instructions](benchmarks/studio/charts/swift-2026-09-30/README.md).
+
 #### Updated configuration · September 29, 2026
 
 ![Updated Swift benchmark](benchmarks/studio/charts/swift-2026-09-29/swift-updated-benchmark.svg)
