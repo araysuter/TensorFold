@@ -13,6 +13,11 @@ The DeltaNet implementations in `src/tensorfold/kernels/qwen/dense/v1/lane_gdn.p
 `QuantizedBlockLoader` and uses the installed `qmm_t_nax_tgp_impl` and Metal headers under MLX's MIT License,
 Copyright © 2023-2025 Apple Inc. The matmul math remains in the installed dependency.
 
+`src/tensorfold/kernels/qwen/dense/v1/prefill_gdn.py` adapts mlx-lm's packed DeltaNet kernel
+from commit `a9bd8af5c02118882af735cef60705d2efce9fd0`, Copyright © 2025 Apple Inc.,
+under its [MIT License](LICENSES/MLX-LM-MIT.txt). Startup compares its output and state bits
+against the installed dependency before enabling it.
+
 ## Qwen Flash Next
 
 The n-gram ID helpers in `src/tensorfold/families/qwen4_exp/model.py` and `cuda/ngram.py` translate

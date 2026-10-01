@@ -16,11 +16,13 @@ from tensorfold.engine import grammar
 from tensorfold.server import responses
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
-from tensorfold.server.errors import CapacityError, RequestError
+from tensorfold.server.errors import CapacityError, RequestError, error_body
 from tensorfold.server.request_options import parse_numbers, thinking_fields
+from tensorfold.server.probabilities import probability_options
 from tensorfold.server.messages import normalize_messages, validate_modalities
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
+from tensorfold.server import metrics
 from tensorfold.server.stacks import Rearming
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
@@ -97,6 +99,14 @@ def redact_images(value: Any) -> Any:
     return {key: redact_images(item) for key, item in value.items()}
 
 
+def reply_model(app: Any, body: Any) -> str:
+    """The id a reply names: the one the request asked for when this endpoint answers to it, else the served name."""
+
+    asked = body.get("model") if isinstance(body, dict) else None
+    name = str(getattr(app, "served_name", "") or getattr(app, "served", "") or "")
+    return asked if isinstance(asked, str) and asked in (getattr(app, "model_ids", None) or [name]) else name
+
+
 def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list[str]:
     """Return the OpenAI model ids this endpoint advertises."""
 
@@ -163,6 +173,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return
             if responses.route(route):
                 return responses.get(self, app, responses.route(route))
+            if route in {"/metrics", "/v1/metrics"}:
+                return metrics.send(self, app)
             if route in {"", "/health"}:
                 self._send_json(
                     {
@@ -245,6 +257,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     raise RequestError("request body exceeds the 32 MiB limit")
                 body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
                 validate_modalities(body)
+                probability_options(body)
+                named = reply_model(app, body)          # the id the request asked for, as vLLM names it
                 if _REQUEST_LOG and body.get("priority") != "background":   # batch jobs are not client traffic
                     with open(_REQUEST_LOG, "a") as handle:
                         handle.write(json.dumps(redact_images(body)) + "\n")
@@ -285,7 +299,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 stream = bool(body.get("stream", False))
                 tool_policy = ToolCallPolicy(body)
             except RequestError as exc:
-                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}},
+                self._send_json({"error": error_body(exc)},
                                 status=503 if isinstance(exc, CapacityError) else 400)
                 return
             except Exception as exc:
@@ -342,7 +356,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         "id": completion_id,
                         "object": "text_completion",
                         "created": created,
-                        "model": app.served_name,
+                        "model": named,
                         "choices": [
                             {
                                 "index": 0,
@@ -356,7 +370,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": app.served_name,
+                    "model": named,
                     "choices": [
                         {
                             "index": 0,
@@ -471,7 +485,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         except RequestCancelled:
                             return
                         except RequestError as exc:
-                            emit({"error": {"message": str(exc), "type": "invalid_request_error"}})
+                            emit({"error": error_body(exc)})
                             writer.write(b"data: [DONE]\n\n")
                             return
                         except Exception as exc:
@@ -511,7 +525,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                             "id": completion_id,
                             "object": "text_completion",
                             "created": created,
-                            "model": app.served_name,
+                            "model": named,
                             "choices": [
                                 {
                                     "index": 0,
@@ -539,7 +553,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         "id": completion_id,
                         "object": "chat.completion",
                         "created": created,
-                        "model": app.served_name,
+                        "model": named,
                         "choices": [
                             {
                                 "index": 0,
@@ -554,7 +568,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             except (BrokenPipeError, ConnectionResetError, RequestCancelled):
                 pass
             except RequestError as exc:
-                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                self._send_json({"error": error_body(exc)}, status=400)
             except Exception as exc:  # surface runner errors to the client
                 print(f"[tensorfold] request error: {type(exc).__name__}: {exc}", flush=True)
                 traceback.print_exc()

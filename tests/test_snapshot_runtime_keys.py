@@ -58,3 +58,18 @@ def test_flash_key_carries_the_prefill_key():
     fast = families.kernel_version(family, model)
     model.prefill_key = "flash-prefill=mlx"
     assert families.kernel_version(family, model) != fast and "prompt_attention=1" in fast
+
+
+def test_dense_prefill_modes_change_snapshot_keys(monkeypatch):
+    from tensorfold.families import qwen3_5
+    from tensorfold.kernels.qwen.dense.v1 import prefill_gdn, prompt_attention
+
+    monkeypatch.setattr(prompt_attention, "native_m5", lambda: True)
+    model = SimpleNamespace(_tensorfold_lanes=True)
+    monkeypatch.delenv("TF_NATIVE_PREFILL_ATTENTION", raising=False)
+    native = qwen3_5.kernel_version(model)
+    monkeypatch.setenv("TF_NATIVE_PREFILL_ATTENTION", "0")
+    bounded = qwen3_5.kernel_version(model)
+    assert native != bounded
+    monkeypatch.setattr(prefill_gdn, "_available", not prefill_gdn._available)
+    assert qwen3_5.kernel_version(model) != bounded

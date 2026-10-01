@@ -2,8 +2,8 @@
 # Run from the fork's virtual environment. Caddy/llama.cpp must not own port 8080.
 set -euo pipefail
 umask 077
-# 58 GiB process budget leaves up to 55 GiB for MLX (subject to Metal's cap).
-export TENSORFOLD_MEMORY_LIMIT_GB="${TENSORFOLD_MEMORY_LIMIT_GB:-58}"
+# 48 GiB process / 45 GiB MLX keeps headroom for large cached conversations.
+export TENSORFOLD_MEMORY_LIMIT_GB="${TENSORFOLD_MEMORY_LIMIT_GB:-48}"
 MODEL_PATH="$(hf download ukisai/Swift-1.5-4bit-MLX \
   --revision 82276731e47e1db4ac502f24c63cfaf886639be9 --quiet)"
 KEY_FILE="${STUDIO_API_KEY_FILE:-$HOME/.config/tensorfold/api-key}"

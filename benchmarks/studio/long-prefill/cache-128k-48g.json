@@ -1,0 +1,116 @@
+[
+  {
+    "label": "chat-cold",
+    "usage": {
+      "prompt_tokens": 128061,
+      "completion_tokens": 128,
+      "total_tokens": 128189,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "6003011514c1",
+    "prefill_seconds": 198.45551912498195,
+    "speculative": {
+      "rounds": 39,
+      "drafted": 544,
+      "accepted": 89,
+      "acceptance_rate": 0.1636029411764706,
+      "tokens_per_round": 3.282051282051282,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is **`NameError` due to duplicate function definitions**.\n\nThe module defines the function `transform` multiple times. In Python, when a name is redefined, the **last** definition takes precedence, and all previous definitions are overwritten. While this specific code snippet only contains identical definitions of `transform`, in a real module with *different* logic in each `transform` definition, only the final one would be callable, silently discarding the others. This leads to unexpected behavior and makes the code unmaintainable and confusing.\n\nAdditionally, if any of the earlier `transform` definitions were intended to be"
+      },
+      "finish_reason": "length"
+    },
+    "memory_after": {
+      "active": 28452968632,
+      "cache": 0,
+      "peak": 39627037984,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 34337703192
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 28,
+        "Swapouts": 13348
+      },
+      "after": {
+        "Swapins": 28,
+        "Swapouts": 13348
+      }
+    },
+    "swap_after": "vm.swapusage: total = 1024.00M  used = 208.56M  free = 815.44M  (encrypted)"
+  },
+  {
+    "label": "chat-resumed",
+    "usage": {
+      "prompt_tokens": 128061,
+      "completion_tokens": 128,
+      "total_tokens": 128189,
+      "prompt_tokens_details": {
+        "cached_tokens": 124928
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "6003011514c1",
+    "prefill_seconds": 8.34669054101687,
+    "speculative": {
+      "rounds": 39,
+      "drafted": 544,
+      "accepted": 89,
+      "acceptance_rate": 0.1636029411764706,
+      "tokens_per_round": 3.282051282051282,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is **`NameError` due to duplicate function definitions**.\n\nThe module defines the function `transform` multiple times. In Python, when a name is redefined, the **last** definition takes precedence, and all previous definitions are overwritten. While this specific code snippet only contains identical definitions of `transform`, in a real module with *different* logic in each `transform` definition, only the final one would be callable, silently discarding the others. This leads to unexpected behavior and makes the code unmaintainable and confusing.\n\nAdditionally, if any of the earlier `transform` definitions were intended to be"
+      },
+      "finish_reason": "length"
+    },
+    "memory_after": {
+      "active": 28587124136,
+      "cache": 0,
+      "peak": 39669142928,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 35381691936
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 28,
+        "Swapouts": 13348
+      },
+      "after": {
+        "Swapins": 32,
+        "Swapouts": 13348
+      }
+    },
+    "swap_after": "vm.swapusage: total = 1024.00M  used = 208.56M  free = 815.44M  (encrypted)"
+  }
+]
