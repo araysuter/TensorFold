@@ -1,0 +1,92 @@
+[
+  {
+    "label": "optimized-060",
+    "tokens": 20000,
+    "wall_seconds": 22.770988415984903,
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 32,
+      "total_tokens": 20032,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "metrics": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 63.63021136148916,
+      "seconds": 22.6647558749537,
+      "prefill_seconds": 22.17756591696525,
+      "prefill_widths": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "prefill_raised": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "time_to_first_token": 22.178037957986817,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "c0809513c176",
+      "min_rows": 2
+    },
+    "text": "The code is a Python function named `transform` that takes a list of dictionaries called `rows` as input. It sorts the list based on the value of"
+  },
+  {
+    "label": "optimized-060",
+    "tokens": 1024,
+    "wall_seconds": 4.454640083014965,
+    "usage": {
+      "prompt_tokens": 1024,
+      "completion_tokens": 32,
+      "total_tokens": 1056,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "metrics": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 12.531901395064377,
+      "seconds": 4.390685416001361,
+      "prefill_seconds": 1.916998540982604,
+      "prefill_widths": [
+        1
+      ],
+      "prefill_raised": [
+        false
+      ],
+      "time_to_first_token": 1.9173070829710923,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "db83afc6e37b",
+      "min_rows": 2
+    },
+    "text": "The code defines the same function `transform` many times. In Python, later definitions override earlier ones, so only the last definition is used. This is a"
+  }
+]

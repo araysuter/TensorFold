@@ -8,6 +8,7 @@ from typing import Callable, Sequence
 
 import torch
 
+from tensorfold.cuda.draft_depth import DepthRule
 from tensorfold.engine.exact_sampling import Sampling
 
 from .engine import Engine
@@ -21,6 +22,7 @@ class Prefilled:
     last_hidden: torch.Tensor          # the prompt's last row's final hidden state (1, D)
     engine: dict                       # engine snapshot after the prompt
     mtp: dict | None                   # head snapshot: every prompt position but the last absorbed
+    kept: dict | None = None
 
 
 @dataclass
@@ -39,7 +41,7 @@ class DecodeResult:
 
 @torch.no_grad()
 def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: Sampling | None, *,
-            resume: tuple | None = None, constraint=None) -> Prefilled:
+            resume: tuple | None = None, constraint=None, keep_at: int | None = None) -> Prefilled:
     """``resume`` = (engine snapshot, head snapshot, kept length, the last hidden state the head has not absorbed)."""
 
     prompt = [int(t) for t in prompt]
@@ -59,6 +61,11 @@ def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: S
             raise ValueError("a resumed prompt must extend the kept tokens")
         if mtp is not None and resume[3] is not None:
             mtp.absorb_rows(resume[3], [prompt[begin]])
+    if keep_at is not None and not begin <= keep_at <= len(prompt):
+        raise ValueError("the kept prefix must lie in the prompt's prefill")
+    partial = tail = None
+    if keep_at == begin and resume is not None:
+        partial, tail = resume[0], resume[3]
     eng.set_sampling(sampling)
     if constraint is not None:                           # a reply's grammar masks the first token's row
         eng.mask(constraint, constraint.window([0], [-1]))
@@ -66,7 +73,14 @@ def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: S
     last = None
     for s in range(begin, len(prompt), step):
         chunk = prompt[s:s + step]
-        eng.prefill_chunk(chunk)
+        cut = keep_at - s if keep_at is not None and s < keep_at < s + len(chunk) else 0
+        mid = eng.prefill_chunk(chunk, cut=cut)
+        if keep_at is not None and s < keep_at <= s + len(chunk):
+            partial = mid if mid is not None else {
+                "ssm": eng.ssm.clone(), "conv_base": eng.conv_base.clone(),
+                "host": (eng.pos, eng.parity, eng.prev_keep)}
+            row = keep_at - s - 1
+            tail = eng.p_hidden[row:row + 1].clone()
         if mtp is not None:
             known = min(len(chunk), len(prompt) - 1 - s)          # rows whose next token is in the prompt
             if known > 0:
@@ -78,7 +92,12 @@ def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: S
         eng.mask(None, None)
         constraint.advance([pending])
     torch.cuda.synchronize()
-    return Prefilled(prompt, pending, last_hidden, eng.snapshot(), mtp.snapshot() if mtp is not None else None)
+    state, head = eng.snapshot(), mtp.snapshot() if mtp is not None else None
+    kept = None
+    if partial is not None:
+        kept = {"engine": {**state, **partial}, "mtp": {**head, "pos": keep_at - 1} if head else None,
+                "tail": tail}
+    return Prefilled(prompt, pending, last_hidden, state, head, kept)
 
 
 @torch.no_grad()
@@ -142,14 +161,43 @@ class CopyIndex:
         return best if len(best) >= m else []
 
 
+def _queue(mtp: MTPHead, keep: int, copied: list[int], drafts: int, rule: DepthRule | None) -> None:
+    """Start a round's head work: an absorb for a copied chain, else level 1 (every level when no rule reads them)."""
+
+    mtp.begin(keep)
+    if copied:
+        mtp.level(0)
+        return
+    for j in range(1, (drafts if rule is None else 1) + 1):
+        mtp.level(j)
+
+
+def _depth(mtp: MTPHead, drafts: int, rule: DepthRule | None) -> int:
+    """The drafts this round verifies; a rule reads each level's confidence before drafting the next level."""
+
+    if rule is None:
+        return drafts
+    run, n = 1.0, 0
+    for j in range(1, drafts + 1):
+        if j > 1:
+            mtp.level(j)
+        run *= mtp.confidence(j)
+        if not rule.keep(j, run):
+            break
+        n = j
+        if not rule.more(j, run):
+            break
+    return n
+
+
 @torch.no_grad()
 def draft_decode(eng: Engine, mtp: MTPHead, pre: Prefilled, count: int, sampling: Sampling | None, *,
-                 drafts: int = 3, confidence: float = 0.0, copy: bool = True, stop_eos: bool = False,
+                 drafts: int = 3, rule: DepthRule | None = None, copy: bool = True, stop_eos: bool = False,
                  on_tokens: Callable[[list[int]], bool | None] | None = None, constraint=None) -> DecodeResult:
-    """``confidence`` verifies the first draft, then more while the running confidence product stays at or above it."""
+    """Up to ``drafts`` MTP drafts a round: all of them without ``rule``, else while the rule finds each row pays."""
 
-    if not 1 <= drafts <= min(eng.max_rows - 1, 8):
-        raise ValueError("drafts must be between 1 and 8")
+    if not 1 <= drafts <= mtp.most:
+        raise ValueError(f"drafts must be between 1 and {mtp.most}")
     eng.restore(pre.engine)
     mtp.restore(pre.mtp)
     eng.set_sampling(sampling)
@@ -163,23 +211,16 @@ def draft_decode(eng: Engine, mtp: MTPHead, pre: Prefilled, count: int, sampling
     eng.hidden[:1].copy_(pre.last_hidden)
     eng.sampled[:1].fill_(pre.pending)
     copied = index.chain(eng.max_rows - 1) if index is not None else []
-    mtp.round(1, 0 if copied else drafts)
+    _queue(mtp, 1, copied, drafts, rule)
     while len(out) < count and not (stop_eos and out[-1] in eos):
         if copied:
-            proposal = copied
+            proposal, n = copied, len(copied)
         else:
-            n = mtp._count
-            if confidence > 0.0 or constraint is not None:
-                mtp._copied.synchronize()
-                torch.cuda.current_stream().synchronize()
-            if confidence > 0.0:
-                run, n = 1.0, 0
-                for pr in mtp.confidences():
-                    run *= pr
-                    if n > 0 and run < confidence:
-                        break
-                    n += 1
-            proposal = mtp.drafts()[:n] if constraint is not None else None
+            n = _depth(mtp, drafts, rule)
+            proposal = None
+            if constraint is not None:
+                mtp.wait()
+                proposal = mtp.drafts()[:n]
         if constraint is not None:                       # the grammar cuts the chain at its first rejected draft
             window = constraint.window([out[-1]] + proposal, list(range(-1, len(proposal))))
             proposal = window.tokens[1:]
@@ -203,6 +244,8 @@ def draft_decode(eng: Engine, mtp: MTPHead, pre: Prefilled, count: int, sampling
         accepted = min(accepted, count - len(out) - 1)
         keep = accepted + 1
         eng.commit(keep)
+        if rule is not None:
+            rule.done(keep, 1 + len(proposal), 0 if copied else mtp.levels)
         new = sampled[:keep]
         if constraint is not None:
             constraint.advance(new)
@@ -214,9 +257,9 @@ def draft_decode(eng: Engine, mtp: MTPHead, pre: Prefilled, count: int, sampling
         res.accepted += accepted
         res.widths.append(1 + len(proposal))
         if len(out) < count and not (stop_eos and out[-1] in eos):
-            # queue the next round's drafts before handing tokens over, so the caller's work overlaps the head's graph
+            # queue the next round's head work before handing tokens over, so the caller's work overlaps it
             copied = index.chain(eng.max_rows - 1) if index is not None else []
-            mtp.round(keep, 0 if copied else drafts)
+            _queue(mtp, keep, copied, drafts, rule)
         if on_tokens is not None and on_tokens(new):
             break
     eng.mask(None, None)

@@ -1,0 +1,94 @@
+{
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "gpu_cores": 40,
+    "cpu_cores": 18,
+    "ram_bytes": 68719476736,
+    "architecture": "applegpu_g17s",
+    "macos": "27.0"
+  },
+  "runtime": {
+    "tensorfold": "0.6.0",
+    "mlx": "0.32.2",
+    "mlx-metal": "0.32.2",
+    "mlx-lm": "0.31.3",
+    "python": "3.14.7",
+    "chart_matplotlib": "3.11.2"
+  },
+  "tested_source_commit": "e2601a41679c6c0b7fff9e4f59355e1e415f87c0",
+  "tested_source_tree": "aac57083deafbf5ebbbcd051bc1e4907909eb986",
+  "upstream_main": "c4646171139ee8a3c38103eaa1699dad226ec12b",
+  "model": {
+    "name": "swift-1.5",
+    "repository": "ukisai/Swift-1.5-4bit-MLX",
+    "revision": "82276731e47e1db4ac502f24c63cfaf886639be9"
+  },
+  "drafter": {
+    "repository": "z-lab/Qwen3.8-27B-DFlash2",
+    "revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+    "bits": 4,
+    "block_size": 8
+  },
+  "server": {
+    "context": 131072,
+    "parallel": 2,
+    "process_budget_bytes": 51539607552,
+    "mlx_budget_bytes": 48318382080,
+    "test_port": 18080,
+    "restored_port": 8080
+  },
+  "benchmark": {
+    "client_sha256": "913169931da6088da676a48ac50bd27b1088b99b00ad610ad6b753b2749f6350",
+    "contexts": [
+      20000,
+      40000,
+      60000,
+      80000,
+      100000,
+      128000
+    ],
+    "concurrency": [
+      1,
+      2
+    ],
+    "repetitions_per_setting": 1,
+    "batches": 12,
+    "successful_requests": 18,
+    "failed_requests": 0,
+    "cached_tokens": 0,
+    "output_tokens_per_request": 1024,
+    "total_batch_wall_seconds": 1999.0116897080443,
+    "client_status": 0
+  },
+  "test_server_memory_after": {
+    "active": 19688091400,
+    "cache": 0,
+    "peak": 31586667872,
+    "budget": 51539607552,
+    "mlx_budget": 48318382080,
+    "footprint": 20641016800
+  },
+  "test_swap_usage_after": "vm.swapusage: total = 1024.00M  used = 212.56M  free = 811.44M  (encrypted)",
+  "restored_server_health": {
+    "status": "ok",
+    "model": "swift-1.5",
+    "model_ids": [
+      "swift-1.5"
+    ],
+    "max_batch_size": 2,
+    "warming": false,
+    "memory": {
+      "active": 19661973426,
+      "cache": 0,
+      "peak": 22842198556,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 20035234088
+    }
+  },
+  "restored_swap_usage": "vm.swapusage: total = 1024.00M  used = 212.56M  free = 811.44M  (encrypted)",
+  "restored_swap_counters": {
+    "Swapins": 72,
+    "Swapouts": 13604
+  }
+}

@@ -5,13 +5,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 from typing import Any
 
 MODEL_TYPES = ("qwen3_5",)
 TITLE = "Qwen3.8 dense"
 LANES = True
-MODELS = ("Vontra/Qwen3.8-27B-MLX-4bit", "turboderp/Qwen3.8-27B-exl3", "nvidia/Qwen3.8-27B-NVFP4")
+MODELS = ("TensorFold/Qwen3.8-27B-MLX-4bit", "turboderp/Qwen3.8-27B-exl3", "nvidia/Qwen3.8-27B-NVFP4")
 DRAFTER = "z-lab/Qwen3.8-27B-DFlash2"
 QUANT_METHODS = {"cuda": ("mlx", "exl3", "modelopt", "compressed-tensors")}   # MLX affine, EXL3, NVFP4 / FP8
 EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
@@ -20,15 +19,27 @@ KERNEL_VERSION = "v1"
 
 # the widest verify window checked at load (rows) with tensor units; without them ``row_matmul.WINDOW_ROWS``
 WIDEST = 32
+# the widest window a lone stream's copies may earn without tensor units (M3 Ultra: edits +22%, chat and code level)
+ROW_COPY_ROWS = 128
+# the widest copy window TF_COPY_ROWS may ask for (the lane kernels' and the chain kernels' row limit)
+COPY_ROWS_LIMIT = 128
+
+
+def copy_rows(first: int, default: int) -> int:
+    """The widest window a lone stream's copies may earn: TF_COPY_ROWS if set (0: ``first``), else ``default``."""
+
+    value = os.environ.get("TF_COPY_ROWS", "").strip()
+    if not value:
+        return int(default)
+    return max(int(first), min(int(value), COPY_ROWS_LIMIT)) if int(value) > 0 else int(first)
+
 
 def tensor_units() -> bool:
     """Whether this GPU has Metal 4 tensor units (``applegpu_g17`` and later), which the lane kernels need."""
 
-    import mlx.core as mx
+    from tensorfold.kernels import device
 
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-    found = re.match(r"applegpu_g(\d+)", str(info.get("architecture", "")))
-    return bool(found) and int(found.group(1)) >= 17
+    return device.tensor_units()
 
 
 def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
@@ -171,8 +182,9 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     return family, tokenizer
 
 
-def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str) -> Any:
-    """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model`` and wrap it, drafter included."""
+def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str,
+                make: Any = None) -> Any:
+    """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model``; wrap it in ``make`` (the family)."""
 
     from tensorfold.families.qwen3_5.family import Qwen35Family
     from tensorfold.kernels.qwen.dense.v1 import lane_qmm
@@ -188,12 +200,14 @@ def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, tit
     elif not install_row_decoder(model):
         raise SystemExit(f"[tensorfold] {title}: the lane decoder without tensor units does not take these weights")
     loaded = load_drafter(model, drafter, drafter_bits) if drafter else None
+    make = make or Qwen35Family
     if lanes:
-        family = Qwen35Family(model, drafter=loaded, widest=WIDEST)
+        family = make(model, drafter=loaded, widest=copy_rows(WIDEST, WIDEST), first_copy_rows=WIDEST)
     else:
         from tensorfold.kernels.qwen.dense.v1 import row_matmul
 
-        family = Qwen35Family(model, drafter=loaded, widest=row_matmul.WINDOW_ROWS, rows=True)
+        family = make(model, drafter=loaded, widest=copy_rows(row_matmul.WINDOW_ROWS, ROW_COPY_ROWS),
+                      rows=True, first_copy_rows=row_matmul.WINDOW_ROWS)
     timing = ", ".join(f"{w}: {ms:.1f}" for w, ms in sorted(family.window_costs.items()) if w in (1, 2, 4, 8, 16, 17,
                                                                                                     32, 64, 128))
     decoder = "lane kernels" if lanes else "lane decoder without tensor units"
@@ -232,7 +246,8 @@ def load_drafter(model: Any, drafter: str, drafter_bits: int = 4) -> Any:
 def install_lane_kernels(model: Any) -> None:
     """Install lane matmul, fused projections and lane attention, compiling every variant before requests arrive."""
 
-    from tensorfold.kernels.qwen.dense.v1 import exact_attention, lane_attention, lane_fuse, lane_qmm, tiled_prefill
+    from tensorfold.kernels.qwen.dense.v1 import (exact_attention, lane_attention, lane_fuse, lane_qmm,
+                                                prefill_gdn, prompt_attention, tiled_prefill)
 
     exact_attention.install()      # verify windows attend query by query, as one-row steps do
     # TF_LANE_TILE=0 keeps MLX's weight layout without changing results.
@@ -245,6 +260,8 @@ def install_lane_kernels(model: Any) -> None:
     lane_attention.install()
     lane_attention.warm(max_queries=lane_attention.MAX_QUERIES)
     tiled_prefill.prepare()
+    prefill_gdn.prepare()
+    print(f"[tensorfold] {prompt_attention.identity()}", flush=True)
     print(f"[tensorfold] lane kernels on: {warmed} matmul shapes warmed, fused projections {fused}", flush=True)
 
 
@@ -269,13 +286,14 @@ def kernel_version(model: Any) -> str:
                  *(path.read_text() for path in sorted(folder.glob("*.py")))]
         return "row-forward-" + hashlib.sha256("\n".join(parts).encode()).hexdigest()[:12]
     from tensorfold.kernels.qwen.dense.v1 import (lane_attention, lane_fuse, lane_glue, lane_qmm, lane_widen,
-                                                  stream_attention, stream_gdn, tiled_prefill)
+                                                  prefill_gdn, prompt_attention, stream_attention, stream_gdn,
+                                                  tiled_prefill)
 
     sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, *lane_widen.sources().values(), lane_qmm._XSUM,
                lane_attention._PARTIAL, *stream_attention.sources().values(), lane_attention._MERGE,
                lane_glue._NORM_XS, lane_glue._GDN_PRE, lane_glue._GDN_POST, lane_glue._MLP_ACT,
                *stream_gdn.sources().values(), repr((lane_attention.CHUNK, lane_attention.TILE)),
-               tiled_prefill.identity()]
+               tiled_prefill.identity(), prompt_attention.identity(), prefill_gdn.identity()]
     if lane_fuse.enabled:
         sources += [text for _, text in sorted(lane_fuse.sources().items())]
     folder = Path(lane_qmm.__file__).parent
@@ -287,6 +305,19 @@ def kernel_version(model: Any) -> str:
 # The metadata-only info command also displays these CUDA affine formats.
 CUDA_AFFINE_BITS = (2, 3, 4, 5, 6, 8)
 CUDA_AFFINE_GROUPS = (32, 64, 128)
+# --checkpoint-slots on CUDA: the prompt states the concurrent decoder keeps (--parallel 2 or more)
+CUDA_CHECKPOINT_SLOTS = True
+CUDA_PREFILL_FP8 = True            # --prefill-fp8: MLX 4-bit g64 and NVFP4 checkpoints have FP8 prompt kernels
+
+def gb10() -> bool:
+    """Whether GPU 0 is a GB10 (DGX Spark: compute capability 12.1), where the lone stream's wide windows were measured."""
+
+    import torch
+
+    if not torch.cuda.is_available():
+        return False
+    return tuple(torch.cuda.get_device_capability(0)) == (12, 1) or "GB10" in torch.cuda.get_device_name(0)
+
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, **options: Any):
@@ -304,8 +335,12 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                          "--tp 2), or pass --no-drafts for the serial reference")
     draft = Path(drafter) if drafter and not no_drafts else None
     streams = max(1, int(options.get("parallel") or 1))
-    return Qwen27Engine(Path(model_dir), draft, max_rows=12, tp=tp, rank=rank, master=master, port=master_port,
+    # one stream on one GB10 takes the width it affords (16-row trees, widening to 128); other shapes keep 12 rows
+    wide = tp == 1 and streams == 1 and gb10()
+    return Qwen27Engine(Path(model_dir), draft, max_rows=128 if wide else 12, tree_rows=16 if wide else None,
+                        tp=tp, rank=rank, master=master, port=master_port,
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
                         streams=streams, context=options.get("context"),
                         context_explicit=options.get("context_explicit"), vision=bool(options.get("vision", False)),
-                        vision_urls=bool(options.get("vision_urls", False)))
+                        vision_urls=bool(options.get("vision_urls", False)),
+                        vision_offload=bool(options.get("vision_offload", False)), keep=options.get("checkpoint_slots"))

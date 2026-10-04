@@ -1,0 +1,78 @@
+[
+  {
+    "label": "chat-cold",
+    "usage": {
+      "prompt_tokens": 128064,
+      "completion_tokens": 128,
+      "total_tokens": 128192,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "3fdeddb04ff6",
+    "prefill_seconds": 206.4350347080035,
+    "speculative": {
+      "rounds": 36,
+      "drafted": 519,
+      "accepted": 91,
+      "acceptance_rate": 0.17533718689788053,
+      "tokens_per_round": 3.5555555555555554,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Explanation\n\n1.  **Redundancy:** The module defines the exact same function `transform` hundreds of times. In Python, each subsequent definition overwrites the previous one in the module's namespace.\n2.  **Performance/Resource Risk:** While Python will only keep the *last* definition in memory at runtime (since they all have the same name), the act of parsing and compiling this file is extremely inefficient. It wastes CPU cycles and memory during import/compilation for no functional benefit.\n3.  **Maint"
+      },
+      "finish_reason": "length"
+    }
+  },
+  {
+    "label": "chat-resumed",
+    "usage": {
+      "prompt_tokens": 128064,
+      "completion_tokens": 128,
+      "total_tokens": 128192,
+      "prompt_tokens_details": {
+        "cached_tokens": 126976
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "3fdeddb04ff6",
+    "prefill_seconds": 4.524794166034553,
+    "speculative": {
+      "rounds": 36,
+      "drafted": 519,
+      "accepted": 91,
+      "acceptance_rate": 0.17533718689788053,
+      "tokens_per_round": 3.5555555555555554,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Explanation\n\n1.  **Redundancy:** The module defines the exact same function `transform` hundreds of times. In Python, each subsequent definition overwrites the previous one in the module's namespace.\n2.  **Performance/Resource Risk:** While Python will only keep the *last* definition in memory at runtime (since they all have the same name), the act of parsing and compiling this file is extremely inefficient. It wastes CPU cycles and memory during import/compilation for no functional benefit.\n3.  **Maint"
+      },
+      "finish_reason": "length"
+    }
+  }
+]
