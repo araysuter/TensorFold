@@ -1,0 +1,193 @@
+{
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "cpu_cores": 18,
+    "ram_bytes": 68719476736,
+    "macos": "27.0.1",
+    "device_info": {
+      "device_name": "Apple M5 Max",
+      "max_recommended_working_set_size": 55662788608,
+      "memory_size": 68719476736,
+      "architecture": "applegpu_g17s",
+      "max_buffer_length": 41747087360,
+      "resource_limit": 499000
+    },
+    "gpu_cores": 40
+  },
+  "runtime": {
+    "tensorfold": "0.6.5",
+    "mlx": "0.32.3",
+    "mlx-metal": "0.32.3",
+    "mlx-lm": "0.32.0"
+  },
+  "python": "3.14.7",
+  "tested_source_commit": "39f4a51839ba3f903c02ca99ed8e1c48606c214e",
+  "tested_source_tree": "0b7d9d2702bb90bf12bbf34995262ae73eba2fda",
+  "upstream_main": "609ca419abecebdc5a059498a613680bd3aa847f",
+  "model": {
+    "name": "swift-1.5",
+    "repository": "ukisai/Swift-1.5-4bit-MLX",
+    "revision": "82276731e47e1db4ac502f24c63cfaf886639be9"
+  },
+  "drafter": {
+    "repository": "z-lab/Qwen3.8-27B-DFlash2",
+    "revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+    "bits": 4,
+    "block_size": 8
+  },
+  "server": {
+    "context": 131072,
+    "parallel": 2,
+    "conversation_slots": 8,
+    "process_budget_bytes": 51539607552,
+    "mlx_budget_bytes": 48318382080,
+    "test_port": 18080,
+    "restored_port": 8080
+  },
+  "prompt_optimizations": {
+    "tiled_matmul": "on",
+    "packed_deltanet": "on; startup bitwise qualification passed",
+    "attention": "native-m5; reduction order differs from older bounded path"
+  },
+  "benchmark_client_sha256": "913169931da6088da676a48ac50bd27b1088b99b00ad610ad6b753b2749f6350",
+  "initial_main_health": {
+    "health": {
+      "status": "ok",
+      "model": "swift-1.5",
+      "model_ids": [
+        "swift-1.5"
+      ],
+      "max_batch_size": 2,
+      "warming": false,
+      "memory": {
+        "active": 19662060466,
+        "cache": 0,
+        "peak": 22842285596,
+        "budget": 51539607552,
+        "mlx_budget": 48318382080,
+        "footprint": 20043656088
+      },
+      "live": {
+        "connections": 0,
+        "waiting": 0,
+        "decode_tokens_per_second": 0.0,
+        "prefill_tokens_per_second": 0.0
+      }
+    },
+    "packages": {
+      "tensorfold": "0.6.5",
+      "mlx": "0.32.3",
+      "mlx-metal": "0.32.3",
+      "mlx-lm": "0.32.0"
+    },
+    "source_commit": "39f4a51839ba3f903c02ca99ed8e1c48606c214e",
+    "source_branch": "main",
+    "key_checks": "Unauthenticated models and Studio metrics refused; Bearer and x-api-key accepted; public health status-only",
+    "swap_usage": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"
+  },
+  "test_server_health_after": {
+    "status": "ok",
+    "model": "swift-1.5",
+    "model_ids": [
+      "swift-1.5"
+    ],
+    "max_batch_size": 2,
+    "warming": false,
+    "memory": {
+      "active": 19898080540,
+      "cache": 0,
+      "peak": 31796369004,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 20853026000
+    },
+    "live": {
+      "connections": 0,
+      "waiting": 0,
+      "decode_tokens_per_second": 0.0,
+      "prefill_tokens_per_second": 0.0
+    }
+  },
+  "test_swap_usage_after": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)",
+  "test_vm_stat_after": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                  1260588.\nPages active:                                1504468.\nPages inactive:                              1089122.\nPages speculative:                               387.\nPages throttled:                                   0.\nPages wired down:                             199071.\nPages purgeable:                                1843.\n\"Translation faults\":                      786902670.\nPages copy-on-write:                       101751630.\nPages zero filled:                         606168550.\nPages reactivated:                            884949.\nPages purged:                                3770570.\nFile-backed pages:                            558522.\nAnonymous pages:                             2035455.\nPages stored in compressor:                   202045.\nPages occupied by compressor:                  88965.\nDecompressions:                               170325.\nCompressions:                                 425118.\nPageins:                                     5401063.\nPageouts:                                        368.\nSwapins:                                           0.\nSwapouts:                                          0.\nPages tagged:                                 141358.\nPages tagged resident:                        127965.\nPages tagged compressed:                       13393.\nPages tag-storage:                            131072.\nPages tag-storage holding tags:                 5586.\nPages tag-storage free:                          945.\nPages tag-storage non-tag pageable:           124438.\nPages tag-storage non-tag wired:                   8.\nBytes of compressed tags:                    1976640.\nTagged compressions:                           19661.\nTagged decompressions:                          4902.\n",
+  "benchmark": {
+    "client_status": 0,
+    "contexts": [
+      20000,
+      40000,
+      60000,
+      80000,
+      100000,
+      128000
+    ],
+    "concurrency": [
+      1,
+      2
+    ],
+    "repetitions_per_setting": 1,
+    "successful_requests": 18,
+    "failed_requests": 0,
+    "batches": 12,
+    "cached_tokens": 0,
+    "output_tokens_per_request": 1024,
+    "total_batch_wall_seconds": 2015.2194838739815
+  },
+  "gpu_utilization": {
+    "source": "ioreg Device Utilization %, approximately once per second over the whole benchmark window (including tokenizer, preflight, gaps, prefill and decode)",
+    "samples": 1810,
+    "median_percent": 100.0,
+    "mean_percent": 97.59668508287292,
+    "peak_percent": 100,
+    "fraction_at_least_95_percent": 0.8767955801104972
+  },
+  "restored_main_health": {
+    "health": {
+      "status": "ok",
+      "model": "swift-1.5",
+      "model_ids": [
+        "swift-1.5"
+      ],
+      "max_batch_size": 2,
+      "warming": false,
+      "memory": {
+        "active": 19662057906,
+        "cache": 0,
+        "peak": 22842283036,
+        "budget": 51539607552,
+        "mlx_budget": 48318382080,
+        "footprint": 20054370960
+      },
+      "live": {
+        "connections": 0,
+        "waiting": 0,
+        "decode_tokens_per_second": 0.0,
+        "prefill_tokens_per_second": 0.0
+      }
+    },
+    "packages": {
+      "tensorfold": "0.6.5",
+      "mlx": "0.32.3",
+      "mlx-metal": "0.32.3",
+      "mlx-lm": "0.32.0"
+    },
+    "source_commit": "39f4a51839ba3f903c02ca99ed8e1c48606c214e",
+    "source_branch": "main",
+    "key_checks": "Unauthenticated models and Studio metrics refused; Bearer and x-api-key accepted; public health status-only",
+    "swap_usage": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"
+  },
+  "public_model_discovery": {
+    "endpoint": "https://ai-api.ashersuter.com/v1/models",
+    "checks": [
+      {
+        "authenticated": false,
+        "status": 401
+      },
+      {
+        "authenticated": true,
+        "status": 200
+      }
+    ],
+    "problems": [],
+    "user_agent": "AstraStudioBenchmark/1.1"
+  }
+}

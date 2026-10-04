@@ -1,0 +1,38 @@
+{
+  "tested_source_tree": "0b7d9d2702bb90bf12bbf34995262ae73eba2fda",
+  "deployed_main": "39f4a51839ba3f903c02ca99ed8e1c48606c214e",
+  "host_suite": {
+    "command": "python -m pytest -q tests",
+    "passed": 5054,
+    "skipped": 609,
+    "subtests_passed": 6,
+    "failed": 0,
+    "errors": 0,
+    "wall_seconds": 326.13,
+    "xml_test_entries": 5669
+  },
+  "focused_suite": {
+    "command": "python -m pytest -q tests/test_lane_fuse.py tests/test_glm5_prompt_kernels.py tests/test_update.py",
+    "passed": 117,
+    "skipped": 1,
+    "failed": 0,
+    "wall_seconds": 6.4
+  },
+  "pip_check": "passed",
+  "hardware": "M5 Max, 40 GPU cores, 64 GiB",
+  "runtime": {
+    "mlx": "0.32.3",
+    "mlx-metal": "0.32.3",
+    "mlx-lm": "0.32.0"
+  },
+  "test_compatibility_changes": [
+    "Recursively compare nested cache arrays bit for bit and cache metadata exactly",
+    "Respect the production M1-M4 gate for GLM index fusion on M5"
+  ],
+  "not_available": [
+    "CUDA GPU",
+    "M1-M4 hardware"
+  ],
+  "live_authentication": "Bearer and x-api-key accepted; missing and invalid keys refused for models; Studio metrics authenticated; public health status-only",
+  "long_output_validation": "Two seeded 20K concurrent replies match with drafting on/off; cached chat token hash matches cold with 20038 cached prompt tokens; no swapins or swapouts"
+}

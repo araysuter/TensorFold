@@ -1,0 +1,322 @@
+[
+  {
+    "label": "concurrent-draft-False-user-0",
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 128,
+      "total_tokens": 20128,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "083a0afc5a37",
+    "prefill_seconds": 22.857524958031718,
+    "speculative": {
+      "rounds": 127,
+      "drafted": 0,
+      "accepted": 0,
+      "acceptance_rate": 0.0,
+      "tokens_per_round": 1.0078740157480315
+    },
+    "choice": {
+      "index": 0,
+      "text": "To implement an asynchronous work queue with retries and cancellation, you can use Python's `asyncio` library. Here is an example implementation:\n\n```python\nimport asyncio\nfrom typing import Callable, Any, Optional\n\nclass WorkQueue:\n    def __init__(self, max_retries: int = 3):\n        self.queue: asyncio.Queue = asyncio.Queue()\n        self.max_retries = max_retries\n        self.active_tasks: dict = {}\n\n    async def add_task(self, func: Callable, *args: Any, **kwargs: Any) -> None:\n        \"\"\"Add a task to the",
+      "finish_reason": "length",
+      "logprobs": null
+    },
+    "memory_after": {
+      "active": 19386335572,
+      "cache": 0,
+      "peak": 25894278636,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 20259056512
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 0,
+        "Swapouts": 0
+      },
+      "after": {
+        "Swapins": 0,
+        "Swapouts": 0
+      }
+    },
+    "swap_after": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"
+  },
+  {
+    "label": "concurrent-draft-False-user-1",
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 128,
+      "total_tokens": 20128,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "92ea918e180a",
+    "prefill_seconds": 46.29612137499498,
+    "speculative": {
+      "rounds": 127,
+      "drafted": 0,
+      "accepted": 0,
+      "acceptance_rate": 0.0,
+      "tokens_per_round": 1.0078740157480315
+    },
+    "choice": {
+      "index": 0,
+      "text": "def transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row:",
+      "finish_reason": "length",
+      "logprobs": null
+    },
+    "memory_after": {
+      "active": 19386335572,
+      "cache": 0,
+      "peak": 25894278636,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 20259056512
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 0,
+        "Swapouts": 0
+      },
+      "after": {
+        "Swapins": 0,
+        "Swapouts": 0
+      }
+    },
+    "swap_after": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"
+  },
+  {
+    "label": "concurrent-draft-True-user-0",
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 128,
+      "total_tokens": 20128,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "083a0afc5a37",
+    "prefill_seconds": 42.12662212498253,
+    "speculative": {
+      "rounds": 22,
+      "drafted": 317,
+      "accepted": 105,
+      "acceptance_rate": 0.3312302839116719,
+      "tokens_per_round": 5.818181818181818,
+      "proposer": {
+        "proposals": 2,
+        "proposed_tokens": 30,
+        "judged_tokens": 15,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "text": "To implement an asynchronous work queue with retries and cancellation, you can use Python's `asyncio` library. Here is an example implementation:\n\n```python\nimport asyncio\nfrom typing import Callable, Any, Optional\n\nclass WorkQueue:\n    def __init__(self, max_retries: int = 3):\n        self.queue: asyncio.Queue = asyncio.Queue()\n        self.max_retries = max_retries\n        self.active_tasks: dict = {}\n\n    async def add_task(self, func: Callable, *args: Any, **kwargs: Any) -> None:\n        \"\"\"Add a task to the",
+      "finish_reason": "length",
+      "logprobs": null
+    },
+    "memory_after": {
+      "active": 19485157076,
+      "cache": 0,
+      "peak": 24342685688,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 21358325016
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 0,
+        "Swapouts": 0
+      },
+      "after": {
+        "Swapins": 0,
+        "Swapouts": 0
+      }
+    },
+    "swap_after": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"
+  },
+  {
+    "label": "concurrent-draft-True-user-1",
+    "usage": {
+      "prompt_tokens": 20000,
+      "completion_tokens": 128,
+      "total_tokens": 20128,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "92ea918e180a",
+    "prefill_seconds": 22.58303983398946,
+    "speculative": {
+      "rounds": 8,
+      "drafted": 201,
+      "accepted": 119,
+      "acceptance_rate": 0.5920398009950248,
+      "tokens_per_round": 16.0,
+      "proposer": {
+        "proposals": 14,
+        "proposed_tokens": 376,
+        "judged_tokens": 188,
+        "accepted_tokens": 110,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "text": "def transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row:",
+      "finish_reason": "length",
+      "logprobs": null
+    },
+    "memory_after": {
+      "active": 19485157076,
+      "cache": 0,
+      "peak": 24342685688,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 21358325016
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 0,
+        "Swapouts": 0
+      },
+      "after": {
+        "Swapins": 0,
+        "Swapouts": 0
+      }
+    },
+    "swap_after": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"
+  },
+  {
+    "label": "chat-cold",
+    "usage": {
+      "prompt_tokens": 20061,
+      "completion_tokens": 128,
+      "total_tokens": 20189,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "034192df9fa3",
+    "prefill_seconds": 21.308539999998175,
+    "speculative": {
+      "rounds": 33,
+      "drafted": 444,
+      "accepted": 95,
+      "acceptance_rate": 0.21396396396396397,
+      "tokens_per_round": 3.878787878787879,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Why this is a problem:\n\n1.  **Redundancy and Maintenance Nightmare**: The exact same function is defined hundreds of times. In Python, each subsequent definition **overwrites** the previous one. This means only the *last* definition is active. While this doesn't cause a runtime error in this specific case (since they are all identical), it makes the code:\n    *   Extremely difficult to read and maintain.\n    *   Prone to subtle bugs if someone accidentally modifies one of the earlier definitions, thinking"
+      },
+      "finish_reason": "length"
+    },
+    "memory_after": {
+      "active": 24195404188,
+      "cache": 0,
+      "peak": 26362814680,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 25862846816
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 0,
+        "Swapouts": 0
+      },
+      "after": {
+        "Swapins": 0,
+        "Swapouts": 0
+      }
+    },
+    "swap_after": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"
+  },
+  {
+    "label": "chat-resumed",
+    "usage": {
+      "prompt_tokens": 20061,
+      "completion_tokens": 128,
+      "total_tokens": 20189,
+      "prompt_tokens_details": {
+        "cached_tokens": 20038
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "token_sha": "034192df9fa3",
+    "prefill_seconds": 0.08019212499493733,
+    "speculative": {
+      "rounds": 33,
+      "drafted": 444,
+      "accepted": 95,
+      "acceptance_rate": 0.21396396396396397,
+      "tokens_per_round": 3.878787878787879,
+      "proposer": {
+        "proposals": 0,
+        "proposed_tokens": 0,
+        "judged_tokens": 0,
+        "accepted_tokens": 0,
+        "silenced_rounds": 0
+      }
+    },
+    "choice": {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Why this is a problem:\n\n1.  **Redundancy and Maintenance Nightmare**: The exact same function is defined hundreds of times. In Python, each subsequent definition **overwrites** the previous one. This means only the *last* definition is active. While this doesn't cause a runtime error in this specific case (since they are all identical), it makes the code:\n    *   Extremely difficult to read and maintain.\n    *   Prone to subtle bugs if someone accidentally modifies one of the earlier definitions, thinking"
+      },
+      "finish_reason": "length"
+    },
+    "memory_after": {
+      "active": 24237380572,
+      "cache": 0,
+      "peak": 25877618032,
+      "budget": 51539607552,
+      "mlx_budget": 48318382080,
+      "footprint": 26146142560
+    },
+    "swap_counts": {
+      "before": {
+        "Swapins": 0,
+        "Swapouts": 0
+      },
+      "after": {
+        "Swapins": 0,
+        "Swapouts": 0
+      }
+    },
+    "swap_after": "vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"
+  }
+]
