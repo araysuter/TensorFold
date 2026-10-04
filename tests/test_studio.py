@@ -5,6 +5,7 @@ import pytest
 from tensorfold.server.studio import Studio, conversation_key
 from tensorfold.server.errors import RequestError
 from tensorfold.server.http import make_handler
+from tensorfold.server.authentication import KeyStore
 
 
 def job(n, tokens=None, key=None):
@@ -69,8 +70,9 @@ def request(app, auth=None, path='/v1/models', method='GET'):
 
 
 def test_auth_all_data_routes_and_post():
-    app=SimpleNamespace(api_key='secret',model_ids=['swift-1.5'])
-    for route in ['/health','/v1/models','/studio/metrics']:
+    app=SimpleNamespace(auth=KeyStore(['secret']),model_ids=['swift-1.5'])
+    assert request(app,path='/health') == (200, b'{"status": "ok"}')
+    for route in ['/v1/models','/studio/metrics']:
         assert request(app,path=route)[0]==401
         assert request(app,'Bearer wrong',route)[0]==401
     assert request(app,path='/v1/chat/completions',method='POST')[0]==401
@@ -91,7 +93,7 @@ def test_swift_scales_preserve_dtype_and_fail_closed():
 
 def test_metrics_endpoint_requires_key_and_returns_inventory():
     s=Studio(2)
-    app=SimpleNamespace(api_key='secret',scheduler=SimpleNamespace(studio=s),served_name='swift-1.5',
+    app=SimpleNamespace(auth=KeyStore(['secret']),scheduler=SimpleNamespace(studio=s),served_name='swift-1.5',
                         max_batch_size=2,context_window=131072,
                         prompt_memory=SimpleNamespace(memory_snapshot=lambda reset: {'active': 123}))
     status,raw=request(app,'Bearer secret','/studio/metrics')
@@ -274,3 +276,14 @@ def test_streamed_tool_ids_not_reparsed_ids_keep_vscode_followup_in_same_slot():
     status, _ = post(app, dict(messages=first + [assistant, {'role': 'tool', 'tool_call_id': 'wire-call-123',
                               'content': 'found it'}], tools=tools, stream=True))
     assert status == 200 and len(app.scheduler.studio.prompts) == 1
+
+
+def test_upstream_auth_keeps_detailed_health_private():
+    app = SimpleNamespace(auth=KeyStore(['secret']), served_name='swift-1.5',
+                          model_ids=['swift-1.5'], max_batch_size=2,
+                          prompt_memory=SimpleNamespace(memory_snapshot=lambda reset: {'active': 123}))
+    assert json.loads(request(app, path='/health')[1]) == {'status': 'ok'}
+    assert json.loads(request(app, 'Bearer wrong', '/health')[1]) == {'status': 'ok'}
+    status, body = request(app, 'Bearer secret', '/health')
+    payload = json.loads(body)
+    assert status == 200 and payload['model'] == 'swift-1.5' and payload['memory']['active'] == 123

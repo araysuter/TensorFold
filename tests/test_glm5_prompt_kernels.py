@@ -257,6 +257,9 @@ def test_fused_index_scores_are_the_three_ops(gpu):
     from tensorfold.families.glm5_next.mla import MLA
     from tensorfold.kernels.glm.flash.v1 import prompt as PK
 
+    if not PK.proven():
+        pytest.skip("index-score fusion is qualified only for M1-M4; M5 uses the MLX ops path")
+
     for rows, blocks in ((512, 4096), (512, 513), (17, 700), (100, 16384), (1, 512), (512, 32768)):
         mx.random.seed(rows + blocks)
         iq = (0.3 * mx.random.normal((rows, 32, 128))).astype(mx.bfloat16)

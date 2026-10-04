@@ -1,6 +1,7 @@
 # Astra Studio configuration
 
-This fork adds conversation monitoring and Bearer authentication to TensorFold 0.5.0.
+This fork adds conversation monitoring to TensorFold 0.6.5 and uses upstream
+reloadable API key authentication.
 It reuses upstream `--spill-gib` for SSD snapshots. The BF16 cache and decoding kernels
 are unchanged. `tools/start-studio.sh` selects Swift's tested snapshot, two compute lanes,
 a 131,072-token prompt-plus-response limit, eight tracked conversations and a 128 GiB
@@ -24,7 +25,7 @@ git clone https://github.com/araysuter/TensorFold.git tensorfold-studio
 cd tensorfold-studio
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e . 'mlx-lm==0.31.3' 'mlx==0.32.2'
+pip install --upgrade -e '.[test,tui]' 'mlx-lm==0.32.0' 'mlx==0.32.3'
 bash tools/start-studio.sh
 ```
 
@@ -41,8 +42,9 @@ curl --fail-with-body http://127.0.0.1:8080/studio/metrics \
 ```
 
 `/studio` is a public empty HTML shell; entering the key fetches authenticated metrics.
-The key stays in tab memory, not localStorage. `/studio/metrics`, `/health`, model lists
-and completion endpoints all require the key when configured. No key is placed in URLs.
+The key stays in tab memory, not localStorage. `/studio/metrics`, detailed `/health`, model lists
+and completion endpoints require the key when configured. Unauthenticated `/health`
+returns only `{"status": "ok"}`. No key is placed in URLs.
 
 ## Conversations versus checkpoints
 

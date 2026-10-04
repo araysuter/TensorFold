@@ -130,6 +130,19 @@ def test_items_become_the_messages_a_chat_client_sends():
         {"role": "tool", "tool_call_id": "c2", "content": "none"}]
 
 
+def test_a_function_call_output_s_image_is_a_tool_message_image_part():
+    shot = "data:image/png;base64,AA"
+    items = [{"type": "function_call", "call_id": "c1", "name": "screenshot", "arguments": "{}"},
+             {"type": "function_call_output", "call_id": "c1",
+              "output": [{"type": "input_text", "text": "page"}, {"type": "input_image", "image_url": shot}]}]
+    assert responses.messages(items)[1] == {
+        "role": "tool", "tool_call_id": "c1",
+        "content": [{"type": "text", "text": "page"}, {"type": "image_url", "image_url": {"url": shot}}]}
+    with pytest.raises(RequestError, match="input_text and input_image"):
+        responses.messages([{"type": "function_call_output", "call_id": "c1",
+                             "output": [{"type": "input_file", "file_id": "f"}]}])
+
+
 def test_tools_choices_and_formats_as_chat_completion_fields():
     store = responses.Store()
     request = responses.translate({"input": "x", "tools": FN_TOOLS, "tool_choice": {"type": "function",
@@ -384,22 +397,30 @@ def test_mac_a_response_is_its_chat_completion(mac):
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_mac_responses_keep_authentication_through_the_chat_adapter(mac, stream):
-    app, port = mac
-    app.api_key = "test-secret"
-    body = {"input": "Hi", "stream": stream}
-    assert call(port, "POST", "/v1/responses", body)[0] == 401
-    headers = {"Authorization": "Bearer test-secret"}
-    status, raw = call(port, "POST", "/v1/responses", body, headers)
-    assert status == 200
-    response = valid(stream_events(raw)) if stream else json.loads(raw)
-    assert text_of(response) == "Hello"
-    path = f"/v1/responses/{response['id']}"
-    for method in ("GET", "DELETE"):
-        assert call(port, method, path)[0] == 401
-        assert call(port, method, path, headers={"Authorization": "Bearer wrong"})[0] == 401
-    assert call(port, "GET", path, headers=headers)[0] == 200
-    assert call(port, "DELETE", path, headers=headers)[0] == 200
+def test_mac_responses_keep_authentication_through_the_chat_adapter(stream):
+    from tensorfold.server.authentication import KeyStore
+
+    app = FakeApp(reasoning="because")
+    app.auth = KeyStore(["test-secret"])
+    server = serve_fake(app)
+    port = server.server_port
+    try:
+        body = {"input": "Hi", "stream": stream}
+        assert call(port, "POST", "/v1/responses", body)[0] == 401
+        headers = {"Authorization": "Bearer test-secret"}
+        status, raw = call(port, "POST", "/v1/responses", body, headers)
+        assert status == 200
+        response = valid(stream_events(raw)) if stream else json.loads(raw)
+        assert text_of(response) == "Hello"
+        path = f"/v1/responses/{response['id']}"
+        for method in ("GET", "DELETE"):
+            assert call(port, method, path)[0] == 401
+            assert call(port, method, path, headers={"Authorization": "Bearer wrong"})[0] == 401
+        assert call(port, "GET", path, headers=headers)[0] == 200
+        assert call(port, "DELETE", path, headers=headers)[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_the_store_keeps_the_newest_and_a_chain_needs_every_link():

@@ -33,10 +33,14 @@ Stop the server, then run from the activated environment:
 ```bash
 cd ~/ai/tensorfold-studio
 git pull --ff-only
-python -m pip install -e .
+python -m pip install --upgrade -e ".[test,tui]"
 bash tools/start-studio.sh
 # Use tools/start-studio-qwen.sh instead for Qwen.
 ```
+
+Current integration includes upstream **TensorFold 0.6.5** and retains the Studio prompt
+kernels, monitoring, conversation tracking, keepalives and graceful cache cleanup.
+The supported runtime is MLX 0.32.3 and MLX-LM 0.32.x; use the upgrade command above.
 
 ## Connection and settings
 
@@ -57,6 +61,10 @@ Swift defaults to **48 GiB process / 45 GiB MLX**, qualified with cold and cache
 prompts. Qwen keeps its existing 58 GiB requested process budget, subject to Metal's cap.
 The observed Qwen startup cap was **51.8 GiB process / 48.8 GiB MLX**. These are budgets, not preallocated memory or a guarantee against swap. Clients do not need to enable drafting; explicitly sending `"draft": false` disables it for that request.
 
+Upstream authentication accepts Bearer or `x-api-key`, multiple labeled keys and
+restricted key files with reload support. `/health` returns only status without a
+valid key; detailed health and Studio metrics require authentication.
+
 The launcher copies the existing llama.cpp key if the TensorFold key is missing. Never put keys in this repository. If downloads need Hugging Face authentication, run `hf auth login` in the activated environment and supply a read token interactively.
 
 For a new installation rather than reconnecting, use Python 3.11+:
@@ -68,7 +76,7 @@ git clone https://github.com/araysuter/TensorFold.git tensorfold-studio
 cd tensorfold-studio
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e .
+python -m pip install --upgrade -e ".[test,tui]"
 ```
 
 Provision `~/.config/tensorfold/api-key` before launching if the old llama.cpp key is unavailable. The public hostname requires the existing tunnel; cloning this repo does not configure it.

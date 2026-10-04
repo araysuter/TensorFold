@@ -31,6 +31,11 @@ def _needs_tensor_units():
 def _same(a, b, *, finite=True):
     """The same bits, and (``finite``) no inf or NaN: a lost dispatch can leave the same NaN on both sides."""
 
+    if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+        return (type(a) is type(b) and len(a) == len(b)
+                and all(_same(x, y, finite=finite) for x, y in zip(a, b)))
+    if not isinstance(a, mx.array) or not isinstance(b, mx.array):
+        return type(a) is type(b) and a == b
     if a.shape != b.shape or a.dtype != b.dtype:
         return False
     if finite and mx.issubdtype(a.dtype, mx.floating) and not bool(mx.all(mx.isfinite(a)).item()):

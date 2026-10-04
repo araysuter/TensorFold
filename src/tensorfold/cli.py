@@ -14,18 +14,18 @@ from typing import Any
 
 from tensorfold import __version__
 from tensorfold import cli_args
-from tensorfold.server import stacks
+from tensorfold.server import stacks, thinking_notes
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
-COMMANDS = ("serve", "pull", "models", "info", "update")
+COMMANDS = ("serve", "pull", "models", "info", "update", "service", "tui", "plan")
 
 
 def build_parser() -> argparse.ArgumentParser:
     """The ``tensorfold`` parser with this module's subcommand handlers."""
 
     return cli_args.build_parser({"serve": cmd_serve, "pull": cmd_pull, "models": cmd_models,
-                                  "update": cmd_update, "info": cmd_info})
+                                  "update": cmd_update, "info": cmd_info, "plan": cmd_plan})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -165,6 +165,14 @@ def cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan(args: argparse.Namespace) -> int:
+    """Estimate local checkpoint weights without loading a model."""
+
+    from tensorfold.cli_plan import cmd_plan as plan
+
+    return plan(args)
+
+
 def _generation_config(model_dir: Path) -> dict[str, Any]:
     path = Path(model_dir) / "generation_config.json"
     config = json.loads(path.read_text()) if path.exists() else {}
@@ -185,7 +193,7 @@ def _model_context(model_dir: Path) -> int:
     return int(limit) if isinstance(limit, int) and limit > 0 else 0
 
 
-def _drafter(family: Any, choice: str) -> str:
+def _drafter(family: Any, choice: str, backend: str = "mlx") -> str:
     """The draft model directory for ``--drafter`` (auto: the family's draft model if it has been pulled)."""
 
     from tensorfold import hub
@@ -194,7 +202,9 @@ def _drafter(family: Any, choice: str) -> str:
         return ""
     if choice != "auto":
         return str(hub.resolve(choice))
-    repo = getattr(family.package, "DRAFTER", "")
+    # a family may name another draft model for CUDA (CUDA_DRAFTER); "" drafts with its own MTP layer there
+    repo = getattr(family.package, "CUDA_DRAFTER" if backend == "cuda" else "DRAFTER",
+                   getattr(family.package, "DRAFTER", ""))
     if not repo:
         return ""
     found = hub.cached(repo)
@@ -237,7 +247,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2")
     started = time.perf_counter()
-    drafter = "" if args.no_drafts else _drafter(family, args.drafter)
+    drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
     if getattr(args, "kv_dtype", "bf16") != "bf16":
@@ -261,12 +271,18 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
-    from tensorfold.cuda import prompt_precision
+    from tensorfold.cuda import precision, prompt_precision
 
     asked = getattr(args, "prefill_fp8", None)
     prompt_precision.set_fp8(prompt_precision.FP8_BY_DEFAULT if asked is None else asked)   # before any weight loads
+    chosen = getattr(args, "precision", None)
+    precision.set_mode(chosen or precision.CHECKPOINT, asked=chosen is not None)
     engine = family.package.cuda_engine(model_dir, **options)
-    fp8 = prompt_precision.fp8() and bool(getattr(getattr(engine, "w", None), "fast_prefill", False))
+    weights = getattr(engine, "w", None)
+    fp8 = prompt_precision.fp8() and bool(getattr(weights, "fast_prefill", False))
+    if asked and not fp8 and getattr(weights, "precision", "full") == precision.CHECKPOINT:
+        raise ValueError("--prefill-fp8 is for --precision full: the checkpoint's own math already runs its prompts in "
+                         "FP4 and FP8")
     if asked and not fp8:
         raise ValueError("--prefill-fp8: this checkpoint's prompt matmuls have no FP8 kernel (EXL3 packs, MLX formats "
                          "other than Qwen's 4-bit g64, Flash Next without MXFP8 layers); drop the flag")
@@ -286,15 +302,23 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     app = app_class(engine, model_dir, served, default_thinking=bool(args.thinking), sampling=sampling,
                     max_tokens=int(args.max_tokens), context_window=context if context is not None else args.context,
                     reasoning_effort=args.reasoning_effort, thinking_budget=int(args.thinking_budget),
+                    vision_max_images=getattr(args, "vision_max_images", None),
+                    **({"vision_image_tokens": args.vision_image_tokens}
+                       if getattr(args, "vision_image_tokens", None) is not None else {}),
                     aliases=list(args.alias))
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
     effective_context = app.effective_context_window
+    own = getattr(weights, "precision", "") == precision.CHECKPOINT
+    prompts = "FP8 activations" if fp8 else "the checkpoint math" if own else "bf16 activations"
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 on CUDA{where} "
-          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
-          f"prompts: {'FP8 activations' if fp8 else 'bf16 activations'}; "
+          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; prompts: {prompts}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
+    app.auth = getattr(args, "auth", None)
+    note = thinking_notes.startup(model_dir, bool(args.thinking))
+    if note:
+        print(note, flush=True)
     serve(app, args.host, int(args.port))
     return 0
 
@@ -315,11 +339,9 @@ def _parallel(value: Any) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    args._api_key = None
-    if args.api_key_file:
-        args._api_key = Path(args.api_key_file).expanduser().read_text().strip()
-        if not args._api_key or any(c.isspace() for c in args._api_key):
-            raise ValueError("API key file must contain one nonempty token")
+    from tensorfold.server.authentication import configure
+
+    args.auth = configure(args)
     if args.conversation_slots < 0:
         raise ValueError("conversation slots cannot be negative")
     from tensorfold import families, hub
@@ -360,8 +382,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     stacks.start()          # `kill -USR1 <pid>` prints every thread's Python stack: where a silent server waits
     if backend == "cuda":
-        if args.api_key_file or args.conversation_slots:
-            raise ValueError("Studio authentication and conversation tracking currently require MLX")
+        if args.conversation_slots:
+            raise ValueError("Studio conversation tracking currently requires MLX")
         return _serve_cuda(args, family, model_dir, context)
     for key, value in getattr(family.package, "MLX_ENV", {}).items():
         os.environ.setdefault(key, value)       # before MLX starts: it reads them once
@@ -420,7 +442,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     model, tokenizer = family.package.load(model_dir, **options)
     engine_kwargs = dict(getattr(family.package, "engine_settings", lambda m: {})(model))
     if required_files:
-        print(f"[tensorfold] Nemotron MTP head: "
+        print(f"[tensorfold] {family.title} MTP head: "
               f"{'active' if not args.no_drafts and getattr(model, 'mtp', None) is not None else 'inactive'}",
               flush=True)
     from tensorfold.engine import prefill_step
@@ -491,6 +513,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         snapshot_dir=snapshot_dir, model_id=model_id, model_dir=model_dir,
         decode_share=0.25 if args.decode_share is None else float(args.decode_share),
         grow_checkpoints=args.prompt_cache_gib is None,
+        vision_max_images=getattr(args, "vision_max_images", None),
     )
     if app.context_fitted:
         print(f"[tensorfold] context window {app.context_window:,} tokens: the most one request can use in the "
@@ -504,7 +527,10 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     hook = getattr(family.package, "setup", None)
     if hook is not None:
         hook(app, model, **options)
-    app.api_key = getattr(args, "_api_key", None)
+    app.auth = getattr(args, "auth", None)
+    note = thinking_notes.startup(model_dir, bool(args.thinking))
+    if note:
+        print(note, flush=True)
     server = Server((args.host, int(args.port)), make_handler(app))  # type: ignore[arg-type]
     shown = "greedy" if float(sampling.get("temperature", 0.0) or 0.0) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
@@ -520,7 +546,9 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
 
     line = live.start(app)      # connections and decode/prefill tok/s on one line, in a terminal only
     try:
-        server.serve_forever()
+        from contextlib import nullcontext
+        with app.auth.signals() if app.auth is not None else nullcontext():
+            server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
