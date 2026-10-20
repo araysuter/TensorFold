@@ -2,6 +2,8 @@
 
 This fork tracks upstream native TensorFold and retains the [Studio launch and benchmark runbook](docs/studio/README.md). Historical Python-engine benchmark receipts stay under `benchmarks/studio/`.
 
+The [October 19 Swift measurements](benchmarks/studio/charts/swift-2026-10-19/README.md) compare one and two users at 20K–128K and retain the original published solo reference.
+
 TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.

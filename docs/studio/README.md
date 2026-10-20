@@ -2,7 +2,7 @@
 
 The current upstream engine is native TensorFold 1.1.1. Serving uses the installed Zig/Metal binary, not the frozen Python engine or MLX. The Python virtual environment remains useful for benchmark tokenization and clients.
 
-`tools/start-studio.sh` serves the pinned Swift 1.5 affine 4-bit checkpoint with the pinned 4-bit DFlash2 drafter, 131,072 total context tokens, two concurrent streams and an 8 GiB retained-prompt budget. It listens on loopback port 8080 and keeps the existing restricted-permission API-key file. `STUDIO_PORT` selects an isolated benchmark port, and `TENSORFOLD_NATIVE_BIN` selects another native executable. The public hostname comes from `STUDIO_ALLOWED_HOST` or the private `$HOME/.config/tensorfold/studio-host` file.
+`tools/start-studio.sh` serves the pinned Swift 1.5 affine 4-bit checkpoint with the pinned 4-bit DFlash2 drafter, 131,072 total context tokens, two concurrent streams and a 5 GiB retained-prompt budget. It listens on loopback port 8080 and keeps the existing restricted-permission API-key file. `STUDIO_PORT` selects an isolated benchmark port, and `TENSORFOLD_NATIVE_BIN` selects another native executable. The public hostname comes from `STUDIO_ALLOWED_HOST` or the private `$HOME/.config/tensorfold/studio-host` file.
 
 Install the official `tensorfold-1.1.1-macos-arm64.tar.gz` release under `$HOME/ai/tensorfold-runtime/1.1.1`, preserving its directory structure, and verify its companion SHA-256 checksum before running it. The drafter stays in the Hugging Face cache at its pinned revision. The alternate Qwen launcher preserves its existing checkpoint revision.
 
@@ -18,7 +18,7 @@ python3 tools/prepare-swift-native.py \
 bash tools/start-studio.sh
 ```
 
-The native `/dashboard` and authenticated `/stats`, `/memory` and `/v1/models` endpoints replace the Python-only Studio monitoring routes. `/health` returns status only when keys are configured. Clients send a Bearer key or `x-api-key` header. Memory admission and retained-cache capacity come from the native engine; the removed Python process/MLX budget variables do not impose native limits.
+The native `/dashboard` and authenticated `/stats`, `/memory` and `/v1/models` endpoints replace the Python-only Studio monitoring routes. `/health` returns status only when keys are configured. Clients send a Bearer key or `x-api-key` header. The final source-built binary admits a 5 GiB cache with two streams; an explicit 8 GiB budget exceeded its startup memory guard. The saved cold benchmark used 8 GiB and had zero cache hits. Memory admission and retained-cache capacity come from the native engine; the removed Python process/MLX budget variables do not impose native limits.
 
 Python-only conversation inventory, checkpoint-slot, spill and clear-on-exit flags are no longer passed. Native retained prompts are in memory by default; a process exit releases them. Preserve the published native cache limits rather than enabling over-cap operation to reproduce the former disk spill settings.
 

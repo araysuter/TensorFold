@@ -29,6 +29,14 @@ python benchmarks/studio/benchmark.py \
 
 Use a new output directory for each run. Increase `--reps` to 3 for repeated trials. The output includes JSON, CSV, SVG charts and an HTML report. Generation speed is the server-reported per-request rate; effective input throughput includes queue/prefill waiting. Combined output throughput includes the entire batch wall time.
 
+Native TensorFold 1.1.1 reports active prefill time without queue time. Retain its completion log locally and normalize the saved results before comparing effective input throughput or plotting the historical queue-plus-prefill metric:
+
+```bash
+python benchmarks/studio/normalize_native.py benchmark-results-swift/results.json /path/to/local-server.log
+```
+
+This adds each response ID's matching queue receipt, validates prompt/cache/output counts and rebuilds the reports without sending model requests. Raw native results before this step contain active prefill only. Keep raw server logs private; publish the normalized results and sanitized environment receipts.
+
 To run only selected context/concurrency pairs, use `--concurrency 1` or
 `--concurrency 2`. For example, these run only 100K with two requests, then 128K
 with one request, one repetition each:

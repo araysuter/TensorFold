@@ -1,0 +1,301 @@
+{
+  "benchmark_commit": "ba708ec90ec865cc52738de6371c762eb3987bb4",
+  "upstream_commit": "d1018b318fb51981c4a18f12e40269a4d3ee9713",
+  "engine": "native TensorFold 1.1.1",
+  "benchmark_binary_sha256": "ac70e3547ceacf0a613437505e9d3b4fa2cbfc436e3f4de2cd8dcf8de7e5cff3",
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "ram_bytes": 68719476736,
+    "gpu": "Apple M5 Max",
+    "gpu_cores": "40"
+  },
+  "software": {
+    "macos_version": "27.0.1",
+    "macos_build": "26A434",
+    "zig": "0.17.0",
+    "xcode": "27.1",
+    "metal": "32023.921",
+    "transformers_client": "5.17.0",
+    "mlx_inference_runtime": false
+  },
+  "settings": {
+    "model": "ukisai/Swift-1.5-4bit-MLX",
+    "revision": "82276731e47e1db4ac502f24c63cfaf886639be9",
+    "normalization_conversion": "161 BF16 RMSNorm vectors: float32 + 1, BF16 round-to-nearest-even; matches previous MLX load",
+    "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+    "drafter_revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+    "context": 131072,
+    "parallel": 2,
+    "prompt_cache_gib": 8,
+    "prompt_chunk_tokens": 512,
+    "snapshot_dir": "none",
+    "temperature": 0,
+    "reasoning_effort": "none",
+    "draft": true,
+    "output_limit": 1024,
+    "benchmark_transport": "loopback HTTP",
+    "sampling_defaults": {
+      "temperature": 1,
+      "top_k": 20,
+      "top_p": 0.95
+    }
+  },
+  "models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "swift-1.5",
+        "object": "model",
+        "created": 1792458502,
+        "owned_by": "tensorfold",
+        "context_length": 131072,
+        "max_model_len": 131072,
+        "reasoning": {
+          "default_enabled": true,
+          "supported_efforts": [
+            "xhigh",
+            "medium",
+            "low",
+            "none"
+          ]
+        }
+      }
+    ]
+  },
+  "stats_after_benchmark": {
+    "running": 0,
+    "waiting": 0,
+    "decode_tokens_per_second": 0.0,
+    "prefill_tokens_per_second": 0.0,
+    "generation_tokens_running": 0,
+    "prompt_tokens_total": 1284003,
+    "generation_tokens_total": 18436,
+    "mtp_drafted_total": 42006,
+    "mtp_accepted_total": 14175,
+    "decode_rounds_total": 4249,
+    "memory": {
+      "active": 47182837200,
+      "cache": 0,
+      "peak": 48832083360
+    }
+  },
+  "memory_after_benchmark": {
+    "schema_version": 1,
+    "context_window": 131072,
+    "context_fitted": false,
+    "process": {
+      "source": "darwin_rusage_info_v4",
+      "physical_footprint_bytes": 47182820816,
+      "lifetime_peak_physical_footprint_bytes": 48838292896
+    },
+    "device": {
+      "active_bytes": 47182820816,
+      "cache_bytes": 0,
+      "peak_bytes": 48832083360,
+      "peak_scope": "since_start_or_health_reset"
+    },
+    "prompt_cache_plan": {
+      "source": "physical_footprint",
+      "budget_bytes": 8589934592,
+      "explicit_budget": true,
+      "over_cap": false,
+      "ram_bytes": 68719476736,
+      "ready_footprint_bytes": 27585377120,
+      "cap_bytes": 48103633690,
+      "room_bytes": 9372942266,
+      "margin_bytes": 2147483648
+    }
+  },
+  "swap_after_benchmark": "vm.swapusage: total = 2048.00M  used = 981.81M  free = 1066.19M  (encrypted)",
+  "swap_counters_after_benchmark": {
+    "Swapins": 52328,
+    "Swapouts": 550555
+  },
+  "power_settings": {
+    "low_power_mode": false,
+    "thermal_or_performance_warning_recorded": false
+  },
+  "gpu_device_utilization_scope": "Whole benchmark window including preflight, gaps, prefill and decoding; not tensor-core occupancy",
+  "gpu_utilization_summary": {
+    "samples": 2167,
+    "median_percent": 99,
+    "mean_percent": 98.71942778034149,
+    "scope": "Entire benchmark window including preflight, gaps, prefill and decode; not tensor-core occupancy"
+  },
+  "swap_counters_before_benchmark": {
+    "Swapins": 52269,
+    "Swapouts": 550555
+  },
+  "swap_counter_change": {
+    "Swapins": 59,
+    "Swapouts": 0
+  },
+  "swap_before_benchmark": "981.81 MiB, pre-existing",
+  "deployed_build_commit": "9af7f2aeeba725afed9dd05e629bee9a75065f27",
+  "deployed_binary_sha256": "14b46612337287e47fd9d353d5d7bdb1bc48439e3c7ebdbb6b13522bee59fa60",
+  "native_source_difference_from_benchmark": "Three Metal files contain whitespace-only cleanup. Native arithmetic matches upstream and benchmark candidate.",
+  "deployment_settings": {
+    "context": 131072,
+    "parallel": 2,
+    "prompt_cache_gib": 5,
+    "prompt_chunk_tokens": 512,
+    "prompt_cache_over_cap": false
+  },
+  "deployment_check": {
+    "generation": {
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 2,
+        "total_tokens": 25,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "answer": "4"
+    },
+    "models": {
+      "status": 200,
+      "body": {
+        "object": "list",
+        "data": [
+          {
+            "id": "swift-1.5",
+            "object": "model",
+            "created": 1792458811,
+            "owned_by": "tensorfold",
+            "context_length": 131072,
+            "max_model_len": 131072,
+            "reasoning": {
+              "default_enabled": true,
+              "supported_efforts": [
+                "xhigh",
+                "medium",
+                "low",
+                "none"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "unauth_models": {
+      "status": 401
+    },
+    "stats": {
+      "status": 200,
+      "body": {
+        "running": 1,
+        "waiting": 0,
+        "decode_tokens_per_second": 1.0,
+        "prefill_tokens_per_second": 305.8007409020125,
+        "generation_tokens_running": 0,
+        "prompt_tokens_total": 46,
+        "generation_tokens_total": 4,
+        "mtp_drafted_total": 30,
+        "mtp_accepted_total": 2,
+        "decode_rounds_total": 2,
+        "memory": {
+          "active": 31614071840,
+          "cache": 0,
+          "peak": 31614071840
+        }
+      }
+    },
+    "memory": {
+      "status": 200,
+      "body": {
+        "schema_version": 1,
+        "context_window": 131072,
+        "context_fitted": false,
+        "process": {
+          "source": "darwin_rusage_info_v4",
+          "physical_footprint_bytes": 31614088224,
+          "lifetime_peak_physical_footprint_bytes": 31614546976
+        },
+        "device": {
+          "active_bytes": 31614088224,
+          "cache_bytes": 0,
+          "peak_bytes": 31614088224,
+          "peak_scope": "since_start_or_health_reset"
+        },
+        "prompt_cache_plan": {
+          "source": "physical_footprint",
+          "budget_bytes": 5368709120,
+          "explicit_budget": true,
+          "over_cap": false,
+          "ram_bytes": 68719476736,
+          "ready_footprint_bytes": 27585393552,
+          "cap_bytes": 48103633690,
+          "room_bytes": 9372925834,
+          "margin_bytes": 2147483648
+        }
+      }
+    },
+    "health": {
+      "status": 200,
+      "body": {
+        "status": "ok"
+      }
+    },
+    "dashboard": {
+      "status": 200,
+      "body": {
+        "bytes": 17725
+      }
+    },
+    "public_models": {
+      "status": 200,
+      "body": {
+        "object": "list",
+        "data": [
+          {
+            "id": "swift-1.5",
+            "object": "model",
+            "created": 1792458811,
+            "owned_by": "tensorfold",
+            "context_length": 131072,
+            "max_model_len": 131072,
+            "reasoning": {
+              "default_enabled": true,
+              "supported_efforts": [
+                "xhigh",
+                "medium",
+                "low",
+                "none"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "collector_check": {
+    "native_sample": {
+      "tracking_version": 2,
+      "tensorfold_version": 2,
+      "slots_total": 0,
+      "native_running": 0,
+      "native_waiting": 0,
+      "native_decode_tokens_per_second": 0.0,
+      "native_prefill_tokens_per_second": 0.0,
+      "native_generation_tokens_total": 2,
+      "native_prompt_tokens_total": 23,
+      "native_process_active": 31604225032,
+      "native_process_cache": 0,
+      "native_process_peak": 31613334536,
+      "host_ram_total_gib": 64.0,
+      "host_ram_used_gib": 41.3270263671875,
+      "host_compressed_gib": 1.413909912109375,
+      "host_swap_used_gib": 0.958798828125,
+      "host_pressure": 1
+    },
+    "unauthenticated_status": 401,
+    "history_preserved": true,
+    "collector_restarted": true
+  },
+  "public_probe_user_agent": "curl/8.7.1; Cloudflare rejects Python default user agent with error 1010",
+  "startup_guard": "8 GiB rejected during first main startup; safe 5 GiB retained cache admitted without over-cap override"
+}

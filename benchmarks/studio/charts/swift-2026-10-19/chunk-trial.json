@@ -1,0 +1,153 @@
+{
+  "prompt_tokens": 20000,
+  "output_tokens": 128,
+  "cache_gib": 0,
+  "attempts_per_setting": 1,
+  "selected_prompt_chunk_tokens": 512,
+  "reason": "2048 showed no material prompt-time gain and increased footprint; native admission serialized concurrent requests.",
+  "outputs_equal_across_chunk_settings": true,
+  "settings": [
+    {
+      "prompt_chunk_tokens": 512,
+      "solo_prefill_seconds": [
+        21.8210785,
+        21.825547542
+      ],
+      "solo_prefill_median_seconds": 21.823313020999997,
+      "peak_process_bytes": 40225191184,
+      "request_measurements": [
+        {
+          "label": "concurrent-draft-False-user-0",
+          "prefill_seconds": 21.934643875,
+          "token_sha": "15dae1b31284",
+          "memory_after": {
+            "active": 39974794464,
+            "cache": 0,
+            "peak": 39974794464
+          }
+        },
+        {
+          "label": "concurrent-draft-False-user-1",
+          "prefill_seconds": 21.810014917,
+          "token_sha": "92ea918e180a",
+          "memory_after": {
+            "active": 39974778080,
+            "cache": 0,
+            "peak": 39974794464
+          }
+        },
+        {
+          "label": "concurrent-draft-True-user-0",
+          "prefill_seconds": 21.821364916,
+          "token_sha": "15dae1b31284",
+          "memory_after": {
+            "active": 40221685008,
+            "cache": 0,
+            "peak": 40221685008
+          }
+        },
+        {
+          "label": "concurrent-draft-True-user-1",
+          "prefill_seconds": 21.825126375,
+          "token_sha": "92ea918e180a",
+          "memory_after": {
+            "active": 40221668624,
+            "cache": 0,
+            "peak": 40221685008
+          }
+        },
+        {
+          "label": "solo-drafted-user-0",
+          "prefill_seconds": 21.8210785,
+          "token_sha": "15dae1b31284",
+          "memory_after": {
+            "active": 40221570320,
+            "cache": 0,
+            "peak": 40221685008
+          }
+        },
+        {
+          "label": "solo-drafted-user-1",
+          "prefill_seconds": 21.825547542,
+          "token_sha": "92ea918e180a",
+          "memory_after": {
+            "active": 40225191184,
+            "cache": 0,
+            "peak": 40225191184
+          }
+        }
+      ]
+    },
+    {
+      "prompt_chunk_tokens": 2048,
+      "solo_prefill_seconds": [
+        21.772955541,
+        21.76687225
+      ],
+      "solo_prefill_median_seconds": 21.7699138955,
+      "peak_process_bytes": 45232845928,
+      "request_measurements": [
+        {
+          "label": "concurrent-draft-False-user-0",
+          "prefill_seconds": 21.71626825,
+          "token_sha": "15dae1b31284",
+          "memory_after": {
+            "active": 45081523256,
+            "cache": 0,
+            "peak": 45081523256
+          }
+        },
+        {
+          "label": "concurrent-draft-False-user-1",
+          "prefill_seconds": 22.830698667,
+          "token_sha": "92ea918e180a",
+          "memory_after": {
+            "active": 45081539640,
+            "cache": 0,
+            "peak": 45081539640
+          }
+        },
+        {
+          "label": "concurrent-draft-True-user-0",
+          "prefill_seconds": 21.826729083,
+          "token_sha": "15dae1b31284",
+          "memory_after": {
+            "active": 45230290024,
+            "cache": 0,
+            "peak": 45230290024
+          }
+        },
+        {
+          "label": "concurrent-draft-True-user-1",
+          "prefill_seconds": 21.88230825,
+          "token_sha": "92ea918e180a",
+          "memory_after": {
+            "active": 45230273640,
+            "cache": 0,
+            "peak": 45230290024
+          }
+        },
+        {
+          "label": "solo-drafted-user-0",
+          "prefill_seconds": 21.772955541,
+          "token_sha": "15dae1b31284",
+          "memory_after": {
+            "active": 45230830696,
+            "cache": 0,
+            "peak": 45230830696
+          }
+        },
+        {
+          "label": "solo-drafted-user-1",
+          "prefill_seconds": 21.76687225,
+          "token_sha": "92ea918e180a",
+          "memory_after": {
+            "active": 45232845928,
+            "cache": 0,
+            "peak": 45232845928
+          }
+        }
+      ]
+    }
+  ]
+}

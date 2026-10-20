@@ -1,0 +1,370 @@
+{
+  "cold": [
+    {
+      "label": "concurrent-draft-False-user-0",
+      "usage": {
+        "prompt_tokens": 20000,
+        "completion_tokens": 128,
+        "total_tokens": 20128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "token_sha": "15dae1b31284",
+      "prefill_seconds": 21.934643875,
+      "speculative": {
+        "rounds": 127,
+        "drafted": 0,
+        "accepted": 0,
+        "acceptance_rate": 0.0,
+        "tokens_per_round": 1.0078740157480315
+      },
+      "choice": {
+        "index": 0,
+        "text": "```python\nimport asyncio\nimport random\nfrom dataclasses import dataclass\nfrom typing import Any, Callable, Coroutine, Optional\nfrom enum import Enum\nimport time\n\n\nclass TaskStatus(Enum):\n    PENDING = \"pending\"\n    RUNNING = \"running\"\n    SUCCESS = \"success\"\n    FAILED = \"failed\"\n    CANCELLED = \"cancelled\"\n\n\n@dataclass\nclass WorkItem:\n    id: int\n    func: Callable[..., Coroutine[Any, Any, Any]]\n    args: tuple = ()\n    kwargs: dict = None\n    max_retries: int = ",
+        "finish_reason": "length",
+        "logprobs": null
+      },
+      "memory_after": {
+        "active": 39974794464,
+        "cache": 0,
+        "peak": 39974794464
+      },
+      "swap_counts": {
+        "before": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        },
+        "after": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        }
+      },
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 981.81M  free = 1066.19M  (encrypted)"
+    },
+    {
+      "label": "concurrent-draft-False-user-1",
+      "usage": {
+        "prompt_tokens": 20000,
+        "completion_tokens": 128,
+        "total_tokens": 20128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "token_sha": "92ea918e180a",
+      "prefill_seconds": 21.810014917,
+      "speculative": {
+        "rounds": 127,
+        "drafted": 0,
+        "accepted": 0,
+        "acceptance_rate": 0.0,
+        "tokens_per_round": 1.0078740157480315
+      },
+      "choice": {
+        "index": 0,
+        "text": "def transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row:",
+        "finish_reason": "length",
+        "logprobs": null
+      },
+      "memory_after": {
+        "active": 39974778080,
+        "cache": 0,
+        "peak": 39974794464
+      },
+      "swap_counts": {
+        "before": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        },
+        "after": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        }
+      },
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 981.81M  free = 1066.19M  (encrypted)"
+    },
+    {
+      "label": "concurrent-draft-True-user-0",
+      "usage": {
+        "prompt_tokens": 20000,
+        "completion_tokens": 128,
+        "total_tokens": 20128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "token_sha": "15dae1b31284",
+      "prefill_seconds": 21.821364916,
+      "speculative": {
+        "rounds": 27,
+        "drafted": 217,
+        "accepted": 100,
+        "acceptance_rate": 0.4608294930875576,
+        "tokens_per_round": 4.7407407407407405
+      },
+      "choice": {
+        "index": 0,
+        "text": "```python\nimport asyncio\nimport random\nfrom dataclasses import dataclass\nfrom typing import Any, Callable, Coroutine, Optional\nfrom enum import Enum\nimport time\n\n\nclass TaskStatus(Enum):\n    PENDING = \"pending\"\n    RUNNING = \"running\"\n    SUCCESS = \"success\"\n    FAILED = \"failed\"\n    CANCELLED = \"cancelled\"\n\n\n@dataclass\nclass WorkItem:\n    id: int\n    func: Callable[..., Coroutine[Any, Any, Any]]\n    args: tuple = ()\n    kwargs: dict = None\n    max_retries: int = ",
+        "finish_reason": "length",
+        "logprobs": null
+      },
+      "memory_after": {
+        "active": 40221685008,
+        "cache": 0,
+        "peak": 40221685008
+      },
+      "swap_counts": {
+        "before": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        },
+        "after": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        }
+      },
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 981.81M  free = 1066.19M  (encrypted)"
+    },
+    {
+      "label": "concurrent-draft-True-user-1",
+      "usage": {
+        "prompt_tokens": 20000,
+        "completion_tokens": 128,
+        "total_tokens": 20128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "token_sha": "92ea918e180a",
+      "prefill_seconds": 21.825126375,
+      "speculative": {
+        "rounds": 12,
+        "drafted": 142,
+        "accepted": 115,
+        "acceptance_rate": 0.8098591549295775,
+        "tokens_per_round": 10.666666666666666
+      },
+      "choice": {
+        "index": 0,
+        "text": "def transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row:",
+        "finish_reason": "length",
+        "logprobs": null
+      },
+      "memory_after": {
+        "active": 40221668624,
+        "cache": 0,
+        "peak": 40221685008
+      },
+      "swap_counts": {
+        "before": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        },
+        "after": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        }
+      },
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 981.81M  free = 1066.19M  (encrypted)"
+    },
+    {
+      "label": "solo-drafted-user-0",
+      "usage": {
+        "prompt_tokens": 20000,
+        "completion_tokens": 128,
+        "total_tokens": 20128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "token_sha": "15dae1b31284",
+      "prefill_seconds": 21.8210785,
+      "speculative": {
+        "rounds": 21,
+        "drafted": 285,
+        "accepted": 106,
+        "acceptance_rate": 0.3719298245614035,
+        "tokens_per_round": 6.095238095238095
+      },
+      "choice": {
+        "index": 0,
+        "text": "```python\nimport asyncio\nimport random\nfrom dataclasses import dataclass\nfrom typing import Any, Callable, Coroutine, Optional\nfrom enum import Enum\nimport time\n\n\nclass TaskStatus(Enum):\n    PENDING = \"pending\"\n    RUNNING = \"running\"\n    SUCCESS = \"success\"\n    FAILED = \"failed\"\n    CANCELLED = \"cancelled\"\n\n\n@dataclass\nclass WorkItem:\n    id: int\n    func: Callable[..., Coroutine[Any, Any, Any]]\n    args: tuple = ()\n    kwargs: dict = None\n    max_retries: int = ",
+        "finish_reason": "length",
+        "logprobs": null
+      },
+      "memory_after": {
+        "active": 40221570320,
+        "cache": 0,
+        "peak": 40221685008
+      },
+      "swap_counts": {
+        "before": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        },
+        "after": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        }
+      },
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 981.81M  free = 1066.19M  (encrypted)"
+    },
+    {
+      "label": "solo-drafted-user-1",
+      "usage": {
+        "prompt_tokens": 20000,
+        "completion_tokens": 128,
+        "total_tokens": 20128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "token_sha": "92ea918e180a",
+      "prefill_seconds": 21.825547542,
+      "speculative": {
+        "rounds": 10,
+        "drafted": 130,
+        "accepted": 117,
+        "acceptance_rate": 0.9,
+        "tokens_per_round": 12.8
+      },
+      "choice": {
+        "index": 0,
+        "text": "def transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row: row[\"id\"])\ndef transform(rows):\n    return sorted(rows, key=lambda row:",
+        "finish_reason": "length",
+        "logprobs": null
+      },
+      "memory_after": {
+        "active": 40225191184,
+        "cache": 0,
+        "peak": 40225191184
+      },
+      "swap_counts": {
+        "before": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        },
+        "after": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        }
+      },
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 981.81M  free = 1066.19M  (encrypted)"
+    }
+  ],
+  "chat": [
+    {
+      "label": "chat-cold",
+      "usage": {
+        "prompt_tokens": 20063,
+        "completion_tokens": 128,
+        "total_tokens": 20191,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "token_sha": "422d4af01f85",
+      "prefill_seconds": 22.291099792,
+      "speculative": {
+        "rounds": 35,
+        "drafted": 525,
+        "accepted": 92,
+        "acceptance_rate": 0.17523809523809525,
+        "tokens_per_round": 3.657142857142857
+      },
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Explanation\n\nThe module defines the same function `transform` hundreds of times in a row. In Python, when a name is redefined, the **last definition wins**. While this is syntactically valid and will not cause a runtime error (the final definition will be the one used), it presents several risks:\n\n1.  **Maintenance Hazard**: If a developer intends to modify the logic of `transform`, they must ensure they edit the *last* definition. Editing an earlier definition will have no effect, leading to subtle bugs where"
+        },
+        "finish_reason": "length"
+      },
+      "memory_after": {
+        "active": 39093335168,
+        "cache": 0,
+        "peak": 39093335168
+      },
+      "swap_counts": {
+        "before": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        },
+        "after": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        }
+      },
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 981.81M  free = 1066.19M  (encrypted)"
+    },
+    {
+      "label": "chat-resumed",
+      "usage": {
+        "prompt_tokens": 20063,
+        "completion_tokens": 128,
+        "total_tokens": 20191,
+        "prompt_tokens_details": {
+          "cached_tokens": 20056
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "token_sha": "422d4af01f85",
+      "prefill_seconds": 0.044209292,
+      "speculative": {
+        "rounds": 35,
+        "drafted": 525,
+        "accepted": 92,
+        "acceptance_rate": 0.17523809523809525,
+        "tokens_per_round": 3.657142857142857
+      },
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "The main correctness risk is the **massive duplication of the `transform` function definition**.\n\n### Explanation\n\nThe module defines the same function `transform` hundreds of times in a row. In Python, when a name is redefined, the **last definition wins**. While this is syntactically valid and will not cause a runtime error (the final definition will be the one used), it presents several risks:\n\n1.  **Maintenance Hazard**: If a developer intends to modify the logic of `transform`, they must ensure they edit the *last* definition. Editing an earlier definition will have no effect, leading to subtle bugs where"
+        },
+        "finish_reason": "length"
+      },
+      "memory_after": {
+        "active": 39238136984,
+        "cache": 0,
+        "peak": 39238136984
+      },
+      "swap_counts": {
+        "before": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        },
+        "after": {
+          "Swapins": 52265,
+          "Swapouts": 550555
+        }
+      },
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 981.81M  free = 1066.19M  (encrypted)"
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 # Swift 1.5 performance candidate
 
+Historical Python-engine work. For native TensorFold 1.1.1, use the [current Studio runbook](README.md); the flags and implementation notes below describe the earlier engine.
+
 Branch: `asher/codex/swift-runner-speed`. This incorporates all 55 commits between
 the fork's `024f8af1274cfeb98e2355adf218b27dbd490818` and upstream
 `9cd52ab4daba68ddd09be89be8f23ad43175e821` (TensorFold 0.5.0). The upstream merge

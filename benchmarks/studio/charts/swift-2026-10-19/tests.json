@@ -1,0 +1,127 @@
+{
+  "date": "2026-10-19",
+  "engine": "native TensorFold 1.1.1",
+  "source_commit": "d1018b318fb51981c4a18f12e40269a4d3ee9713",
+  "source_build": {
+    "zig": "0.17.0",
+    "cpu_target": "apple_m1",
+    "version": "1.1.1",
+    "binary_sha256": "ac70e3547ceacf0a613437505e9d3b4fa2cbfc436e3f4de2cd8dcf8de7e5cff3",
+    "command": "zig build native test test-kernel-contract test-golden fuzz-cortheon -Dcpu=apple_m1 -Dversion=1.1.1 -j4 --summary all",
+    "exit_status": 0,
+    "build_steps_succeeded": 372,
+    "build_steps_total": 372,
+    "tests_passed": 4769,
+    "tests_skipped": 15,
+    "tests_total": 4784
+  },
+  "served_gate_host_tests": 8,
+  "queue_receipt_tests": 2,
+  "checkpoint_preparation_tests": 3,
+  "collector_native_and_legacy_mapping": "passed",
+  "lean": {
+    "upstream_baseline_problems": 444,
+    "candidate_problems": 444,
+    "new_problems": 0
+  },
+  "checkpoint_compatibility": {
+    "normalization_vectors": 161,
+    "converted_vectors_match_old_mlx_conversion": true,
+    "all_tensors_verified": 2379,
+    "other_tensor_bytes_unchanged": true,
+    "original_download_unchanged": true
+  },
+  "long_prompt_checks": {
+    "prompt_tokens": 20000,
+    "temperature": 0.7,
+    "seed": 17,
+    "output_limit": 128,
+    "cached_tokens": 0,
+    "drafted_equals_plain": true,
+    "concurrent_equals_solo": true,
+    "requests": 6
+  },
+  "short_served_cells": {
+    "prompts": [
+      "code",
+      "chat"
+    ],
+    "concurrency": [
+      1,
+      2
+    ],
+    "temperature": 0,
+    "output_tokens": 64,
+    "failed": 0,
+    "unmeasured": 0,
+    "concurrent_equals_solo": true,
+    "drafted_equals_plain": true
+  },
+  "cache_resumption": {
+    "prompt_tokens": 20063,
+    "cached_tokens": 20056,
+    "cold_prefill_seconds": 22.291099792,
+    "warm_prefill_seconds": 0.044209292,
+    "output_equal": true
+  },
+  "unavailable_hardware": [
+    "CUDA GPU",
+    "M1-M4 GPU"
+  ],
+  "ci": {
+    "main_commit": "9af7f2aeeba725afed9dd05e629bee9a75065f27",
+    "main_app_mobile": {
+      "result": "success",
+      "url": "https://github.com/araysuter/TensorFold/actions/runs/39349900801"
+    },
+    "pr_desktop": {
+      "test_files_passed": 821,
+      "test_files_failed": 0,
+      "typecheck": "passed",
+      "whitespace": "passed",
+      "url": "https://github.com/araysuter/TensorFold/actions/runs/39348858148"
+    },
+    "linux_native": {
+      "result": "success",
+      "job_url": "https://github.com/araysuter/TensorFold/actions/runs/39348858049/job/118387989506"
+    },
+    "windows": "Inherited upstream compilation failures; explicitly outside the user-requested Mac scope."
+  },
+  "final_main_build": {
+    "commit": "9af7f2aeeba725afed9dd05e629bee9a75065f27",
+    "binary_sha256": "14b46612337287e47fd9d353d5d7bdb1bc48439e3c7ebdbb6b13522bee59fa60",
+    "exit_status": 0,
+    "build_steps_succeeded": 372,
+    "build_steps_total": 372,
+    "tests_executed_passed": 1002,
+    "tests_executed_skipped": 4,
+    "note": "Unchanged test targets reused successful Zig cache; complete earlier run is recorded in source_build."
+  },
+  "chart_preview": {
+    "desktop_and_phone_widths": [
+      780,
+      360,
+      320
+    ],
+    "tabs": "passed",
+    "axes_and_overflow": "passed",
+    "legend_toggle": "passed",
+    "cross_series_tooltip": "passed",
+    "browser_errors": 0
+  },
+  "deployment_check": {
+    "generation_answer": "4",
+    "context": 131072,
+    "local_models": 200,
+    "public_models": 200,
+    "unauthenticated_models": 401,
+    "stats": 200,
+    "memory": 200,
+    "dashboard": 200,
+    "health": 200,
+    "retained_cache_gib": 5,
+    "over_cap": false,
+    "collector_native_sample": true,
+    "collector_history_preserved": true
+  }
+}

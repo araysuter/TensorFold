@@ -24,7 +24,7 @@ exec "$NATIVE" serve "$MODEL_PATH" \
   --name swift-1.5 \
   --context 131072 \
   --parallel 2 \
-  --prompt-cache-gib "${STUDIO_PROMPT_CACHE_GIB:-8}" \
+  --prompt-cache-gib "${STUDIO_PROMPT_CACHE_GIB:-5}" \
   --drafter "$DRAFTER_PATH" \
   --snapshot-dir none \
   --temperature 1 --top-k 20 --top-p 0.95 \
