@@ -32,12 +32,21 @@ jobs:
         run: zig build fuzz-cortheon
       - name: Served Flash Next gate regressions
         run: python3 -m unittest discover -s tools/zig -p flashnext_batch_serve_test.py
+      - name: Studio client and checkpoint preparation checks
+        run: |
+          python3 -m unittest discover -s tools -p test_prepare_swift_native.py
+          python3 -m unittest discover -s benchmarks/studio -p test_native_receipts.py
       # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
       - name: lean check
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
           base=$(git merge-base HEAD "origin/$BASE_REF")
+          # The first native import inherits upstream's existing lean debt; later PRs use main normally.
+          if ! git cat-file -e "$base:zig/src" 2>/dev/null; then
+            base=d1018b318fb51981c4a18f12e40269a4d3ee9713
+            git merge-base --is-ancestor "$base" HEAD
+          fi
           git worktree add --detach ../lean-base "$base"
           cp tools/zig/lean_check.py ../lean-base/tools/zig/lean_check.py
           (cd ../lean-base && python3 tools/zig/lean_check.py > ../lean-base.txt || true)
