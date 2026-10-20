@@ -95,12 +95,12 @@ def main() -> None:
             assert plain["tensorfold"]["token_sha"] == drafted["tensorfold"]["token_sha"]
             assert plain["choices"][0]["text"] == drafted["choices"][0]["text"]
         print("long concurrent draft/undrafted equality: passed", flush=True)
-        for user, concurrent in enumerate(batches[1]):
+        for user, concurrent_reply in enumerate(batches[1]):
             solo = send("/v1/completions", completion_body(user, True))
             record(f"solo-drafted-user-{user}", solo)
             assert solo["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
-            assert solo["tensorfold"]["token_sha"] == concurrent["tensorfold"]["token_sha"]
-            assert solo["choices"][0]["text"] == concurrent["choices"][0]["text"]
+            assert solo["tensorfold"]["token_sha"] == concurrent_reply["tensorfold"]["token_sha"]
+            assert solo["choices"][0]["text"] == concurrent_reply["choices"][0]["text"]
         print("long concurrent/solo equality: passed", flush=True)
     if args.cold_only:
         return
