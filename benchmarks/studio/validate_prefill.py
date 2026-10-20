@@ -21,6 +21,8 @@ def main() -> None:
                         "models--ukisai--Swift-1.5-4bit-MLX/snapshots/82276731e47e1db4ac502f24c63cfaf886639be9"))
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--prefix-tag", default="Studio prefill resumption " + uuid.uuid4().hex)
+    parser.add_argument("--cold-only", action="store_true", help="check only cold draft and concurrency equality")
+    parser.add_argument("--status-path", default="/health", help="endpoint containing process memory counters")
     parser.add_argument("--chat-only", action="store_true", help="check only cold and resumed chat")
     args = parser.parse_args()
     if args.tokens < 8192:
@@ -46,7 +48,7 @@ def main() -> None:
 
     def record(label: str, reply: dict) -> dict:
         metrics = reply["tensorfold"]
-        request = urllib.request.Request(args.url.rstrip("/") + "/health",
+        request = urllib.request.Request(args.url.rstrip("/") + args.status_path,
                                          headers={"Authorization": "Bearer " + key})
         with urllib.request.urlopen(request, timeout=30) as response:
             memory = json.load(response).get("memory", {})
@@ -66,15 +68,18 @@ def main() -> None:
                              add_special_tokens=False)
     suffix = tokenizer.encode("\nImplement an asynchronous work queue with retries and cancellation.\nAnswer:\n",
                               add_special_tokens=False)
+    def completion_body(user: int, draft: bool) -> dict:
+        room = args.tokens - 1 - len(suffix)
+        ids = [1700 + user] + (block * (room // len(block) + 1))[:room] + suffix
+        return {"model": "swift-1.5", "prompt": ids, "max_tokens": 128, "temperature": .7,
+                "top_k": 20, "top_p": .95, "seed": 17, "draft": draft, "reasoning_effort": "none"}
+
     batches = []
     for draft in (() if args.chat_only else (False, True)):
         barrier = threading.Barrier(2)
 
         def worker(user: int) -> dict:
-            room = args.tokens - 1 - len(suffix)
-            ids = [1700 + user] + (block * (room // len(block) + 1))[:room] + suffix
-            body = {"model": "swift-1.5", "prompt": ids, "max_tokens": 128, "temperature": .7,
-                    "top_k": 20, "top_p": .95, "seed": 17, "draft": draft, "reasoning_effort": "none"}
+            body = completion_body(user, draft)
             barrier.wait()
             return send("/v1/completions", body)
 
@@ -90,6 +95,15 @@ def main() -> None:
             assert plain["tensorfold"]["token_sha"] == drafted["tensorfold"]["token_sha"]
             assert plain["choices"][0]["text"] == drafted["choices"][0]["text"]
         print("long concurrent draft/undrafted equality: passed", flush=True)
+        for user, concurrent in enumerate(batches[1]):
+            solo = send("/v1/completions", completion_body(user, True))
+            record(f"solo-drafted-user-{user}", solo)
+            assert solo["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
+            assert solo["tensorfold"]["token_sha"] == concurrent["tensorfold"]["token_sha"]
+            assert solo["choices"][0]["text"] == concurrent["choices"][0]["text"]
+        print("long concurrent/solo equality: passed", flush=True)
+    if args.cold_only:
+        return
 
     system = args.prefix_tag + "\n" + tokenizer.decode(
         (block * (args.tokens // len(block) + 1))[:args.tokens])
