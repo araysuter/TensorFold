@@ -1,12 +1,24 @@
 # Qwen3.8 Flash Next
 
 The `qwen4_exp` family has Gated DeltaNet, sparse attention, MoE, hyper-connections and hashed n-gram
-embeddings. The supported checkpoint uses MLX affine 4-bit weights in groups of 32 and includes an MTP head.
+embeddings. The native engine's supported Metal checkpoint uses MLX affine 6-bit weights in groups of 32
+and includes an MTP head. On a Mac the native engine refuses the 4-bit/group-32 checkpoint at load; on CUDA it serves
+that one ([Flash Next on CUDA](flash-next-cuda.md)).
 
 ```bash
-tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP
-tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --name bench
+tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP --name bench --temperature 0
 ```
+
+For native serving, see the [Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving).
+Native Flash Next on CUDA serves the MLX 4-bit group-32 checkpoint on the built-in kernels: see
+[Flash Next on CUDA](flash-next-cuda.md) ([#472](https://github.com/ashhart/TensorFold/issues/472)).
+
+The sections below describe the Python 0.6.6 engine, available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Their flags, variables and paths are that engine's,
+and the native binary refuses the flags it does not list in `capabilities --json`. Contributors to them are named in
+[credits](../credits.md).
+The MLX section uses `TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP`; CUDA checkpoints are listed below.
 
 On MLX, a supported conversion without the head runs without MTP drafting. On CUDA, pass `--no-drafts`
 for such a conversion; the default positive draft depth otherwise refuses the missing head.
@@ -16,8 +28,8 @@ for such a conversion; the default positive draft depth otherwise refuses the mi
 N-gram tables stay in host file mappings when the checkpoint's model files exceed 75% of the GPU's
 recommended working set. `TF_NGRAM_HOST=1` forces this mode; `TF_NGRAM_HOST=0` keeps the tables in MLX.
 Startup admission uses the same choice as the loader and subtracts the mapped weights, scales and biases
-from the checkpoint's size. For the named 4-bit checkpoint, about 29.8 GiB of its 105.4 GiB is mapped,
-leaving a conservative 75.6 GiB resident-weight estimate. The default command selects host mode on an
+from the checkpoint's size. For the 4-bit checkpoint, about 29.8 GiB of its 105.4 GiB is mapped,
+leaving a conservative 75.6 GiB resident-weight estimate. With that checkpoint, the Python engine selects host mode on an
 M4 Max with 128 GiB, whose process budget is 89.6 GiB, including the 3 GiB process reserve.
 
 Mapped pages still use RAM while cached. The loader prefetches them after its initial forwards; macOS
@@ -26,7 +38,8 @@ budget, and the server sizes context from runtime cache and workspace needs. `TE
 can lower or raise the default budget, capped by physical RAM and the GPU's recommended working set.
 For example, `TENSORFOLD_MEMORY_LIMIT_GB=110` gives a 128 GiB M4 Max a 110 GiB process budget and
 107 GiB for MLX. An explicit context must still fit the startup estimate; a larger budget does not
-establish full-window inference or keep every mapped page resident.
+establish full-window inference or keep every mapped page resident. `TENSORFOLD_MEMORY_LIMIT_GB` is the Python
+engine's; the native binary does not read it.
 After measuring shared rounds, the runtime releases the probes' rollback buffers before sizing prompt
 memory, so those unused states do not reduce the available context.
 
@@ -39,7 +52,12 @@ The load-time row check disables drafting when windows do not reproduce serial s
 The prefill path uses sparse selected-key attention, fused hyper-connections and n-gram lookups,
 stacked DeltaNet projections and sorted expert rows. It submits bounded groups of layers to limit live
 workspace. Compatible prefill matmul kernels check against MLX; unsupported paths use MLX's kernels.
-`TF_FLASH_PREFILL=0` selects the reference prefill path for comparison.
+`TF_FLASH_PREFILL=0` selects the reference prefill path for comparison. @quigles1977 added this prefill path in
+[#29](https://github.com/ashhart/TensorFold/pull/29); the native `zig/kernels/metal/prefill/fn_prompt.metal` carries
+its hyper-connection kernels.
+
+Flash Next checkpoints may name the n-gram tables `shard_N` or `shards.N`.
+All shards in one index must use the same spelling; the loader accepts either spelling.
 
 Prefill and decode can round differently. The chunk planner uses detected assistant-message starts and
 the second message when at least 256 tokens follow the previous chunk start, otherwise cutting after
@@ -54,11 +72,101 @@ path, resolved matmul route and GPU identity; changing arithmetic requires a fre
 Load-time shared-forward checks compare each stream with its own call. A failed check limits forwards
 to one stream, while successful checks allow the lane engine to combine requests.
 
+## Native Metal shared sessions
+
+The native 6-bit MTP engine uses shared target rounds with an explicit `--parallel N` above one; `--parallel auto`, the default, keeps the single-reply driver, whose lone decode is 1.0.12's (a lone request in a shared session decoded 7% slower on an M3 Ultra). Without `FLASHNEXT_SLOT_CONTEXTS`, an explicit count fixes the number of sessions, eight here:
+
+```bash
+tensorfold-native serve TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP \
+  --context 16384 --temperature 0 --parallel 8
+```
+
+Each request holds its own recurrent state, attention cache, n-gram history and MTP cache. The scheduler packs
+up to 16 target rows, including draft rows, into one layer loop. Projections and experts process those rows
+together; recurrence, convolution and attention read each request's own state. Every stream's MTP drafts share one command buffer; `FZ_BATCH_MTP_SERIAL=1` restores serial drafting.
+New requests join between rounds, and cancelling a request releases its slot for another request.
+
+An explicit count that does not fit is refused, as below. Explicit `--parallel 1`, `--learn`, and the two-Mac path retain their supported driver. Shared sessions run on one Mac; `--parallel N` above one with `--speed-up` or `--learn` is refused. Use `--parallel 1` for the two-Mac link.
+
+The ceiling is 70% of RAM, or `FLASHNEXT_LOAD_LIMIT_GB` (GB, up to the GPU's recommended working set). It covers the
+server's whole footprint: the model, the sessions and the prompt cache. Left out, `--prompt-cache-gib` takes what the
+sessions leave under it; a given budget must fit under the same ceiling, and only `--prompt-cache-over-cap` lets it
+pass.
+
+Additional slots allocate caches for the selected context. Startup reserves their metadata and the prompt-cache
+budget, then checks the physical footprint before accepting requests. A fixed slot count that does not fit is
+refused; lower the count, context or prompt-cache budget. `--prompt-cache-over-cap` overrides only the prompt-cache
+budget. Shared sessions draw sampled tokens with the same GPU sampler as the single-Mac `--parallel 1` path.
+Each packed window uses its own seed, sampling settings and absolute token positions. The two-Mac path remains
+greedy only. The model gate below must verify sampled token parity across routes, drafting and batch composition.
+
+Shared sessions enforce structured output (`response_format`, the `guided_*` fields, `tool_choice: "required"` and a
+named function; [API](../api.md#structured-output)) with `libtfgrammar` beside the binary. Before the argmax and the
+draw, `fz_mask_rows` sets each constrained row's disallowed logits to -inf (`families/flashnext/grammar.zig`); the
+first token is drawn on the host from the prompt's last row among the grammar's tokens, as the GPU draws it. Rounds
+with no constrained stream skip the mask. The single-reply driver (`--parallel 1`, the two-Mac path) answers a
+structured request with HTTP 400.
+
+`--context` past the trained 262,144 tokens, up to 1,048,576, rotates with static YaRN x4 (transformers'
+`_compute_yarn_parameters`: factor 4 over the trained window, beta 32 and 1, cos and sin scaled by 0.1 ln 4 + 1) in
+every rotary kernel, attention, the indexer's queries and pooled keys and the MTP head alike, for every prompt; at
+262,144 or less the plain rotary runs as before. Qwen recommends YaRN only where long prompts need it, since static
+scaling can cost short texts. Only the engine's own session holds the long window; on shared sessions the others hold
+262,144 tokens (`FLASHNEXT_SLOT_CONTEXTS` sets other sizes), and a request longer than that takes the long one. Past the trained window prompt chunks take fewer rows, so the prompt selector's scores keep the 2 GiB they take at
+262,144. The two-Mac path refuses such a window. On an M5 Ultra (6-bit MTP checkpoint, `--parallel 2 --vision`,
+1,048,576 and 262,144-token sessions and an 8 GiB prompt cache: 203.2 GiB wired, `FLASHNEXT_LOAD_LIMIT_GB=240`),
+needles were found at 138,830, 553,139 and 1,032,827 prompt tokens (34 s, 169 s and 417 s to the first token, 4,038 to
+2,479 tok/s), drafted replies equal `"draft": false` at 316,469 tokens, and a short request beside a 666,334-token
+prompt equals its reply alone (it waits for that prompt's pass, about 205 s). One stream decodes at 137 to 216 tok/s
+there, against 142 to 214 at 262,144 (`bench/ruler.py`, the qwen recipe's).
+
+The shared host's residency set includes the engine, session caches and metadata, shared hidden rows and later
+prompt snapshots. Residency uses the same validated load limit as the host, with a 2 GiB margin inside it for
+growing buffers. The default stays at 70% of RAM; `FLASHNEXT_LOAD_LIMIT_GB` can raise or lower that ceiling, capped
+by RAM and the GPU working set. A refused set leaves the server running without it, and `--prompt-cache-over-cap`
+does not raise the residency ceiling. `FLASHNEXT_NO_RESIDENCY=1` disables the set. With a prompt cache, warm turns
+keep the end of a reply as the single-request host does. Idle latency and throughput need fresh measurements.
+
+The checkpoint gate compares shared replies with fresh legacy replies, with drafting off and on, then checks
+prompt admission, cancellation, slot reuse and a restored prefix while another request remains active:
+
+```bash
+zig build tf-flashnext-batch
+zig-out/bin/tf-flashnext-batch --sampling-only
+python tools/zig/flashnext_batch_prompts.py MODEL_DIR /tmp/flashnext-prompts
+FZ_N=128 zig-out/bin/tf-flashnext-batch MODEL_DIR /tmp/flashnext-prompts/*.json
+FZ_SAMPLE=1 FZ_N=128 zig-out/bin/tf-flashnext-batch MODEL_DIR /tmp/flashnext-prompts/*.json
+```
+
+These device gates require exclusive GPU use. `--sampling-only` uses synthetic logits and checks distinct seeds,
+positions and row offsets against the shared GPU-rule reference, including untouched greedy and spare rows.
+`FZ_SAMPLE=1` repeats the model gate with fixed seeds per prompt. Compilation alone does not pass either gate.
+For a served comparison with identical requests and settings:
+
+```bash
+zig build native
+python tools/zig/flashnext_batch_serve.py zig-out/native/bin/tensorfold-native \
+  MODEL_DIR /tmp/flashnext-prompts /tmp/flashnext-served \
+  --parallel 1,4 --context 16384 --require-shared-rounds
+```
+
+The served gate starts one server at a time on loopback port 52417. `default` omits `--parallel`; `auto` passes
+it explicitly. Each block uses the same context and requests, including thinking on and off. It compares response
+bodies, token counts and native token fingerprints with the serial reference and records wall time and peak
+running and waiting requests. `--require-shared-rounds` also requires multi-stream GPU forwards in the batch log
+during those requests. Running requests alone do not prove shared rounds. The default and `auto` serve on the
+single-reply driver, so that gate fails for them; an explicit count that falls back to one session fails it too.
+
+End-to-end time includes prompts. The shared-round check enables `FZ_BATCH_LOG`, so its times include logging;
+omit that option for a separate timing run. Repeat into a fresh output directory with `--context 65536` or another
+context that fits the checkpoint. The checkpoint gate separately checks prompt admission, cancellation and reuse.
+
 ## CUDA
 
 On CUDA Flash Next serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks and `--ple-on-ssd` read. `tensorfold serve` loads the checkpoint
-you name; it picks none by itself. Use the [container setup](../../RUNBOOK.md#nvidia-gpus) for any of them. Prompts
+you name; it picks none by itself. Use the [Python CUDA setup](cuda.md#python-06-cuda-families)
+for the container and pinned 0.6.6 installation. Prompts
 take bf16 activations by default; what that costs against the FP8 prompt path (`--prefill-fp8`) depends on the
 format ([prompt precision](cuda.md#prompt-precision)):
 
@@ -75,7 +183,9 @@ local-inference-lab's.
 
 ### NVFP4 checkpoints
 
-The CUDA engine reads published ModelOpt NVFP4 exports as they ship, MTP head included, on one GPU:
+@tournierjc brought these checkpoints to the Python engine's CUDA path in
+[#67](https://github.com/ashhart/TensorFold/pull/67). The CUDA engine reads published ModelOpt NVFP4 exports as they
+ship, MTP head included, on one GPU:
 
 ```bash
 tensorfold serve local-inference-lab/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8080
@@ -94,12 +204,16 @@ scale in block order and applies the tensor's scale once; the K split depends on
 windows keep serial decoding's bits. Prompts run the MXFP8 linears on bf16 rows and the stored bytes, each byte
 times its power of two exact in bf16 and one fp32 sum over the inputs (`--prefill-fp8`: the FP8 prompt matmul).
 Tests check the kernels against an fp64 reference built by an independent numpy dequantizer
-(`tensorfold/cuda/nvfp4/format.py`). Both exports store their RMSNorm weights centred (gamma - 1), and the loader
+([`src/tensorfold/cuda/nvfp4/format.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/cuda/nvfp4/format.py)
+at the `v0.6.6` tag; the native engine's fp64 reference is `zig/src/core/quant/nvfp4.zig`). Both exports store their
+RMSNorm weights centred (gamma - 1), and the loader
 tells centred from uncentred norms by their stored values. An n-gram table's shards must share one layout, or the
 load stops.
 
 Block-scaled FP8 linears (ModelOpt `FP8_PB_WO`, the DeepSeek-style layout: e4m3 bytes and an fp32 `weight_scale_inv`
-per 128x128 block) are read too. Decode keeps the e4m3 bytes in the FP8 GEMM's fragment order and each (64 inputs,
+per 128x128 block) are read too, from [#126](https://github.com/ashhart/TensorFold/pull/126) by @jschmied, who also
+ported them to the native CUDA engine (`zig/src/cuda/fp8.zig`).
+Decode keeps the e4m3 bytes in the FP8 GEMM's fragment order and each (64 inputs,
 column)'s block scale as fp32; the lane matmul multiplies a 64-input stage in bf16 MMAs (e4m3 fits bf16 exactly) and
 adds the stage's products times its scale in stage order, so the stored weight is exact and rows stay independent of
 the row count, as for the other formats. Prompts take the same lane matmul (bf16 activations, the stored bytes, fp32
@@ -133,6 +247,10 @@ Not supported here:
 
 ### EXL3 checkpoints (experimental)
 
+@vcruz305 wrote this path, the shared EXL3 module and the Flash Next loader, in
+[#42](https://github.com/ashhart/TensorFold/pull/42). The native engine serves no EXL3 pack yet; its reference decoder
+is `zig/src/core/exl3_format.zig`, with a Metal projection in `zig/src/core/exl3_projection.zig`.
+
 The CUDA engine also serves EXL3 packs of Flash Next (`quant_method: exl3`) on one GPU through the shared EXL3
 module ([EXL3 weights](exl3.md)): any codebook, and a width per tensor, so mixed-K packs whose experts range from
 2 to 8 bits within a layer load as they are. turboderp publishes a 3.05 bpw pack on the branch `3.05bpw_h5_ng5`.
@@ -148,8 +266,10 @@ A pack maps its n-gram table from its own file and runs on one GPU: `--tp 2` and
 checkpoint, and an EXL3 pack refuses both.
 
 - Dense projections (attention, DeltaNet, the MTP head's fc layers, the head) run on the row-invariant EXL3
-  linear (`cuda/exl3/linear.py`). Routed experts and the shared expert (as expert 512 of the same table) run on
-  the grouped EXL3 expert kernel (`cuda/exl3/experts.py`), each expert matrix at its own width. The fp32 router,
+  linear ([`src/tensorfold/cuda/exl3/linear.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/cuda/exl3/linear.py)).
+  Routed experts and the shared expert (as expert 512 of the same table) run on the grouped EXL3 expert kernel
+  ([`src/tensorfold/cuda/exl3/experts.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/cuda/exl3/experts.py)),
+  each expert matrix at its own width. The fp32 router,
   its top-k with id tie-break, and the write-back in slot order are the MLX path's.
 - The tensors a pack leaves unquantized (hyper-connection down / inject / up, DeltaNet `in_proj_a/b`, the n-gram
   key and value) run on an fp16 Triton matmul whose tiles and K split depend only on the shape. No cuBLAS.
@@ -210,7 +330,9 @@ batch shape changes: rerunning the first 1,025 tokens alone, instead of as part 
 own full pass on 96.4% (SAGE) and 97.2% (3.05) of positions. At the same positions TensorFold agrees with
 ExLlamaV3's full pass on 95.5% and 97.0%. The per-position NLL difference has a median of 0.018 and 0.011.
 
-On TensorFold's side, `tests/cuda/test_qwen4_exp_exl3.py` checks the following against the pack that
+On TensorFold's side, the Python engine's
+[`tests/cuda/test_qwen4_exp_exl3.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/tests/cuda/test_qwen4_exp_exl3.py)
+checks the following against the pack that
 `TENSORFOLD_EXL3_FLASHNEXT` names, cut to 4 layers plus the head and the MTP head:
 
 - a window of 1 to 128 rows gives one-row steps' logits bit for bit;
@@ -282,18 +404,21 @@ reply still equals its solo run. The cost is decode speed while prompts fill: a 
 most of the experts, so live replies decode at about a tenth of their usual rate during a burst's prefill (2.6-3.2
 of 32-41 tok/s on one Spark) instead of stopping. `--decode-share S` sizes the passes so a round's decoding takes
 that share of the pass's time: 0.25 about doubles decode during a prefill and roughly halves prompt speed. The
-default, 0, keeps whole passes.
+default, 0, keeps whole passes. The native binary refuses `--decode-share`.
 
 Prompt pieces are 2,048 rows, or 4,096 while nothing decodes on a DGX Spark serving the MLX checkpoint without
-`--vision`, when the admitted window leaves room (the startup log names the choice). `TENSORFOLD_PREFILL_ROWS=N` (256 to 16,384) sets the rows instead, for one GPU
-or two: the prompt buffers are sized for N rows in the startup estimate, so the window shrinks or grows to match,
-and the plan above no longer applies. A round that runs beside live replies still takes at most 2,048 of them.
+`--vision`, when the admitted window leaves room (the startup log names the choice). `TENSORFOLD_PREFILL_ROWS=N`
+(256 to 16,384, from @MiaAI-Lab's [#238](https://github.com/ashhart/TensorFold/pull/238)) sets the rows instead, for
+one GPU or two: the prompt buffers are sized for N rows in the startup estimate, so the window shrinks or grows to
+match, and the plan above no longer applies. A round that runs beside live replies still takes at most 2,048 of them.
 Replies are the same tokens at any setting; the best value depends on the machine, so measure it there.
 
 N-gram tables are file-backed host data. On unified-memory GPUs they compete with weights and cache
 allocations for RAM, so a checkpoint's GPU allocation alone does not describe its memory requirement. An explicit
 `--context` that leaves them no room is reported at startup; their lookups then page from disk, a cost of about 1.3x
 on prompts.
+
+`--ple-on-ssd` and `--ssd-experts` below are the Python engine's flags; the native binary refuses both.
 
 `--ple-on-ssd` leaves the 29.8 GiB of n-gram tables in the checkpoint and reads each lookup's rows from SSD,
 so a 128 GB Mac can hold Flash Next. It is an opt-in trade. On an M3 Ultra, replies were the same tokens,
@@ -316,6 +441,9 @@ On an M3 Ultra, each flag was held to a smaller Mac's budget and compared on the
   differently from a 256 GB Mac's run, whichever flags are set.
 
 ### KV cache
+
+@vcruz305 added these caches and `--mtp-confidence` below to the Python engine in
+[#47](https://github.com/ashhart/TensorFold/pull/47). The native binary refuses `--kv-dtype` and `--mtp-confidence`.
 
 `--kv-dtype bf16` is the default. `--kv-dtype int8` and `--kv-dtype int4` store each attention layer's keys and
 values as codes with one fp16 scale per 32 values, the arithmetic of ExLlamaV3's `-cq 8` and `-cq 4` (the
@@ -340,7 +468,14 @@ default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUD
 
 ## Draft vocabulary provenance
 
-Both backends read the public list in `src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt`.
+The Flash Next dump tool accepts `--draft-vocab default` for the shipped list,
+`--draft-vocab cjk` for the opt-in CJK list, or a custom vocabulary file. The
+default remains unchanged; the selected list must be a whole number of 64-ID tiles
+and cannot exceed the model vocabulary.
+
+In the Python engine, both backends read the public list in
+[`src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt).
+The native engine embeds the same file, byte for byte, as `zig/src/families/flashnext/draft_vocab_default.txt`.
 It contains 79,591 sorted IDs; MLX pads it with the lowest unused IDs to a multiple of 64 at load.
 The target sampler still reads the full vocabulary, so the list affects proposals only.
 
@@ -386,6 +521,9 @@ TBD [release-0.3.5].
 
 ## Image input on CUDA
 
-Use `--vision` on one CUDA GPU with `--parallel` of at least two. Image requests always prefill fresh; text prefix
-caching remains available. See the [image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3
-sidecar conversion and verification.
+@shantanugoel added image input to the Python engine's Flash Next in
+[#146](https://github.com/ashhart/TensorFold/pull/146). There, use `--vision` on one CUDA GPU with `--parallel` of at
+least two. Image requests always prefill fresh; text prefix caching remains available. See the
+[image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3 sidecar conversion and verification.
+The native binary's CUDA engine takes `--vision` too, experimental, through the Qwen-VL tower that Qwen's CUDA family
+runs (see [Flash Next on CUDA](flash-next-cuda.md)).

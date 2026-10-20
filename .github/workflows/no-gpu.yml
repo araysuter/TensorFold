@@ -1,0 +1,69 @@
+name: No GPU
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  zig:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      # zig build test is the host unit tests. No GPU. The Python suite is not this check.
+      - name: zig build test
+        run: zig build test
+      # The kernel contract's limits gate: every registered launch against M1-M5 and sm_80/86/89/120/121, controls red.
+      - name: zig build test-kernel-contract
+        run: zig build test-kernel-contract
+      # The frozen server goldens: request parsing, rendering and streaming against recorded answers.
+      - name: zig build test-golden
+        run: zig build test-golden
+      # Cortheon's readers of untrusted web bytes under the fuzz harness: seeds, 100,000 edits, linear time.
+      - name: zig build fuzz-cortheon
+        run: zig build fuzz-cortheon
+      - name: Served Flash Next gate regressions
+        run: python3 -m unittest discover -s tools/zig -p flashnext_batch_serve_test.py
+      - name: Studio client and checkpoint preparation checks
+        run: |
+          python3 -m unittest discover -s tools -p test_prepare_swift_native.py
+          python3 -m unittest discover -s benchmarks/studio -p test_native_receipts.py
+      # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
+      - name: lean check
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          base=$(git merge-base HEAD "origin/$BASE_REF")
+          # The first native import inherits upstream's existing lean debt; later PRs use main normally.
+          if ! git cat-file -e "$base:zig/src" 2>/dev/null; then
+            base=d1018b318fb51981c4a18f12e40269a4d3ee9713
+            git merge-base --is-ancestor "$base" HEAD
+          fi
+          git worktree add --detach ../lean-base "$base"
+          cp tools/zig/lean_check.py ../lean-base/tools/zig/lean_check.py
+          (cd ../lean-base && python3 tools/zig/lean_check.py > ../lean-base.txt || true)
+          python3 tools/zig/lean_check.py > ../lean-head.txt || true
+          python3 tools/zig/lean_new.py ../lean-base.txt ../lean-head.txt
+  zig-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      # The same host unit tests on Windows: the platform layer (zig/src/platform) over the UCRT, Win32 and Winsock.
+      - name: zig build test
+        run: zig build test
+      # The server goldens and the Cortheon fuzz harness on Windows too; the goldens skip the signal-driven cases.
+      - name: zig build test-golden
+        run: zig build test-golden
+      - name: zig build fuzz-cortheon
+        run: zig build fuzz-cortheon

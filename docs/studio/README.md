@@ -1,124 +1,33 @@
-# Astra Studio configuration
+# Studio native serving
 
-This fork adds conversation monitoring to TensorFold 0.6.5 and uses upstream
-reloadable API key authentication.
-It reuses upstream `--spill-gib` for SSD snapshots. The BF16 cache and decoding kernels
-are unchanged. `tools/start-studio.sh` selects Swift's tested snapshot, two compute lanes,
-a 131,072-token prompt-plus-response limit, eight tracked conversations and a 128 GiB
-SSD spill budget. Idle RAM checkpoints remain until the cache limit or memory admission
-requires eviction. There is no fixed reservation of two complete 128k windows: the
-existing memory controller can queue the second request when both would not fit.
+The current upstream engine is native TensorFold 1.1.1. Serving uses the installed Zig/Metal binary, not the frozen Python engine or MLX. The Python virtual environment remains useful for benchmark tokenization and clients.
 
-The Swift optimization branch and its Studio validation steps are described in
-[optimization.md](optimization.md).
+`tools/start-studio.sh` serves the pinned Swift 1.5 affine 4-bit checkpoint with the pinned 4-bit DFlash2 drafter, 131,072 total context tokens, two concurrent streams and an 8 GiB retained-prompt budget. It listens on loopback port 8080 and keeps the existing restricted-permission API-key file. `STUDIO_PORT` selects an isolated benchmark port, and `TENSORFOLD_NATIVE_BIN` selects another native executable. The public hostname comes from `STUDIO_ALLOWED_HOST` or the private `$HOME/.config/tensorfold/studio-host` file.
 
-## Install on the Studio
+Install the official `tensorfold-1.1.1-macos-arm64.tar.gz` release under `$HOME/ai/tensorfold-runtime/1.1.1`, preserving its directory structure, and verify its companion SHA-256 checksum before running it. The drafter stays in the Hugging Face cache at its pinned revision. The alternate Qwen launcher preserves its existing checkpoint revision.
 
-Stop the running TensorFold, and stop Caddy (or llama.cpp) if it owns 8080. Keep cloudflared
-and the collector running. Use a fresh venv so the old manual mlx-lm loader patch cannot
-be applied twice. This fork includes the revision-scoped Swift compatibility fix;
-vision is still unsupported. Do not run the old fix-swift-tensorfold.py on this fork.
+Swift needs the same 161 RMSNorm scale conversions that the old fork applied during loading. Prepare a separate native-compatible checkpoint once; the converter leaves the downloaded snapshot intact, preserves all other tensor bytes and records the converted vectors in `swift-native.json`. The launcher refuses an unprepared checkpoint. Native inference still uses the upstream kernels unchanged.
 
-```bash
-cd ~/ai
-git clone https://github.com/araysuter/TensorFold.git tensorfold-studio
-cd tensorfold-studio
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade -e '.[test,tui]' 'mlx-lm==0.32.0' 'mlx==0.32.3'
+```sh
+python3 tools/prepare-swift-native.py \
+  "$HOME/.cache/huggingface/hub/models--ukisai--Swift-1.5-4bit-MLX/snapshots/82276731e47e1db4ac502f24c63cfaf886639be9" \
+  "$HOME/ai/models/swift-1.5-native-82276731"
+```
+
+```sh
 bash tools/start-studio.sh
 ```
 
-The startup script is ordinary configuration: copy it to `~/ai/start-tensorfold.sh`
-if desired, and activate this venv before using it. `STUDIO_PORT=8082` overrides the
-port for an optional local comparison. The normal setup serves authenticated requests
-on 8080, preserving the tunnel, public hostname and `swift-1.5` model ID. It reuses the
-existing TensorFold key, or copies the llama.cpp key if missing. No Caddy is required.
+The native `/dashboard` and authenticated `/stats`, `/memory` and `/v1/models` endpoints replace the Python-only Studio monitoring routes. `/health` returns status only when keys are configured. Clients send a Bearer key or `x-api-key` header. Memory admission and retained-cache capacity come from the native engine; the removed Python process/MLX budget variables do not impose native limits.
 
-```bash
-curl -i http://127.0.0.1:8080/v1/models  # must return 401
-curl --fail-with-body http://127.0.0.1:8080/studio/metrics \
-  -H "Authorization: Bearer $(cat ~/.config/tensorfold/api-key)"
+Python-only conversation inventory, checkpoint-slot, spill and clear-on-exit flags are no longer passed. Native retained prompts are in memory by default; a process exit releases them. Preserve the published native cache limits rather than enabling over-cap operation to reproduce the former disk spill settings.
+
+Use the existing tmux AI session: window 0 for the server and window 1 for checks. Stop the model process once and wait for shutdown before running GPU tests. Keep the existing tunnel and collector processes running. The collector accepts native aggregate status and labels its memory counters as process measurements. The former per-conversation inventory belongs to the historical Python server.
+
+Run the current upstream host and Metal checks using Zig 0.17.0 and Xcode with its Metal toolchain:
+
+```sh
+zig build test test-kernel-contract test-golden fuzz-cortheon -Dcpu=apple_m1 --summary all
 ```
 
-`/studio` is a public empty HTML shell; entering the key fetches authenticated metrics.
-The key stays in tab memory, not localStorage. `/studio/metrics`, detailed `/health`, model lists
-and completion endpoints require the key when configured. Unauthenticated `/health`
-returns only `{"status": "ok"}`. No key is placed in URLs.
-
-## Conversations versus checkpoints
-
-`--conversation-slots 8` tracks eight conversations, protecting every pending conversation
-from replacement. When all eight are pending, another request is rejected. When an idle
-entry is replaced, its disk snapshot remains reusable until normal disk-budget pruning.
-These are conversation entries, not user accounts or eight reserved cache files. Several
-prefix checkpoints can belong to one conversation. RAM figures in a slot are retained
-idle checkpoints; process memory also includes working streams, model weights and scratch
-buffers. Shared prefixes are reported in a separate pool instead of being charged to multiple slots.
-
-Clients should send a stable, unique `X-Conversation-ID` for each conversation. Without
-one, the monitor follows fingerprints of assistant replies already returned by this server,
-including tool calls. Changes to system/editor context do not create another identity when
-a unique latest reply identifies the continuation. New chats with identical openings stay
-separate. Ambiguous branches, histories with no recognized reply, and auxiliary requests
-are separate entries; the server never identifies a chat merely by shared cached tokens.
-Explicit IDs remain the only guaranteed identity across compaction or rewritten history.
-
-Tracking format 2 discards the older, unreliable inventory on its first startup. This only
-resets monitor entries, never safetensors snapshots or the historical metrics database.
-The entries repopulate as requests arrive. Restarting persists the new reply fingerprints.
-No prompt text, token IDs, conversation IDs or reply fingerprints appear in monitoring APIs.
-
-Cache accounting assigns each retained checkpoint record to exactly one matching entry,
-a shared pool, or an unassigned pool. A shared prefix is not billed independently to every
-matching entry. Slot `prompt_tokens` is the last request size, not resident cache occupancy.
-`checkpoint_tokens` is the longest exclusively assigned checkpoint; `shared_checkpoint_tokens`
-is the longest reusable shared checkpoint. Checkpoint bytes describe retained records, not
-unique physical allocations (underlying arrays may share storage). Host/process memory is
-the authoritative allocation measurement. Active working buffers are not idle checkpoints.
-
-Upstream saves evicted checkpoint tensors synchronously on the engine thread before their
-last references are released. Large saves/restores can pause other decoding during I/O.
-The cache remains BF16; recurrent state is serialized too, while upstream rebuilds transient
-buffers and drafter state. Saved prefixes stop at valid prompt chunk boundaries, so restore
-may reprocess the recent tail. If SSD writes fail or the byte budget prunes a checkpoint,
-a later request needs prefill again; the monitor shows `uncached`, not a successful SSD save.
-This is application-managed cache storage, not macOS swap, and does not disable OS swap.
-
-The inventory manifest survives restarts for the same model/runtime key; obsolete cache
-versions are not reused. Use a private cache directory (`start-studio.sh` sets umask 077).
-Graceful shutdown also saves retained conversations within the spill budget; spill happens during operation, not on every
-completed reply. A crash may therefore lose a recent in-RAM-only prefix.
-
-## Metrics and history
-
-States: empty, queued, restoring, prefilling, generating, saving, ram, ssd, uncached, error, shared.
-Prompt speed measures the latest completed prefill chunk. Decode speed measures accepted
-output tokens over the latest engine round, per stream. Neither is a rolling average or
-a claim of instantaneous throughput. `rate_at` exposes reading age; no new work means no
-new measurement. Monitoring never reads GPU tensors from HTTP threads.
-
-The companion collector stores 24 hours of SQLite samples at one-second intervals with a
-viewer heartbeat, five seconds otherwise. It adds host memory/swap measurements and serves
-`/monitor/history` through the existing tunnel. The private Sites dashboard uses its
-existing server-side `LLAMA_API_KEY` secret; no browser API key configuration is needed.
-Copy `tools/studio-collector.py` to the Studio and run its `--install` command to update
-its existing launch daemon. The dashboard defaults to three hours.
-
-## Validation on the Studio
-
-Run one deterministic coding prompt, then continue conversations A, B, C, and A again.
-Inspect `cached_tokens`, restored prefix length and SSD/RAM transitions. Compare a restored
-continuation with an uninterrupted run of the same token history, temperature and seed.
-Test two active long conversations before increasing context. Monitor swap and memory;
-short-prompt throughput does not establish long-context or concurrent performance.
-
-### Long requests through Cloudflare
-
-Use `stream: true` for long-running inference through the public API. Streaming
-responses send an immediate SSE comment and a keepalive comment every 15 seconds,
-including while queued or prefilling. These comments contain no generated tokens
-and standard SSE clients ignore them. Final usage and TensorFold timing metrics
-remain in the final data event. Non-streaming requests still wait for the whole
-response and can exceed the proxy read timeout; increasing a client's timeout
-alone does not change that limit.
+For the historical client benchmark, run one attempt at every 20K, 40K, 60K, 80K, 100K and 128K context with concurrency 1 and 2 and a 1,024-token output limit. Keep the original published solo reference unchanged. Native API prefill duration excludes queue time; derived queue-plus-prefill measurements must add the matching request's queued duration from the local completion log. Publish only sanitized counters, never raw server logs or local output paths.

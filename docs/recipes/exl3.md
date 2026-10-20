@@ -1,19 +1,28 @@
-# EXL3 weights on CUDA, for any family
+# EXL3 weights
 
-ExLlamaV3's trellis quantization (EXL3) is what the community's best 4-bit and low-bit NVIDIA checkpoints ship as:
+ExLlamaV3's trellis quantization (EXL3) is what many of the community's best low-bit NVIDIA checkpoints ship as:
 `mul1` codebook at 2 to 6 bits for MiMo-V2.6-Flash, Qwen3.8-27B and Flash Next, `mcg` at 4 bits for
-GLM-5.3-Flash. TensorFold reads all of it with one module, so a family's engine does not need its own EXL3
-kernel:
+GLM-5.3-Flash.
 
-- `src/tensorfold/cuda/exl3/format.py` — the format, per-tensor metadata out of the safetensors headers, and a
-  numpy reference decoder;
-- `src/tensorfold/cuda/exl3/decode.cuh` — header-only device functions that decode a 16x16 tile of any codebook
-  and width straight into the B fragments of two `mma.m16n8k16`;
-- `src/tensorfold/cuda/exl3/linear.py`, `linear.cu` — a row-invariant linear layer for 1 to 128 rows;
-- `python -m tensorfold.cuda.exl3.inspect MODEL_DIR` — what a checkpoint holds, from its headers alone.
+## Where it stands
 
-The GLM-5.3-Flash engine keeps its own tuned `families/glm5_next/cuda/exl3.py` (4-bit `mcg`, routed experts
-only); it stays as it is.
+- The native engine has the format and a reference decoder in core (`zig/src/core/exl3_format.zig`, @akol1, #496),
+  and Metal has a standalone EXL3 projection (`zig/src/core/exl3_projection.zig`, @akol1, #681). No model serves an
+  EXL3 checkpoint in this release.
+- CUDA projections and routed experts on this format are in review (#740, #741, #806). A model needs them and a loader
+  for its EXL3 tensors before it can serve a checkpoint; the 27B on CUDA is the first planned.
+- The Python engine served EXL3 on CUDA from 0.3.6 to 0.6.6 through the module @vcruz305 wrote (#42): every codebook,
+  widths 1 to 8 mixed per tensor, a row-invariant linear for 1 to 128 rows, and grouped routed experts, for the 27B,
+  Flash Next and mixed-width packs. It is at the
+  [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/cuda/exl3).
+- This page's format description and arithmetic came with that module. The native decoder and the CUDA operators in
+  review follow them.
+
+## Engine versions
+
+The sections below describe the Python 0.6.6 engine's module: its files are under `src/tensorfold/` at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6), and its numbers were measured on that engine. The
+format, the layer's arithmetic and the traps hold for any implementation.
 
 ## What a family has to say
 
@@ -101,11 +110,11 @@ y = ((((x * suh) @ H_K) @ W_q) @ H_N) * svh + bias        H = the 128x128 Hadama
 `rot_in` rotates the input once per call (fp16 out, as ExLlamaV3 does), `linear` decodes each k tile straight
 into tensor-core fragments and multiplies in fp32. Rows are independent by construction: the k ranges of warps
 and of K splits depend only on (K, N) (`plan(k, n)`), every sum runs in a fixed order, and `mma.m16n8k16` keeps
-its rows independent — which is the verify path's contract (`docs/recipes/cuda.md`).
+its rows independent, which is the verify path's contract (`docs/recipes/cuda.md`).
 
 ## Prompts
 
-Prompt chunks take their own arithmetic, as the MLX 4-bit path's prompt matmul does (`cuda/exl3/prefill.py`): the
+Prompt chunks take their own arithmetic, as the MLX 4-bit path's prompt matmul does (`src/tensorfold/cuda/exl3/prefill.py`): the
 input rotation is decode's, W_q is decoded once a chunk into fp16, a fixed-tile fp16 GEMM with fp32 accumulation
 multiplies it, and its epilogue rotates each 128-column block (the accumulator's bf16 high and low halves times
 H) before `svh` and the bias. Tiles depend on the shape alone, so a row's bits never depend on its chunk and a
@@ -163,3 +172,42 @@ Flash Next EXL3 packs may store `ngram_embedding.trellis` as one int16 `[rows, w
 layout read-only and gathers only requested rows; the consolidated layout does not require re-sharding or
 requantization. Admission treats the packed table as reclaimable mapped pages, while head metadata remains
 resident. Mapped pages still consume physical RAM when touched; keep the normal cache/workspace reserve.
+
+A backend-neutral Zig reference decoder for this format (@akol1, #496) lives at
+`zig/src/core/exl3_format.zig`: the bitstream, the three codebooks, tile placement and
+the Hadamard rotations, written deliberately naive (one bit at a time) so it reads
+exactly like this page. It is the correctness oracle for the native tile decoders: the
+standalone Metal projection (`zig/src/core/exl3_projection.zig`, @akol1, #681) today, and
+a CUDA one to come; `zig test zig/src/core/exl3_format.zig` from the repository root
+reproduces the numpy oracle on every codebook and width and on real checkpoint bytes
+(the oracle vectors ship beside the test). Its real checkpoint bytes are one 128x128 block from
+`UnstableLlama/Qwen3.5-2B-exl3-8.00bpw` (mcg codebook, 8.00 bpw), in `zig/tests/fixtures/exl3_oracle.bin`.
+
+The scalar decoder and its oracle tests do not register an EXL3 model on their own; the native CUDA kernels below
+are checked against them.
+
+## Native CUDA (Zig)
+
+The Zig engine carries the same arithmetic as hand-written CUDA, ported from the Python engine's kernels so a
+row's bits match it:
+
+- `zig/kernels/cuda/exl3_decode.cuh`, `exl3_linear.cu`, `zig/src/cuda/exl3.zig`: the input rotation and the linear
+  for 1 to 128 rows, every codebook and width (the `mul1` half steps included), with the K split planned from the
+  layer's shape alone. `exl3.Dense` runs prompt rows in 128-row blocks of the same kernel, so a prompt row's bits
+  equal its decode-row bits wherever its chunk starts; `qlinear.Weight` has an `.exl3` arm for both.
+- `zig/kernels/cuda/exl3_experts.cu`, `zig/src/cuda/exl3_experts.zig`: grouped routed experts (member lists,
+  each expert's rotation, gate and up, GLM's SwiGLU roundings, down and the weighted combine), widths mixed within
+  a layer; an expert's member count never changes a row's bits.
+- `zig/src/core/exl3_load.zig`: every trellis group of a checkpoint from its safetensors headers;
+  `zig/src/cuda/exl3_upload.zig` puts a group, or a layer's experts, on the device.
+
+`tf-cuda-test exl3 DIR` checks them: every width and codebook against float64 references built on
+`exl3_format.zig`, row and chunk invariance, and, when `DIR` holds bytes the Python engine recorded on real checkpoint
+layers, those layers bit for bit, two whole layers of RED-SNOW-5.3-Flash (a KDA and a DSA layer, all 288 experts
+under real routing) included. The program that records them runs the Python engine and is not in this repository;
+`none` skips those checks. `tf-cuda-test exl3-tp2 RANK HOST:PORT DIR` runs the GLM split rules on two ranks over
+NCCL (output-column cuts, input-row cuts with fp32 partials summed rank 0 first, and the experts' intermediate cut)
+and checks every rank's bytes and the sums the same way.
+
+No family serves EXL3 natively yet: the Metal projection (#681) and these CUDA pieces are what a family's engine
+takes, through `qlinear` and `exl3_experts`.

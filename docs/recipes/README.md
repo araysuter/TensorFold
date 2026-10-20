@@ -1,32 +1,50 @@
 # Recipe book
 
-Each family page describes its supported checkpoint, kernels and operating limits.
+Each family page describes its supported checkpoint, kernels and operating limits, and says which engine it covers:
+the native engine, or the Python engine frozen at 0.6.6.
+
+For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.md) before implementing a native family, kernel or serving change.
 
 | Family | Recipe |
 | --- | --- |
-| Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md) |
+| Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
+| Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
-| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [CUDA images](flash-next-vision.md) |
+| Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
+| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md) |
 | Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
+| Gemma 4 31B | [Native Metal, affine 4-bit](gemma-4-native.md) |
+| Gemma 4 12B | [Native Metal, affine 4-bit, MTP assistant](gemma-4-12b-native.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
+| Step-5-Preview | [Native Metal on one 256 GB Mac: 2-bit experts, MTP drafts, images](step-5-preview.md) |
+| Kolibri-1 | [Native CUDA, block FP8, research checkpoint](kolibri-1.md) |
 
 ## Capability floor
 
-Quoted from the family pages, not measured per card.
+The native binary's CUDA build runs Nemotron 3.5 Lightning on GB10 and on Ampere cards with compute capability 8.0 (the
+A100) and 8.6 (the RTX 30 series, RTX A6000, A10 and A40). On a Mac, `tensorfold info REPO` prints a
+checkpoint's memory floor: its weights plus a 2 GiB runtime margin. The table below is the Python 0.6.6 engine's, quoted
+from its family pages, not measured per card.
 
 | Engine | Floor |
 | --- | --- |
 | CUDA, other families | Compute capability 8.9 or newer: Ada RTX 40, Hopper, and Blackwell cards (RTX 50, RTX PRO 6000, DGX Spark GB10). RTX 30 (8.6) is not supported yet. |
 | Flash Next, CUDA | sm_120 and sm_121 only: DGX Spark GB10, RTX 50, RTX PRO 6000. A card below sm_120 refuses Flash Next at startup. |
+| Intel GPU (XPU), Nemotron | Experimental. Weights need 17.3 GiB of device memory (18 to 19.4 GB in use from 4k to 128k context); measured on an Arc Pro B70 (32 GB). Cards below 24 GB are untested and a 16 GB card cannot hold the weights. |
 | MLX, Apple Silicon | GLM-5.3-Flash is written for a 256 GB Mac, about 151 GiB resident. DeepSeek-V4-Flash is the same, about 151 GiB resident. Flash Next's default command sizes to a 128 GiB M4 Max. Qwen3.8-27B on a 32 GB Mac needs more than the default 22.4 GiB. Machine classes, not measured minimums. |
 
-Contributor guides cover [adding an MLX family](adding-a-family.md),
-[adding a CUDA family](adding-a-cuda-family.md) and [CUDA implementation rules](cuda.md).
+New families go on the Zig engine: [adding a Zig family](adding-a-zig-family.md) has the steps in order, what each
+one gained, and which code owns it. For the Python engine, frozen at 0.6.6, the contributor guides cover
+[adding an MLX family](adding-a-family.md), [adding a CUDA family](adding-a-cuda-family.md) and
+[CUDA implementation rules](cuda.md).
+[Training a drafter](training-a-drafter.md) takes a target's `--record` output to a learned block drafter, with
+what each step gained on Kolibri-1.
 [EXL3 weights](exl3.md) and [universal EXL3 experts](exl3-universal-experts.md) describe the shared EXL3
-module every CUDA family can read: any codebook, any width per tensor, one grouped launch per MoE projection.
+module @vcruz305 wrote for the Python engine's CUDA families in [#42](https://github.com/ashhart/TensorFold/pull/42):
+any codebook, any width per tensor, one grouped launch per MoE projection.
 
 ## The contract
 

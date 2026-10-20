@@ -1,28 +1,35 @@
 #!/bin/bash
-# Run from the fork's virtual environment. Caddy/llama.cpp must not own port 8080.
+# Use the pinned native runtime and the existing downloaded checkpoints.
 set -euo pipefail
 umask 077
-# 48 GiB process / 45 GiB MLX keeps headroom for large cached conversations.
-export TENSORFOLD_MEMORY_LIMIT_GB="${TENSORFOLD_MEMORY_LIMIT_GB:-48}"
-MODEL_PATH="$(hf download ukisai/Swift-1.5-4bit-MLX \
-  --revision 82276731e47e1db4ac502f24c63cfaf886639be9 --quiet)"
+NATIVE="${TENSORFOLD_NATIVE_BIN:-$HOME/ai/tensorfold-runtime/1.1.1/bin/tensorfold-native}"
+HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
+# A separate copy preserves the old Swift-specific RMSNorm conversion.
+MODEL_PATH="$HOME/ai/models/swift-1.5-native-82276731"
+DRAFTER_PATH="$HUB_CACHE/models--z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4"
 KEY_FILE="${STUDIO_API_KEY_FILE:-$HOME/.config/tensorfold/api-key}"
-if [[ ! -s "$KEY_FILE" ]]; then
-  mkdir -p "$(dirname "$KEY_FILE")"
-  cp "$HOME/.config/llama.cpp/api-key" "$KEY_FILE"
-  chmod 600 "$KEY_FILE"
+HOST_ARGS=()
+PUBLIC_HOST="${STUDIO_ALLOWED_HOST:-}"
+if [[ -z "$PUBLIC_HOST" && -s "$HOME/.config/tensorfold/studio-host" ]]; then
+  IFS= read -r PUBLIC_HOST < "$HOME/.config/tensorfold/studio-host" || true
 fi
-exec tensorfold serve "$MODEL_PATH" \
+if [[ -n "$PUBLIC_HOST" ]]; then HOST_ARGS=(--allowed-host "$PUBLIC_HOST"); fi
+for required in "$NATIVE" "$MODEL_PATH/config.json" "$MODEL_PATH/swift-native.json" "$DRAFTER_PATH/config.json" "$KEY_FILE"; do
+  if [[ ! -s "$required" ]]; then
+    echo "Missing native runtime, pinned checkpoint, drafter or API key; see docs/studio/README.md." >&2
+    exit 1
+  fi
+done
+exec "$NATIVE" serve "$MODEL_PATH" \
   --name swift-1.5 \
   --context 131072 \
   --parallel 2 \
-  --conversation-slots 8 \
-  --checkpoint-slots 2 \
-  --prompt-cache-gib 8 \
-  --spill-gib 128 \
-  --clear-cache-on-exit \
-  --drafter z-lab/Qwen3.8-27B-DFlash2 \
-  --snapshot-dir "$HOME/.cache/tensorfold/studio/prefix-snapshots" \
+  --prompt-cache-gib "${STUDIO_PROMPT_CACHE_GIB:-8}" \
+  --drafter "$DRAFTER_PATH" \
+  --snapshot-dir none \
+  --temperature 1 --top-k 20 --top-p 0.95 \
+  --dashboard \
   --api-key-file "$KEY_FILE" \
+  "${HOST_ARGS[@]}" \
   --host 127.0.0.1 \
   --port "${STUDIO_PORT:-8080}"
