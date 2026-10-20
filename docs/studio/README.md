@@ -4,7 +4,15 @@ The current upstream engine is native TensorFold 1.1.1. Serving uses the install
 
 `tools/start-studio.sh` serves the pinned Swift 1.5 affine 4-bit checkpoint with the pinned 4-bit DFlash2 drafter, 131,072 total context tokens, two concurrent streams and an 8 GiB retained-prompt budget. It listens on loopback port 8080 and keeps the existing restricted-permission API-key file. `STUDIO_PORT` selects an isolated benchmark port, and `TENSORFOLD_NATIVE_BIN` selects another native executable. The public hostname comes from `STUDIO_ALLOWED_HOST` or the private `$HOME/.config/tensorfold/studio-host` file.
 
-Install the official `tensorfold-1.1.1-macos-arm64.tar.gz` release under `$HOME/ai/tensorfold-runtime/1.1.1`, preserving its directory structure, and verify its companion SHA-256 checksum before running it. The launcher expects the model and drafter in the Hugging Face cache at their pinned revisions; it refuses missing inputs. The alternate Qwen launcher preserves its existing checkpoint revision.
+Install the official `tensorfold-1.1.1-macos-arm64.tar.gz` release under `$HOME/ai/tensorfold-runtime/1.1.1`, preserving its directory structure, and verify its companion SHA-256 checksum before running it. The drafter stays in the Hugging Face cache at its pinned revision. The alternate Qwen launcher preserves its existing checkpoint revision.
+
+Swift needs the same 161 RMSNorm scale conversions that the old fork applied during loading. Prepare a separate native-compatible checkpoint once; the converter leaves the downloaded snapshot intact, preserves all other tensor bytes and records the converted vectors in `swift-native.json`. The launcher refuses an unprepared checkpoint. Native inference still uses the upstream kernels unchanged.
+
+```sh
+python3 tools/prepare-swift-native.py \
+  "$HOME/.cache/huggingface/hub/models--ukisai--Swift-1.5-4bit-MLX/snapshots/82276731e47e1db4ac502f24c63cfaf886639be9" \
+  "$HOME/ai/models/swift-1.5-native-82276731"
+```
 
 ```sh
 bash tools/start-studio.sh
