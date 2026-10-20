@@ -517,6 +517,3 @@ inline void tf_gather_qmv(const device uint32_t* w, const device bfloat* scales,
   tf_gather_qmv<8, 64, 1>(W, S, B, X, IDS, XIDS, Y, SHAPE[0], SHAPE[1], threadgroup_position_in_grid,
                               simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
 }
-
-
-

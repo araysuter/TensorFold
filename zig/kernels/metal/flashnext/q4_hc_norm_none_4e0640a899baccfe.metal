@@ -195,11 +195,11 @@ inline float qgroup_doth(const device uint32_t* w, float scale, float bias, cons
   threadgroup float part[8][S];
   const int d = j * 256 + int(t);
   float ss[S];
-  
+
   for (int s = 0; s < S; s++) {
     const int e = s * D + d;
     float hv = float(H[r * W + e]);
-    
+
     HN[r * W + e] = bfloat(hv);
     ss[s] = simd_sum(hv * hv);
   }

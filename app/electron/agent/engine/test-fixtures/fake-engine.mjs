@@ -97,7 +97,7 @@ async function pullCommand(spec) {
       console.log(`  model-${i}.safetensors: cached`)
     } else {
       const fd = openSync(`${blob}.ranges`, 'a+')
-      ftruncateSync(fd, size)
+      if (!env.FAKE_PULL_GROW_FILE) ftruncateSync(fd, size)
       for (let at = 0; at < size; at += chunk) {
         writeSync(fd, Buffer.alloc(Math.min(chunk, size - at), 1), 0, Math.min(chunk, size - at), at)
         await sleep(Number(env.FAKE_PULL_DELAY_MS ?? 0))

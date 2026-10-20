@@ -400,4 +400,3 @@ inline void gather_gu6(const device bfloat16_t* X, const device uint* WG, const 
   threadgroup bfloat16_t tile[64 * (64 + 16 / sizeof(bfloat16_t))];
   gather6<32>(X, W, S, B, O, Y, P, tile, tg, sg, lane);
 }
-

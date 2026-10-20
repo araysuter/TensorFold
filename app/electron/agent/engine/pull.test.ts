@@ -55,7 +55,8 @@ async function main() {
     await fs.mkdir(cache, { recursive: true })
     await fs.writeFile(path.join(cache, 'existing'), Buffer.alloc(65536, 1))
     const measurements: PullProgress[] = []
-    const measured = startPull({ binary: h.binary, env: { ...h.env, FAKE_PULL_FILES: '1', FAKE_PULL_CHUNK: '4096', FAKE_PULL_DELAY_MS: '55', FAKE_PULL_HOLD_AFTER_BYTES: '65536' }, hub: h.hub, steps: [{ repo: 'Org/Measured', revision: null }], totalBytes: 65536 + 256 * 1024, pollMs: 50, onUpdate: (progress) => measurements.push(progress) })
+    // Grow the rate fixture beyond the two-second warm-up without filesystem-dependent sparse preallocation.
+    const measured = startPull({ binary: h.binary, env: { ...h.env, FAKE_PULL_FILES: '1', FAKE_PULL_CHUNK: '4096', FAKE_PULL_DELAY_MS: '200', FAKE_PULL_HOLD_AFTER_BYTES: '65536', FAKE_PULL_GROW_FILE: '1' }, hub: h.hub, steps: [{ repo: 'Org/Measured', revision: null }], totalBytes: 65536 + 256 * 1024, pollMs: 50, onUpdate: (progress) => measurements.push(progress) })
     // Hold the fake download partial until cancelled, so a delayed poll cannot miss the ETA window.
     try {
       await waitFor(() => measurements.length > 0, 5000, 'resumed cache baseline')
