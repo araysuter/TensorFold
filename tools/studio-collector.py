@@ -20,6 +20,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 RETENTION = 86400
 
@@ -53,6 +54,17 @@ def host_metrics():
 
 STATES = ['empty', 'queued', 'restoring', 'prefilling', 'generating', 'saving', 'ram', 'ssd', 'uncached', 'error', 'shared']
 def tensorfold_metrics(data):
+    if 'slots' not in data:
+        result = dict(tracking_version=2, tensorfold_version=2, slots_total=0)
+        for key in ('running', 'waiting', 'decode_tokens_per_second', 'prefill_tokens_per_second',
+                    'fill_prompt_tokens', 'fill_tokens_left', 'generation_tokens_total', 'prompt_tokens_total'):
+            value = data.get(key)
+            if isinstance(value, (float, int)) and math.isfinite(value):
+                result['native_' + key] = value
+        for key, value in data.get('memory', {}).items():
+            if isinstance(value, (float, int)) and math.isfinite(value):
+                result['native_process_' + key] = value
+        return result
     slots = data['slots']
     result = dict(tracking_version=data.get('tracking_version', 1), tensorfold_version=1, slots_total=len(slots), parallel=data['parallel'], context=data['context'])
     for item in slots:
@@ -121,9 +133,15 @@ class Collector:
         # Prune even when TensorFold is offline.
         with self.connect() as db:
             db.execute('DELETE FROM samples WHERE time <= ?', (now - RETENTION * 1000,))
-        request = Request('http://127.0.0.1:8080/studio/metrics', headers={'Authorization': 'Bearer ' + self.key()})
-        with urlopen(request, timeout=4) as response:
-            raw = response.read(1_000_001)
+        headers = {'Authorization': 'Bearer ' + self.key()}
+        try:
+            with urlopen(Request('http://127.0.0.1:8080/stats', headers=headers), timeout=4) as response:
+                raw = response.read(1_000_001)
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            with urlopen(Request('http://127.0.0.1:8080/studio/metrics', headers=headers), timeout=4) as response:
+                raw = response.read(1_000_001)
         if len(raw) > 1_000_000:
             raise ValueError('Response too large')
         metrics = tensorfold_metrics(json.loads(raw))

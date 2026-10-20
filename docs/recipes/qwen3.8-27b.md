@@ -1,5 +1,42 @@
 # Qwen3.8-27B
 
+The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
+`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
+the drafter; without it the model decodes plain. It has no CUDA backend yet.
+
+```bash
+tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
+```
+
+Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
+from this repository's docs, 100 greedy tokens, prefill from the time to the first token:
+
+| Prompt | Native prefill tok/s | mlx-lm prefill | Native decode tok/s | mlx-lm decode | Native with DFlash2 |
+|---|---|---|---|---|---|
+| 2k | 1325 | 1216 | 51.6 | 54.7 | 162-226 |
+| 8k | 1269 | 1860 | 49.4 | 52.8 | 102 |
+| 32k | 1171 | 1699 | 46.2 | 46.5 | 120 |
+
+A plain one-row round is 19.5 ms on the M5 Ultra (`tf-qwen27-bench`, `QWEN27_ADVANCE`): its 321 projections read
+14.1 GB in 16.2 ms, each shape at the K split it streams fastest at over every layer's matrix (`QWEN27_DISTINCT`;
+a matrix called again sits in the system cache and misleads), and an undrafted one-row window is kept by its own
+verify, as a prompt's rows are, rather than by a keep command buffer the host waited on (1.1 ms a token). Decode
+attention scores each row's keys in 128-key chunks while the row's position is below 8,192 and 512-key chunks
+from it (`attention_plan.chunkFor`, the chunk a row's node carries): at a 2k context a row's four key heads
+were eight threadgroups of 512 keys on an 80-core GPU, 96 µs a layer. A row's chunks follow its own position, so
+it merges the same partials as its one-row step in a chain, a tree, a window across 8,192 or beside other streams,
+and drafted rows stay byte-equal to plain ones. A one-row round's
+DeltaNet step is three dispatches a layer rather than five: `tf_delta_gdn_pre_step` writes each slot's next conv
+window into its history as it reads it, so the commit and publication kernels go, and spreads a 128-wide head over
+four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
+the state, history and logits bytes against the general path).
+
+The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
+engine. @nood-co1, @jkuepker and @Arminova worked on its CUDA path; see [credits](../credits.md).
+
 Experimental [packed affine formats](../quantization.md) include 8-bit and mixed layer precision.
 
 The `qwen3_5` family combines Gated DeltaNet and full attention. The standard recipe below uses its
@@ -48,7 +85,8 @@ quality comparisons are TBD [release-0.3.5].
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks read. `tensorfold serve` loads the checkpoint you name; it picks
-none by itself. Use the [CUDA container setup](../../RUNBOOK.md#dgx-spark) for any of them. Prompts take bf16
+none by itself. Use the [CUDA container setup](https://github.com/ashhart/TensorFold/blob/v0.6.6/RUNBOOK.md#nvidia-gpus)
+for any of them. Prompts take bf16
 activations by default; what that costs against the FP8 prompt path (`--prefill-fp8`) depends on the format
 ([prompt precision](cuda.md#prompt-precision)):
 
@@ -144,7 +182,7 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.
 The verify matmul fixes reduction order by weight shape. Tree attention reads only committed keys and the
 node's own path; recurrent commits replay that path. Two-rank reductions gather fp32 partials and add in
 rank order. Each rank count has its own serial reference. See the
-[CUDA kernel map](../../src/tensorfold/families/qwen3_5/cuda/README.md).
+[CUDA kernel map](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/families/qwen3_5/cuda/README.md).
 
 ### Concurrent requests
 
@@ -161,7 +199,9 @@ On one DGX Spark, with the workload from issue #38 (48 chat requests of 3,000 to
 2,900-token system prompt, up to 512 tokens each, greedy, all sent at once), TensorFold serves 161.7 tok/s at
 16 in flight with a 25.4 GiB peak (nvidia-smi). vLLM with `nvidia/Qwen3.8-27B-NVFP4`, MTP=3, prefix caching
 and `--max-num-seqs 16` serves 132.1 tok/s at 51.7 GiB on the same Spark. At 8 and 4 in flight TensorFold
-serves 147.5 and 112.0 tok/s. `tools/shared_prefix_prompts.py` builds the workload and
+serves 147.5 and 112.0 tok/s.
+[`tools/shared_prefix_prompts.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/tools/shared_prefix_prompts.py)
+(at the `v0.6.6` tag) builds the workload and
 `tools/shared_prefix_load.py` sends it (`--concurrency`, `--mem` for the memory peak).
 
 ### Structured output
@@ -233,7 +273,9 @@ to the 140,288 window kept swap at 653 to 656 MB, with a 43.57 GiB peak footprin
 
 The draft calibration metadata names public prompts. When regenerating it, start its server with
 `--port 8473 --name qwen27` so the collection client reaches the named endpoint. Pass the saved full
-provenance object with `--source` to `tools/fit_draft_calibration.py`; retain model and drafter revisions.
+provenance object with `--source` to
+[`tools/fit_draft_calibration.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/tools/fit_draft_calibration.py)
+(at the `v0.6.6` tag); retain model and drafter revisions.
 
 Kernel tests check rows alone and in windows, tree paths and committed state. Release checks must also
 compare drafted/serial, resumed/fresh and concurrent/solo requests with thinking on and off and tools.

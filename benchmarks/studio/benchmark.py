@@ -39,7 +39,7 @@ def request(base, key, body, timeout):
                 event = json.loads(data)
                 if 'error' in event:
                     raise RuntimeError(str(event['error']))
-                for field in ('usage', 'tensorfold', 'speculative'):
+                for field in ('id', 'usage', 'tensorfold', 'speculative'):
                     if field in event:
                         result[field] = event[field]
                 if event.get('choices'):
@@ -79,7 +79,7 @@ def run_one(args, key, ids, barrier, concurrency, rep, user):
         usage = reply.get('usage', {})
         metrics = reply.get('tensorfold', {})
         n = usage.get('prompt_tokens')
-        row.update(actual_prompt_tokens=n, output_tokens=usage.get('completion_tokens'),
+        row.update(request_id=reply.get('id'), actual_prompt_tokens=n, output_tokens=usage.get('completion_tokens'),
                    cached_tokens=usage.get('prompt_tokens_details', {}).get('cached_tokens', 0),
                    decode_tps=metrics.get('tokens_per_second'),
                    ttft_seconds=metrics.get('time_to_first_token'),

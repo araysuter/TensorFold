@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 build/
+!zig/build/
 dist/
 .venv/
 venv/
@@ -11,3 +12,12 @@ venv/
 .DS_Store
 *.swp
 *.log
+.zig-toolchain
+.zig-cache/
+zig-out/
+
+# Native Qwen CPU-only Metal compiler receipts.
+.q27-metal-check/
+
+# Versioned GUI build resources, generated app engines stay ignored in app/.gitignore.
+!app/build/
