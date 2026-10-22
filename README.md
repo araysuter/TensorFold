@@ -6,9 +6,72 @@ The [October 19 Swift measurements](benchmarks/studio/charts/swift-2026-10-19/RE
 
 TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
-Serving needs no Python or MLX installation.
+Serving needs no Python or MLX installation. The optional Studio gateway below
+uses Python to supervise native model processes.
 
 Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) before it writes any code.
+
+## Two models through one Studio API
+
+The [Studio gateway](tools/studio-gateway/README.md) exposes Swift-1.5 and our
+smallest Ornith-1.5-122B MLX quant through the same API. It loads **one model and
+its DFlash2 drafter at a time**, keeps the most recently used conversation in
+RAM, and parks up to four additional conversations per model on SSD. After
+30 minutes idle, it saves the conversation and unloads the engine. Temporary
+conversation state is cleared when the gateway shuts down; model weights stay
+on SSD. A cold request includes model-loading and conversation-restoration time.
+
+For a 64 GiB Studio, **start with Swift-1.5**: it scored higher across the full
+test and used less reasoning to solve matched questions. Choose Ornith mixed
+2-bit when you want the 122B MoE model and can accept its larger weight footprint
+and more frequent reasoning cutoffs. Both configurations use their matching
+DFlash2 drafters.
+
+| Model | Checkpoint weights only | Our cleaned GPQA result |
+| --- | --- | --- |
+| [Swift-1.5 affine 4-bit](https://huggingface.co/ukisai/Swift-1.5-4bit-MLX) | 15.83 GB / 14.74 GiB | **175/189 — 92.6%** |
+| [Ornith-1.5-122B mixed 2-bit](https://huggingface.co/araysuter/Ornith-1.5-122B-MLX-mixed-2bit) | 40.62 GB / 37.83 GiB | **157/189 — 83.1%** |
+
+These are [our local results](benchmarks/studio/charts/studio-model-gateway-2026-10-22/gpqa-summary.json),
+not the model authors' scores. The cleaned set
+removes nine questions from the original 198-question GPQA Diamond set. Greedy
+generation used thinking mode and an initial 32,768-token output budget; only
+unfinished cutoffs were retried at 65,536 and then 98,304 tokens. Other answers
+were retained, so this is an adaptive-budget comparison, not a fresh 96K run.
+Ornith retains early MLX answers before its native TensorFold/DFlash2
+continuation. The main scores include unfinished answers as incorrect. Excluding
+remaining cutoffs yields 93.1% for Swift and 94.0% for Ornith on **different
+subsets**; those filtered scores do not establish a ranking. Weights above
+exclude drafters, context state, and execution buffers.
+
+Use [Qwen3.8-27B DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) with
+Swift and [Ornith-1.5-122B DFlash2](https://huggingface.co/incoai/Ornith-1.5-122B-DFlash2)
+with Ornith. The gateway needs the [session-enabled native runtime](tools/studio-gateway/native/),
+the prepared native-compatible Swift checkpoint, and private configuration.
+Build and checkpoint preparation are described in the linked guides; a stock
+release binary does not provide the gateway's session save/load contract.
+
+```sh
+install -d -m 700 "$HOME/.config/tensorfold"
+install -m 600 tools/studio-gateway/config.example.json \
+  "$HOME/.config/tensorfold/studio-gateway.json"
+# Edit the private copy for your executable, checkpoint, drafter, and key paths.
+python3 tools/studio-gateway/gateway.py \
+  --config "$HOME/.config/tensorfold/studio-gateway.json" --check-config
+python3 tools/studio-gateway/gateway.py \
+  --config "$HOME/.config/tensorfold/studio-gateway.json"
+```
+
+Clients keep one `/v1` base URL and API key, choosing `swift-1.5` or
+`ornith-1.5-122b-mixed-2bit` in the request's `model` field. Follow the
+[gateway setup and client guide](tools/studio-gateway/README.md) for conversation
+IDs, authentication, memory settings, and cold-loading behavior. The configured
+131,072-token window counts input and output together.
+Our [near-128K capacity check](benchmarks/studio/charts/studio-model-gateway-2026-10-22/README.md)
+saved and restored 130,950 cached tokens for both models on the 64 GiB M5 Max;
+peak process footprint was 42.6 GiB for Swift and 48.3 GiB for Ornith.
+Keep keys, snapshots, private datasets, and
+operator configuration outside Git; see [sharing this fork](docs/studio/SHARING.md).
 
 ## Quick start
 

@@ -1,0 +1,46 @@
+{
+  "upstream_revision": "9328aff8a6c470b026aee7cefe53a0527de44814",
+  "native_binary_sha256": "a3bbc06661eb375a33cf2e0e0de261d8875c85f657636dafa82430c18a445bb8",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "21153e75cc40f0c0ecb0b50dfb7795d1e6d7f42edd3fc835c1216a2d91de4134"
+    },
+    {
+      "path": "apply.py",
+      "sha256": "59b132b83592011478622d8b2501d509410193489426d029686d814f59e42e30"
+    },
+    {
+      "path": "build.sh",
+      "sha256": "f2037fd14d2a2b69862c441d9778b5329dad3b388787bdd6a90a58ea305f9a29"
+    },
+    {
+      "path": "patch_mixed_shared.py",
+      "sha256": "2b2ccb6e7050ee6bb2c16a52b13206fc63003d75737688a1c8f11b410809baa8"
+    },
+    {
+      "path": "payloads/session_file.zig",
+      "sha256": "02483ab900d6cd313990d2f5bd2ee78384fd87cdc82ae2a78f8139aff8e93e40"
+    },
+    {
+      "path": "payloads/session_file_test.zig",
+      "sha256": "ce812ee6c6652337e9ae266f3257e36125f639b036f418b855fea0eb80fac663"
+    },
+    {
+      "path": "payloads/session_routes.zig",
+      "sha256": "b130ba59e666fee9e7dc1b4f662efb37c407a02d7059594062d7eb8da326acc2"
+    },
+    {
+      "path": "probe.py",
+      "sha256": "5643d8394da2fddb4a2ca3f016f1fdfb532b44100e06c7f6d089405534fe7a1b"
+    },
+    {
+      "path": "test.sh",
+      "sha256": "d763ce7f171ada7191b2a4aa837232bafb6249ed4af820c36d2fa4646d75cd0b"
+    },
+    {
+      "path": "validation.json",
+      "sha256": "41b195a8522e140f2a6fa309398ad68094edf4f40c5a90a50af644a0005b76f0"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "samples": 524,
+  "peak_process_bytes": {
+    "ornith-1.5-122b-mixed-2bit": 51827898440,
+    "swift-1.5": 45699839248
+  },
+  "max_native_processes": 1,
+  "swapout_page_delta": 256,
+  "vm_page_bytes": 16384
+}
