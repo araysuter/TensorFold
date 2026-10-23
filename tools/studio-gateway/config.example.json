@@ -1,0 +1,73 @@
+{
+  "host": "127.0.0.1",
+  "port": 8080,
+  "backend_port": 18080,
+  "default_model": "swift-1.5",
+  "idle_seconds": 1800,
+  "max_parked": 4,
+  "cache_root": "~/Library/Caches/TensorFold/studio-gateway",
+  "allowed_hosts": [],
+  "key_files": [
+    {
+      "label": "owner",
+      "path": "~/.config/tensorfold/api-key"
+    },
+    {
+      "label": "guest",
+      "path": "~/.config/tensorfold/api-key.guest",
+      "required": false
+    }
+  ],
+  "models": [
+    {
+      "id": "swift-1.5",
+      "env": {"TF_PROMPT_ROWS": "128"},
+      "env": {"TF_PROMPT_ROWS": "128"},
+      "argv": [
+        "~/ai/tensorfold-gateway/TensorFold/zig-out/native/bin/tensorfold-native",
+        "serve",
+        "~/ai/models/swift-1.5-native-82276731",
+        "--name", "swift-1.5",
+        "--context", "131072",
+        "--parallel", "1",
+        "--prompt-cache-gib", "9",
+        "--prompt-cache-over-cap",
+        "--snapshot-dir", "none",
+        "--learn-conversations",
+        "--learn-dir", "{snapshot_dir}/bootstrap",
+        "--learn-gib", "1",
+        "--learn-daily-gib", "1",
+        "--drafter", "~/ai/drafters/Qwen3.8-27B-DFlash2",
+        "--drafter-bits", "4",
+        "--api-key-file", "{backend_key_file}",
+        "--host", "127.0.0.1",
+        "--port", "{backend_port}"
+      ]
+    },
+    {
+      "id": "ornith-1.5-122b-mixed-2bit",
+      "aliases": ["ornith-1.5-122b"],
+      "env": {"TF_PROMPT_ROWS": "128"},
+      "argv": [
+        "~/ai/tensorfold-gateway/TensorFold/zig-out/native/bin/tensorfold-native",
+        "serve",
+        "~/ai/models/ornith-1.5-122b-mlx-mixed-2bit-dfa07bab",
+        "--name", "ornith-1.5-122b-mixed-2bit",
+        "--context", "131072",
+        "--parallel", "1",
+        "--prompt-cache-gib", "4",
+        "--prompt-cache-over-cap",
+        "--snapshot-dir", "none",
+        "--learn-conversations",
+        "--learn-dir", "{snapshot_dir}/bootstrap",
+        "--learn-gib", "1",
+        "--learn-daily-gib", "1",
+        "--drafter", "~/ai/drafters/Ornith-1.5-122B-DFlash2",
+        "--drafter-bits", "4",
+        "--api-key-file", "{backend_key_file}",
+        "--host", "127.0.0.1",
+        "--port", "{backend_port}"
+      ]
+    }
+  ]
+}

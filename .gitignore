@@ -21,3 +21,61 @@ zig-out/
 
 # Versioned GUI build resources, generated app engines stay ignored in app/.gitignore.
 !app/build/
+
+# Local credentials and machine-specific configuration. Commit examples only.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.local.json
+*.local.toml
+*.key
+*.pem
+*.p12
+*.pfx
+api-key
+api-keys
+api-key.*
+api-keys.*
+*-api-key
+*-api-keys
+*.token
+.netrc
+id_rsa
+id_ed25519
+/.ssh/
+/.aws/
+/.config/
+/secrets/
+/credentials/
+/.cache/
+
+# Checkpoints, native session snapshots, and gateway state stay outside Git.
+*.safetensors
+*.gguf
+*.ckpt
+*.pth
+*.pt
+*.tfs
+/models/
+/weights/
+/checkpoints/
+/snapshots/
+/state/
+/runtime/
+/.gateway-state/
+/tools/studio-gateway/config.json
+/tools/studio-gateway/gateway.json
+/tools/studio-gateway/state/
+
+# Evaluation source data and private model traces are never public artifacts.
+**/*-private.json
+**/*-private.json.*
+**/gpqa-tasks.jsonl*
+**/gpqa_diamond.csv*
+**/gpqa_main.csv*
+**/gpqa_extended.csv*
+**/private-benchmarks/
+/benchmarks/studio/ornith-gpqa-*/
+/tools/ornith/evaluation/tasks.jsonl
+/studio-benchmark-results/

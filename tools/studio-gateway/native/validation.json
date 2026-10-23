@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "scope": "Native gateway snapshot/cache CPU regressions and native build",
+  "upstream_repository": "https://github.com/BobClawblaw/TensorFold",
+  "upstream_revision": "9328aff8a6c470b026aee7cefe53a0527de44814",
+  "zig_version": "0.17.0",
+  "host_cpu_target": "apple_m4",
+  "native_binary_sha256": "a3bbc06661eb375a33cf2e0e0de261d8875c85f657636dafa82430c18a445bb8",
+  "cpu_tests": {
+    "command": "bash tools/studio-gateway/native/test.sh SOURCE_DIRECTORY ZIG_0_17_EXECUTABLE",
+    "test_root": "zig/src/core/session_file.zig",
+    "filters": [],
+    "passed": 107,
+    "failed": 0,
+    "exit_code": 0,
+    "transitive_test_groups": [
+      "session snapshot format and path confinement",
+      "prompt cache",
+      "conversation row store",
+      "learned states",
+      "fault injection and rollback"
+    ]
+  },
+  "native_build": {
+    "command": "zig build native -Doptimize=ReleaseFast -Dcpu=apple_m4 -j4",
+    "exit_code": 0
+  },
+  "lean": {
+    "same_checker_against": "pinned native port with existing mixed-shared quantization fix",
+    "baseline_findings": 444,
+    "candidate_findings": 444,
+    "new_findings": 0
+  },
+  "diff_check": {
+    "command": "git diff --check",
+    "exit_code": 0
+  },
+  "not_run": [
+    "Full repository test/test-kernel-contract/test-golden/fuzz-cortheon qualification",
+    "Plain zig build of every default tool",
+    "Qualification on other GPU chips or operating systems"
+  ],
+  "gpu_validation": "Real-model gateway/capacity receipts are maintained separately; this file is not a whole-model qualification receipt."
+}
