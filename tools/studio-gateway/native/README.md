@@ -40,13 +40,25 @@ backend bearer key file. The public API keys are not the backend key. Pass:
 The native `--learn-conversations` startup probe supplies the checkpoint, drafter,
 GPU arithmetic, machine and source identity. Session mode folds the executable
 SHA256 into that identity, closes the automatic disk store, and limits the RAM
-snapshot store to one entry. It performs no background learned-cache writes.
+snapshot store to at most two checkpoints of the active conversation, within the
+existing byte budget. Keeping both its rewind and next-turn checkpoint avoids
+discarding the reusable history when a client serializes an assistant reply
+differently. It performs no background learned-cache writes.
 The bootstrap directory may remain empty until gateway shutdown removes it.
 
-One live 128K runner and one snapshot of that same active conversation can coexist
-in RAM. Thus the snapshot budget is additional to the runner's own cache. The
-70% admission rule must be explicitly overridden for Ornith; actual total process
-memory and 128K behavior must be measured on each machine. No inactive model or
+In the October 23 VS Code sidebar diagnostic, the old one-checkpoint build missed
+on consecutive ~55K-token follow-ups (76 and 134 seconds over HTTP). With two
+checkpoints, consecutive follow-ups reused 54,891 tokens and reached their first
+token in 0.86 and 1.38 seconds; the sidebar showed 1 and 2 seconds total. These
+were short synthetic replies with the client's existing 128 tool schemas, not
+general throughput benchmarks. A cold load, changed prompt, incompatible saved
+suffix or byte-budget eviction can still require prompt processing.
+
+One live runner and up to two checkpoints of that same active conversation can
+coexist in RAM. The byte budget remains 9 GiB for Swift and 4 GiB for Ornith;
+at 128K it may fit only one checkpoint. The snapshot budget is additional to the
+runner's own cache. The 70% admission rule must be explicitly overridden for Ornith;
+actual total process memory and 128K behavior must be measured on each machine. No inactive model or
 inactive conversation snapshot is retained in RAM.
 
 All three authenticated routes are disabled without `TF_SESSION_ROOT`. They require
@@ -96,8 +108,10 @@ bash tools/studio-gateway/native/test.sh /path/to/patched-native-source /path/to
 
 This uses `zig/src/core/session_file.zig` as its test root. With no test filter,
 Zig also runs its imported prompt-cache, learned-state, row-store and fault tests;
-the final candidate passed **107/107**. The exact command and scope are recorded
-in `validation.json`. This is a scoped CPU receipt: the full repository
+the original snapshot candidate passed **107/107**. Its command and scope are recorded
+in `validation.json`. The two-checkpoint cache fix passed **108/108**, including a
+regression for assistant-suffix changes and the one-checkpoint byte-budget fallback;
+see `validation-cache-2026-10-23.json`. These are scoped CPU receipts: the full repository
 `test test-kernel-contract test-golden fuzz-cortheon` and plain-build qualification
 were not run for this Studio service patch. The same lean checker reported
 444 inherited findings on the base and candidate, with zero new findings.

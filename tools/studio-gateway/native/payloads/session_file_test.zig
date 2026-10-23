@@ -16,6 +16,35 @@ fn populate(s: *pc.Store, f: *Fake, toks: []const u32) !void {
     try std.testing.expect(s.keep(toks, f.at, null, &.{}, f.spans));
 }
 
+test "two budgeted session checkpoints retain a rewind when the assistant suffix changes" {
+    const a = std.testing.allocator;
+    const toks = try a.alloc(u32, 6001);
+    defer a.free(toks);
+    for (toks, 0..) |*t, i| t.* = @intCast(31 + i * 17 % 10007);
+    const next = try a.dupe(u32, toks);
+    defer a.free(next);
+    next[5995] += 1; // a canonical assistant rendering differs after the shared history
+    for ([_]usize{ 1, 2, 2 }, [_]bool{ false, false, true }) |most, one_state_budget| {
+        var f: Fake = .{ .gpa = a, .prompt = toks };
+        var s = pc.Store.init(a, f.snapshots(), rules, 1 << 30);
+        defer s.deinit();
+        s.most = most;
+        s.active_rewind_at = 5900;
+        if (one_state_budget) s.budget = s.family.vtable.bytes(s.family.ptr, 6000);
+        f.at = 5900;
+        try std.testing.expect(s.keep(toks, 5900, null, &.{}, &.{}));
+        f.at = 6000;
+        try std.testing.expect(s.keep(toks, 6000, null, &.{}, &.{}));
+        try std.testing.expect(s.held <= s.budget);
+        try std.testing.expect(s.entries.items.len <= most);
+        f.prompt = next;
+        const plan = try s.begin(a, next, 6000, &.{}, &.{}, null, &.{});
+        defer a.free(plan.marks);
+        try std.testing.expectEqual(@as(u32, if (most == 2 and !one_state_budget) 5900 else 0), plan.from);
+        if (plan.from > 0) try std.testing.expect(f.restored_ok);
+    }
+}
+
 test "session snapshot restores full multi-part image and token/mode prefix exactly with one slot" {
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;

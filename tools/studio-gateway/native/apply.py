@@ -53,6 +53,15 @@ def apply(root):
         a.answer(h.cache, .{ .spans = h.decoded_rows });
     }''')
     p = root / 'zig/src/native/qwen27_disk.zig'
+    # Keep budgeted rewind/next-turn states; upgrade the old patch without duplicating its session block.
+    legacy = '''        store.most = 1;
+        r.deinit();
+        std.log.info("qwen27: explicit gateway sessions, one RAM snapshot, no automatic disk writes", .{});'''
+    current = '''        store.most = 2;
+        r.deinit();
+        std.log.info("qwen27: explicit gateway sessions, up to two budgeted RAM checkpoints, no automatic disk writes", .{});'''
+    if legacy in p.read_text():
+        replace(p, legacy, current)
     replace(p, '    store.disk = r;\n    std.log.info', '''    if (@import("sys").c.getenv("TF_SESSION_ROOT") != null) {
         const build_raw = @import("sys").c.getenv("TF_SESSION_BUILD_ID") orelse return error.SessionBuildIdMissing;
         const build = std.mem.span(build_raw);
@@ -62,9 +71,9 @@ def apply(root):
         identity_hash.update(std.mem.asBytes(&r.keying.identity));
         identity_hash.update(build);
         store.session_identity = identity_hash.final();
-        store.most = 1;
+        store.most = 2;
         r.deinit();
-        std.log.info("qwen27: explicit gateway sessions, one RAM snapshot, no automatic disk writes", .{});
+        std.log.info("qwen27: explicit gateway sessions, up to two budgeted RAM checkpoints, no automatic disk writes", .{});
         return;
     }
     store.disk = r;
