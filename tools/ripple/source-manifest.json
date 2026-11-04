@@ -1,0 +1,235 @@
+{
+  "format_version": 1,
+  "models": [
+    {
+      "repo_id": "ricursiveAI/Ripple-65B-Preview",
+      "revision": "4f308b9954b73cd200812095916c7baf68cf27f4",
+      "total_bytes": 129572861499,
+      "files": [
+        {
+          "path": ".gitattributes",
+          "size": 1519,
+          "sha256": null,
+          "blob_id": "a6344aac8c09253b3b630fb776ae94478aa0275b"
+        },
+        {
+          "path": "LICENSE",
+          "size": 11357,
+          "sha256": null,
+          "blob_id": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835"
+        },
+        {
+          "path": "README.md",
+          "size": 12386,
+          "sha256": null,
+          "blob_id": "87b411e3d38d0a3b3df57843553d563558d73b39"
+        },
+        {
+          "path": "chat_template.jinja",
+          "size": 2652,
+          "sha256": null,
+          "blob_id": "e4b0bd675d51ae7ac273c7b2f6d7ac850a5b8888"
+        },
+        {
+          "path": "config.json",
+          "size": 3541,
+          "sha256": null,
+          "blob_id": "180aab5d393a64d4d798e1ef901b65f02700fd50"
+        },
+        {
+          "path": "configuration_ricursive.py",
+          "size": 5238,
+          "sha256": null,
+          "blob_id": "62088198e5cac7f298053bc7cfdd64ac9c02f8eb"
+        },
+        {
+          "path": "inference/server/README.md",
+          "size": 3309,
+          "sha256": null,
+          "blob_id": "10ad01d526d8bdcab24f0511b7f1ad47244deca6"
+        },
+        {
+          "path": "inference/server/model.py",
+          "size": 20001,
+          "sha256": null,
+          "blob_id": "50af3d4dd36552fd50ba7ca7863be23d886d3282"
+        },
+        {
+          "path": "inference/server/ripple_format.py",
+          "size": 13055,
+          "sha256": null,
+          "blob_id": "bc14eb80dc6285d4c51d7dfdca9f2f6c4e3a813f"
+        },
+        {
+          "path": "inference/server/serve.py",
+          "size": 1981,
+          "sha256": null,
+          "blob_id": "67123498a60ef9fd664fa6a33a34626c733a3278"
+        },
+        {
+          "path": "model-00001-of-00016.safetensors",
+          "size": 8420238166,
+          "sha256": "0701bedc60edbb370e128cdff50478f6676cacd674080c16cca122a8d4b06c72",
+          "blob_id": "5d820d9f581444212be6a94c78d5b9956ec87c6d"
+        },
+        {
+          "path": "model-00002-of-00016.safetensors",
+          "size": 8399320620,
+          "sha256": "f22cba23852fcfd5df22e54285952ec3803b7921461fc8e54629c586e1ab8a60",
+          "blob_id": "4fd0b7e07b5f681af3ba8d99359ecab256047c09"
+        },
+        {
+          "path": "model-00003-of-00016.safetensors",
+          "size": 8388824258,
+          "sha256": "ed8cbb1946f546d32c96b569d30b700ca6936994025623d6c69c9e436b7caced",
+          "blob_id": "237a47932b47dbf4ffada2d3cf6a9eed43936c9a"
+        },
+        {
+          "path": "model-00004-of-00016.safetensors",
+          "size": 8388855346,
+          "sha256": "54281881efb8ab45301aa3d22e9501281e4c59bc69bd736ce08e8de5e09fae05",
+          "blob_id": "ea6a5a24a9c1a9537ad0dd5df0cc3433f0ce4d87"
+        },
+        {
+          "path": "model-00005-of-00016.safetensors",
+          "size": 8304949852,
+          "sha256": "a78d9cac0b076eede2fda612704b43f9d21d6f27276ef1924656327c992a1c5c",
+          "blob_id": "1c35fb8db7220b68f0a29bf9d0a93751e0c76379"
+        },
+        {
+          "path": "model-00006-of-00016.safetensors",
+          "size": 8388824290,
+          "sha256": "cd281215be38ff363f13e6de47d20b062a4cfe288d7c2d98fc93c0a962d4e21a",
+          "blob_id": "ce267e0c00b2b7fe74f2e24024955c6282fa12ea"
+        },
+        {
+          "path": "model-00007-of-00016.safetensors",
+          "size": 8388824258,
+          "sha256": "384e1e3430c5972f33434269090c3dfe5b101649579950b9645fecc9739949be",
+          "blob_id": "226942451dbb9dfa2d63487ff0337961c5f6ba68"
+        },
+        {
+          "path": "model-00008-of-00016.safetensors",
+          "size": 8388855346,
+          "sha256": "d011f18e13bc7cdea10f9066681797051d4ae28fd4edb96f84abca264e9934eb",
+          "blob_id": "537829488ae9e3c2f77662070f7b320af90e0c3c"
+        },
+        {
+          "path": "model-00009-of-00016.safetensors",
+          "size": 8304949852,
+          "sha256": "921d6e15e08f717dc5be562dd1ceb56a096fd9d3707f1f1d742d15625917daa1",
+          "blob_id": "4647c8756c088ffbc53a5b2923a07dadd4f24a78"
+        },
+        {
+          "path": "model-00010-of-00016.safetensors",
+          "size": 8388824290,
+          "sha256": "31f3417c654d8db5596f811db381b75b732f2e11925d54a8dbb7ec3d25e3a086",
+          "blob_id": "5d0db0ada8cfefe5afee96c306c55448eb5d7737"
+        },
+        {
+          "path": "model-00011-of-00016.safetensors",
+          "size": 8388824274,
+          "sha256": "6aa7575de621c2f74761a0ed4cf1d303395fbaec65f64e7c3dcd695230fedc14",
+          "blob_id": "accf3f33e3d3d0bf0b54bf272aabe3f526a95053"
+        },
+        {
+          "path": "model-00012-of-00016.safetensors",
+          "size": 8388855338,
+          "sha256": "882b853d96ed396346ab65bb4070bf489f7b7e2d3cb60457d6d785fe2e218272",
+          "blob_id": "30728c42c0ce068c537443a965b9b4b6406216d0"
+        },
+        {
+          "path": "model-00013-of-00016.safetensors",
+          "size": 8304949868,
+          "sha256": "75a1cd9a3688a8d2483232e45ebfc01fa7287accd52237c955ae11af3621e028",
+          "blob_id": "1074fae010496391c2b5de39fdc95c9f7ec51bee"
+        },
+        {
+          "path": "model-00014-of-00016.safetensors",
+          "size": 8388824274,
+          "sha256": "269b31e8abf1d73bb0dd158d30a4e0bacfaad1eaa7cbc442541cbce9443023bf",
+          "blob_id": "73a51e330482cc4b83d17b08ae4be248c11eae4c"
+        },
+        {
+          "path": "model-00015-of-00016.safetensors",
+          "size": 8388824274,
+          "sha256": "32b4c1bb53297f5e564bb327b2cd40318c7b672be04d94899c6c0eee37102c9b",
+          "blob_id": "af404b90b9d9a69b45b94cd981be52f501cee458"
+        },
+        {
+          "path": "model-00016-of-00016.safetensors",
+          "size": 3942775166,
+          "sha256": "f0a2571453449e5fe940cba3adb623ffc1d9b3d00a32a5d5f0a979e82bc39eeb",
+          "blob_id": "b87a54f97462c7db9a1bf43b8ccb8010c29f92da"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "size": 101155,
+          "sha256": null,
+          "blob_id": "3b760600ae2c2b734e6bbaddec207b0fff5f293e"
+        },
+        {
+          "path": "modeling_ricursive.py",
+          "size": 23717,
+          "sha256": null,
+          "blob_id": "1a5744d65db9f6c0eca1dfdaf66cc98e144fc8af"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "size": 382,
+          "sha256": null,
+          "blob_id": "1c977d863f319bce3beb3d6e769ecd86fd464788"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 7137177,
+          "sha256": null,
+          "blob_id": "5fe172127988c3709a49d8d2ce20e11bb266cd57"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 4557,
+          "sha256": null,
+          "blob_id": "809dbb62ffc960bd88085c19def7b859dcfde6de"
+        }
+      ]
+    },
+    {
+      "repo_id": "ricursiveAI/Ripple-65B-Preview-DFlash2",
+      "revision": "35609b3be3dd08a822b3ba1257c1ea5dd6f87632",
+      "total_bytes": 8075531963,
+      "files": [
+        {
+          "path": ".gitattributes",
+          "size": 1519,
+          "sha256": null,
+          "blob_id": "a6344aac8c09253b3b630fb776ae94478aa0275b"
+        },
+        {
+          "path": "LICENSE",
+          "size": 11357,
+          "sha256": null,
+          "blob_id": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835"
+        },
+        {
+          "path": "README.md",
+          "size": 4635,
+          "sha256": null,
+          "blob_id": "8fdb30feda98ade6f0887f640acc2b4f7f82c973"
+        },
+        {
+          "path": "config.json",
+          "size": 1348,
+          "sha256": null,
+          "blob_id": "f712f33ad915e7caef0cedafa60f79c0daef7b91"
+        },
+        {
+          "path": "model.safetensors",
+          "size": 8075513104,
+          "sha256": "a55ef8535d1be85480359e1fdb0a9aa43fbcab3fca7aa4374b0eb957b00eb9ba",
+          "blob_id": "9c799fdfa97de77ef674949b73c38639bfb4beb0"
+        }
+      ]
+    }
+  ]
+}
