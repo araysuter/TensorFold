@@ -60,6 +60,8 @@ test "every F32 and BF16 fixture dispatch rejects a no-op after a valid stale pr
         .fns = @splat(@splat(f)),
         .f32_fns = @splat(@splat(f)),
         .reduce = @splat(f),
+        .half = @splat(@splat(@splat(f))),
+        .half_below = 0,
         .clusters = false,
     };
     const weight: cuda.qmmf.Weight = .{ .mode = .fp4, .codes = 0, .scales = 0, .n = 70, .k = 1024, .npad = 128 };
@@ -77,6 +79,7 @@ test "every F32 and BF16 fixture dispatch rejects a no-op after a valid stale pr
         .a = arena.allocator(),
         .s = stream,
         .rng = undefined,
+        .quiet = true,
     };
     for ([_]cuda.qmmf.Out{ .f32, .bf16 }) |format| {
         const width: usize = if (format == .f32) 4 else 2;
@@ -95,6 +98,7 @@ test "every F32 and BF16 fixture dispatch rejects a no-op after a valid stale pr
                 @memset(scratch, 0);
                 const count = rows * weight.n;
                 try rig.close("valid stale prefix", out.ptr, format == .f32, expected[0..count], tolerance[0..count]);
+                try std.testing.expectEqual(Rig.Last{ .most = 0, .at = 0 }, rig.last);
                 Mock.fills = 0;
                 Mock.launches = 0;
                 Mock.fresh = true;
@@ -103,6 +107,7 @@ test "every F32 and BF16 fixture dispatch rejects a no-op after a valid stale pr
                 try std.testing.expect(Mock.launches > 0);
                 try std.testing.expect(Mock.fresh);
                 try std.testing.expectError(error.TestFailed, rig.close("no-op projection", out.ptr, format == .f32, expected[0..count], tolerance[0..count]));
+                try std.testing.expect(rig.last.at == 0 and !std.math.isFinite(rig.last.most));
             }
         }
     }

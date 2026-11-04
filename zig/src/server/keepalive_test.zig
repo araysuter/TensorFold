@@ -1,5 +1,6 @@
 //! A silent stream keeps its client: keepalives on both routes before the first token; a failed one ends the request.
 const std = @import("std");
+const posix = @import("sys").posix; // the layer serve.zig installs its stop handlers with
 const server = @import("server.zig");
 const d = @import("drain_test.zig");
 const testing = std.testing;
@@ -27,6 +28,9 @@ fn leave(a: std.mem.Allocator, io: std.Io, port: u16, body: []const u8, slow: *d
 }
 
 test "a silent engine's stream gets keepalives before its first token (chat: SSE comments, messages: ping events)" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const period = comptime std.meta.fieldInfo(server.Config, .sse_keepalive_s).attrs.defaultValue(f64).?;
     try testing.expect(period > 0 and period <= 15);
     const gpa = testing.allocator;
@@ -69,7 +73,7 @@ test "a silent engine's stream gets keepalives before its first token (chat: SSE
     while (slow.cancelled.load(.acquire) == 0 and waited < 300) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
     try testing.expect(slow.cancelled.load(.acquire) != 0);
 
-    try std.posix.raise(.TERM);
+    try posix.raise(.TERM);
     t.join();
     try testing.expectEqual(@as(u8, 0), x.code);
 }

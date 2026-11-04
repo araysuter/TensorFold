@@ -10,11 +10,15 @@ pub const Map = std.array_hash_map.String(Value);
 /// How a sequence prints: Python lists, tuples, ranges and dict views share one representation.
 pub const Seq = enum { list, tuple, range, items, keys, values };
 
-pub const List = struct { items: []const Value, seq: Seq = .list, range: [3]i64 = .{ 0, 0, 1 } };
+pub const List = @import("sequence.zig").List;
 
-pub const Dict = struct { map: Map };
+pub const Dict = struct {
+    map: Map,
+    request_keys: bool = false,
+    key_provenance: std.StringHashMapUnmanaged(Str) = .empty,
+};
 
-pub const Namespace = struct { map: Map };
+pub const Namespace = struct { map: Map, request_keys: bool = false };
 
 /// Jinja2's Undefined: prints empty, iterates empty, fails with `msg` on any other use.
 pub const Undef = struct { msg: []const u8 };
@@ -26,7 +30,10 @@ pub const Method = struct { self: Value, name: []const u8 };
 
 pub const Func = enum { range, namespace, raise_exception, strftime_now, dict, cycler, joiner, lipsum };
 
-pub const Str = struct { s: []const u8, safe: bool = false };
+pub const Str = @import("provenance.zig").Str;
+pub const Span = @import("provenance.zig").Span;
+pub const Buffer = @import("provenance.zig").Buffer;
+pub const Cursor = @import("provenance.zig").Cursor;
 
 pub const Loop = struct {
     items: []const Value,
@@ -54,7 +61,7 @@ pub const Value = union(enum) {
     func: Func,
     iter: *const Iter,
 
-    pub fn string(s: []const u8) Value {
+    pub fn literal(s: []const u8) Value {
         return .{ .str = .{ .s = s } };
     }
 };
@@ -92,10 +99,6 @@ pub const Rt = struct {
         items[0] = x;
         items[1] = y;
         return rt.list(items, .tuple);
-    }
-
-    pub fn print(rt: *Rt, comptime fmt: []const u8, args: anytype) Error!Value {
-        return Value.string(try std.fmt.allocPrint(rt.a, fmt, args));
     }
 };
 
@@ -137,7 +140,7 @@ pub fn truthy(v: Value) bool {
         .big => true,
         .float => |f| f != 0,
         .str => |s| s.s.len > 0,
-        .list => |l| l.items.len > 0,
+        .list => |l| l.count() > 0,
         .dict => |d| d.map.count() > 0,
         .loop => |l| l.items.len > 0,
         .ns, .macro, .method, .func, .iter => true,
@@ -149,7 +152,7 @@ pub fn len(v: Value) ?usize {
     return switch (v) {
         .missing, .undef => 0,
         .str => |s| uni.count(s.s),
-        .list => |l| l.items.len,
+        .list => |l| l.count(),
         .dict => |d| d.map.count(),
         .loop => |l| l.items.len,
         else => null,
@@ -212,8 +215,8 @@ fn seqEql(a: *const List, b: *const List) bool {
             };
         }
     };
-    if (kind.of(a.seq) != kind.of(b.seq) or a.items.len != b.items.len) return false;
-    for (a.items, b.items) |p, q| if (!eql(p, q)) return false;
+    if (kind.of(a.seq) != kind.of(b.seq) or a.count() != b.count()) return false;
+    for (0..a.count()) |i| if (!eql(a.at(i), b.at(i))) return false;
     return true;
 }
 
@@ -245,8 +248,8 @@ pub fn order(rt: *Rt, op: []const u8, x: Value, y: Value) Error!?std.math.Order 
     };
     if (x == .str and y == .str) return std.mem.order(u8, x.str.s, y.str.s);
     if (x == .list and y == .list and x.list.seq == y.list.seq and (x.list.seq == .list or x.list.seq == .tuple)) {
-        const a = x.list.items;
-        const b = y.list.items;
+        const a = try x.list.values(rt.a);
+        const b = try y.list.values(rt.a);
         for (a[0..@min(a.len, b.len)], b[0..@min(a.len, b.len)]) |p, q| if (!eql(p, q)) return order(rt, op, p, q);
         return std.math.order(a.len, b.len);
     }
@@ -318,6 +321,43 @@ pub fn toStr(rt: *Rt, v: Value) Error![]const u8 {
             return out.items;
         },
     };
+}
+
+/// String conversion preserves exact strings and conservatively marks container representations.
+pub fn asStr(rt: *Rt, x: Value) Error!Str {
+    if (x == .str) return x.str;
+    return Str.derived(rt.a, try toStr(rt, x), hasRequest(x));
+}
+
+pub fn hasRequest(x: Value) bool {
+    return requestAt(x, 0);
+}
+
+fn requestAt(x: Value, depth: usize) bool {
+    if (depth >= 1000) return true;
+    return switch (x) {
+        .str => |s| s.spans.len > 0,
+        .dict => |d| (d.request_keys and for (d.map.keys()) |name| {
+            if (name.len > 0) break true;
+        } else false) or d.key_provenance.count() > 0 or for (d.map.values()) |item| {
+            if (requestAt(item, depth + 1)) break true;
+        } else false,
+        .ns => |n| n.request_keys or for (n.map.values()) |item| {
+            if (requestAt(item, depth + 1)) break true;
+        } else false,
+        .list => |l| for (0..l.count()) |i| {
+            if (requestAt(l.at(i), depth + 1)) break true;
+        } else false,
+        .iter => |it| for (it.items) |item| {
+            if (requestAt(item, depth + 1)) break true;
+        } else false,
+        else => false,
+    };
+}
+
+pub fn key(rt: *Rt, d: *const Dict, text: []const u8) Error!Value {
+    if (d.key_provenance.get(text)) |s| return .{ .str = s };
+    return .{ .str = try Str.derived(rt.a, text, d.request_keys) };
 }
 
 pub fn repr(rt: *Rt, v: Value) Error![]const u8 {
@@ -392,19 +432,19 @@ fn write(rt: *Rt, out: *std.ArrayList(u8), v: Value, quoted: bool) Error!void {
         .list => |l| switch (l.seq) {
             .list => {
                 try out.append(a, '[');
-                try writeItems(rt, out, l.items);
+                try writeItems(rt, out, try l.values(a));
                 try out.append(a, ']');
             },
             .tuple => {
                 try out.append(a, '(');
-                try writeItems(rt, out, l.items);
-                if (l.items.len == 1) try out.append(a, ',');
+                try writeItems(rt, out, try l.values(a));
+                if (l.count() == 1) try out.append(a, ',');
                 try out.append(a, ')');
             },
             .range => if (l.range[2] == 1) try out.print(a, "range({d}, {d})", .{ l.range[0], l.range[1] }) else try out.print(a, "range({d}, {d}, {d})", .{ l.range[0], l.range[1], l.range[2] }),
             .items, .keys, .values => {
                 try out.print(a, "dict_{s}([", .{@tagName(l.seq)});
-                try writeItems(rt, out, l.items);
+                try writeItems(rt, out, try l.values(a));
                 try out.appendSlice(a, "])");
             },
         },

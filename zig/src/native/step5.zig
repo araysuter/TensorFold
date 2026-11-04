@@ -28,7 +28,7 @@ const Host = struct {
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         h.config.deinit(h.gpa);
-        if (h.resident) |*r| r.deinit();
+        s5.residency.drop(h);
         h.metal.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
@@ -36,6 +36,10 @@ const Host = struct {
 };
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = s5.Model.load(gpa, io, o.dir) catch |err| {
@@ -87,7 +91,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.markers = .{ 128000, 128001, 128002, 128003, 128004, 128005 };
         vis = .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = s5.image.decoderProblem };
     }
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = s5.state.prompt_rows, .structures = true, .logprobs = true, .vision = vis });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = s5.state.prompt_rows, .decode_share = o.decode_share, .structures = true, .logprobs = true, .vision = vis });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -100,27 +104,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.metal.room = .{ .ctx = h, .fit = fitCache };
     }
     errdefer if (h.cache) |*store| store.deinit();
-    try holdResident(h);
-    errdefer if (h.resident) |*r| r.deinit();
+    try s5.residency.hold(h);
+    errdefer s5.residency.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
-}
-
-/// Weights, routers, scratches and tower buffers in one residency set for the keepalive, if the 70% limit holds them.
-fn holdResident(h: *Host) !void {
-    var list: std.ArrayList(mtl.Buffer) = .empty;
-    defer list.deinit(h.gpa);
-    const m = h.model;
-    for (m.checkpoint.shards.items) |sh| try list.append(h.gpa, sh.buffer);
-    for (m.weights.layers) |l| if (l.ffn == .moe) try list.append(h.gpa, l.ffn.moe.router);
-    inline for (.{ &h.metal.scratch, &h.metal.prompt }) |sc| {
-        inline for (s5.state.fields) |f| try list.append(h.gpa, @field(sc, f));
-        try list.appendSlice(h.gpa, &sc.route);
-    }
-    if (m.vision) |v| try list.appendSlice(h.gpa, &.{ v.owned, v.scratch, v.patches.buf });
-    h.resident = try Resident.hold(h.gpa, h.io, m.device, m.queue, list.items, "step5");
-    h.warm = if (h.resident) |*r| r.target() else .{ .queue = m.queue };
 }
 
 /// Metal.room's fit: the kept states' budget is what the streams leave, at most the cap; the least valuable go first.

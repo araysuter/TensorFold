@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
-#include "qmm_frag.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace tf_lane_gemv {
 
@@ -19,16 +19,7 @@ struct Part {
 };
 
 // Below sm_90, t * 1 - 128 in one fma: exact for t = 128 + nibble, so every arch gets sub's bits.
-__device__ __forceinline__ uint32_t pairm(uint32_t w, int s, uint32_t mask) {
-    const uint32_t t = ((w >> s) & mask) | 0x43004300u;
-    uint32_t r;
-#if __CUDA_ARCH__ >= 900
-    asm("sub.rn.bf16x2 %0, %1, %2;\n" : "=r"(r) : "r"(t), "r"(0x43004300u));
-#else
-    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x3F803F80u), "r"(0xC300C300u));
-#endif
-    return r;
-}
+using qmm_frag::pairm;
 
 template <int GS, int BN, int STAGES>
 using GemvTile = LaneTile<GS, 16, BN, 1, 4, STAGES>;
@@ -221,20 +212,24 @@ __global__ void __launch_bounds__(128) gemv_kernel(const __nv_bfloat16* __restri
 }
 
 // Each CTA writes one tile/slice partial; the tile's last CTA sums slices in their original order.
-template <int GS, int BN, int STAGES>
+template <int GS, int BN, int STAGES, bool ONE = false>
 __device__ __forceinline__ void gemv_split(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M,
-                                           int K, int ldx, float* __restrict__ work, unsigned* __restrict__ tickets) {
+                                           int K, int ldx, float* __restrict__ work, unsigned* __restrict__ tickets, int tile,
+                                           int slice) {
     constexpr int NT = GemvTile<GS, BN, STAGES>::NT;
     __shared__ unsigned ticket;
     const int tid = threadIdx.x, lane = tid & 31, wn = tid >> 5;
-    const int per = K / GS / P.sk;
-    const int tile = (int)blockIdx.x / P.sk, slice = (int)blockIdx.x % P.sk, g0 = slice * per;
+    const int per = K / GS / P.sk, g0 = slice * per;
     float acc[NT][4];
 #pragma unroll
     for (int j = 0; j < NT; ++j)
 #pragma unroll
         for (int e = 0; e < 4; ++e) acc[j][e] = 0.0f;
     gemv_items<GS, BN, STAGES>(x, xs, P, M, K, ldx, per, [&](int i) { return make_int2(g0 + i, tile * BN); }, acc, [](int) {});
+    if (ONE && P.sk == 1) {  // one slice: its sum is the output, as the last CTA's in-order sum of one partial is
+        gemv_store<BN, NT>(P, M, tile * BN, [&](int j, int h, int, int) { return make_float2(acc[j][2 * h], acc[j][2 * h + 1]); });
+        return;
+    }
     const int row = lane >> 2;
     float* part = work + (static_cast<size_t>(tile) * P.sk + slice) * 16 * BN;
 #pragma unroll
@@ -272,5 +267,80 @@ template __global__ void tf_lane_gemv::gemv_kernel<64, 64, 8>(const __nv_bfloat1
 extern "C" __global__ void __launch_bounds__(128) tf_lane_gemv_split(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs,
                                                                      const __grid_constant__ tf_lane_gemv::Part P, int M, int K, int ldx,
                                                                      float* __restrict__ work, unsigned* __restrict__ tickets) {
-    tf_lane_gemv::gemv_split<64, 64, 4>(x, xs, P, M, K, ldx, work, tickets);
+    tf_lane_gemv::gemv_split<64, 64, 4>(x, xs, P, M, K, ldx, work, tickets, (int)blockIdx.x / P.sk, (int)blockIdx.x % P.sk);
+}
+
+namespace tf_lane_gemv {
+
+constexpr int SEGS = 4;
+
+// One projection of a shared input: its blocks start at `first`, its partials at work_at and its tickets at tick_at.
+struct Seg {
+    Part p;
+    int first, work_at, tick_at;
+};
+
+struct Segs {
+    Seg s[SEGS];
+    int count;
+};
+
+}  // namespace tf_lane_gemv
+
+// Projections of one input in one launch: each block is one projection's tile and K slice, as tf_lane_gemv_split's.
+extern "C" __global__ void __launch_bounds__(128) tf_lane_gemv_seg(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs,
+                                                                   const __grid_constant__ tf_lane_gemv::Segs S, int M, int K, int ldx,
+                                                                   float* __restrict__ work, unsigned* __restrict__ tickets) {
+    tf_lane_gemv::Seg sg = S.s[0];  // in registers: the loads index it every group
+#pragma unroll
+    for (int i = 1; i < tf_lane_gemv::SEGS; ++i)
+        if (i < S.count && (int)blockIdx.x >= S.s[i].first) sg = S.s[i];
+    const int b = (int)blockIdx.x - sg.first;
+    tf_lane_gemv::gemv_split<64, 64, 4, true>(x, xs, sg.p, M, K, ldx, work + static_cast<size_t>(sg.work_at) * 16 * 64,
+                                              tickets + sg.tick_at, b / sg.p.sk, b % sg.p.sk);
+}
+
+namespace tf_lane_gemv {
+struct ManyPart { Part p; int first, blocks; };
+struct ManyParts { ManyPart p[4]; int count; };
+// Same group and slice chains as gemv_kernel, with projection-local persistent CTA indices.
+__device__ __forceinline__ void many_body(const __nv_bfloat16* x, const float* xs, const Part& P,
+                                         int M, int K, int ldx, int block, int blocks) {
+    constexpr int NT = GemvTile<64, 64, 8>::NT;
+    const int KG = K / 64, per = KG / P.sk;
+    const int mine = P.tiles > block ? (P.tiles - 1 - block) / blocks + 1 : 0;
+    auto tile_of_item = [&](int i) { return block + (i / KG) * blocks; };
+    float acc[NT][4], tot[NT][4];
+#pragma unroll
+    for (int j = 0; j < NT; ++j)
+#pragma unroll
+        for (int e = 0; e < 4; ++e) acc[j][e] = tot[j][e] = 0.0f;
+    gemv_items<64, 64, 8>(x, xs, P, M, K, ldx, mine * KG, [&](int i) { return make_int2(i % KG, tile_of_item(i) * 64); }, acc,
+                               [&](int it) {
+                                   const int g = it % KG;
+                                   if ((g + 1) % per != 0) return;
+                                   const bool first = g + 1 == per;
+#pragma unroll
+                                   for (int j = 0; j < NT; ++j)
+#pragma unroll
+                                       for (int e = 0; e < 4; ++e) {
+                                           tot[j][e] = first ? acc[j][e] : tot[j][e] + acc[j][e];
+                                           acc[j][e] = 0.0f;
+                                       }
+                                   if (g != KG - 1) return;
+                                   gemv_store<64, NT>(P, M, tile_of_item(it) * 64, [&](int j, int h, int, int) {
+                                       return make_float2(tot[j][2 * h], tot[j][2 * h + 1]);
+                                   });
+                               });
+}
+}
+// Each member retains its own split and CTA traversal; row tiles never share accumulators.
+extern "C" __global__ __launch_bounds__(128) void tf_lane_gemv_many(
+        const __nv_bfloat16* x, const float* xs, const __grid_constant__ tf_lane_gemv::ManyParts parts,
+        int M, int K, int ldx) {
+    auto member = parts.p[0];
+#pragma unroll
+    for (int i = 1; i < 4; ++i)
+        if (i < parts.count && (int)blockIdx.x >= parts.p[i].first) member = parts.p[i];
+    tf_lane_gemv::many_body(x, xs, member.p, M, K, ldx, (int)blockIdx.x - member.first, member.blocks);
 }

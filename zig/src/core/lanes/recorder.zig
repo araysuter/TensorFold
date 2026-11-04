@@ -238,8 +238,8 @@ pub const Recorded = struct {
 
     pub fn backend(x: *Recorded) be.Backend {
         const v = x.inner.vtable;
-        x.table = .{ .prefill = prefill, .prefill_step = if (v.prefill_step != null) prefillStep else null, .prefill_many = if (v.prefill_many != null) prefillMany else null, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .unspeculate = if (v.unspeculate != null) unspeculate else null, .probabilities = if (v.probabilities != null) probabilities else null, .tree = if (v.tree != null) tree else null, .alternatives = if (v.alternatives != null) alternatives else null, .prepare_features = if (v.prepare_features != null) prepareFeatures else null, .features = features, .first_row = if (v.first_row != null) firstRow else null, .first_masked = if (v.first_masked != null) firstMasked else null, .held = if (v.held != null) held else null, .prompt_rows = v.prompt_rows, .release = release };
-        return .{ .ptr = x, .vtable = &x.table, .first_before_draft = x.inner.first_before_draft };
+        x.table = .{ .prefill = prefill, .prefill_step = if (v.prefill_step != null) prefillStep else null, .cancel_prefill = if (v.cancel_prefill != null) cancelPrefill else null, .prefill_many = if (v.prefill_many != null) prefillMany else null, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .draft_capacity = if (v.draft_capacity != null) draftCapacity else null, .proposal_draft = if (v.proposal_draft != null) plannedDraft else null, .clear_proposals = if (v.clear_proposals != null) clearProposals else null, .unspeculate = if (v.unspeculate != null) unspeculate else null, .probabilities = if (v.probabilities != null) probabilities else null, .tree = if (v.tree != null) tree else null, .alternatives = if (v.alternatives != null) alternatives else null, .prepare_features = if (v.prepare_features != null) prepareFeatures else null, .features = features, .first_row = if (v.first_row != null) firstRow else null, .first_masked = if (v.first_masked != null) firstMasked else null, .score = if (v.score != null) score else null, .held = if (v.held != null) held else null, .prompt_rows = v.prompt_rows, .release = release };
+        return .{ .proposal_head = x.inner.proposal_head, .ptr = x, .round_observer = x.inner.round_observer, .vtable = &x.table, .first_before_draft = x.inner.first_before_draft, .penalties = x.inner.penalties, .chunk_invariant = x.inner.chunk_invariant };
     }
 
     fn of(p: *anyopaque) *Recorded {
@@ -250,11 +250,15 @@ pub const Recorded = struct {
         try x.inner.prefill(s);
         x.recorder.prompt(x.inner, s);
     }
-    fn prefillStep(p: *anyopaque, s: *Stream) anyerror!bool {
+    fn prefillStep(p: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
         const x = of(p);
-        const done = try x.inner.vtable.prefill_step.?(x.inner.ptr, s);
+        const done = try x.inner.vtable.prefill_step.?(x.inner.ptr, s, max_rows);
         if (done) x.recorder.prompt(x.inner, s);
         return done;
+    }
+    fn cancelPrefill(p: *anyopaque, s: *Stream) anyerror!void {
+        const x = of(p);
+        try x.inner.vtable.cancel_prefill.?(x.inner.ptr, s);
     }
     fn prefillMany(p: *anyopaque, ss: []const *Stream) anyerror!bool {
         const x = of(p);
@@ -283,6 +287,18 @@ pub const Recorded = struct {
     }
     fn draft(p: *anyopaque, r: []const be.DraftRequest) anyerror!void {
         return of(p).inner.draft(r);
+    }
+    fn draftCapacity(p: *anyopaque, s: *Stream) u32 {
+        const inner = of(p).inner;
+        return inner.vtable.draft_capacity.?(inner.ptr, s);
+    }
+    fn plannedDraft(p: *anyopaque, r: []const be.DraftRequest) anyerror!void {
+        const inner = of(p).inner;
+        return inner.vtable.proposal_draft.?(inner.ptr, r);
+    }
+    fn clearProposals(p: *anyopaque, s: *Stream) void {
+        const inner = of(p).inner;
+        inner.vtable.clear_proposals.?(inner.ptr, s);
     }
     fn unspeculate(p: *anyopaque, s: *Stream) anyerror!void {
         const i = of(p).inner;
@@ -314,6 +330,10 @@ pub const Recorded = struct {
     fn firstMasked(p: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
         const i = of(p).inner;
         return i.vtable.first_masked.?(i.ptr, s, position, mask);
+    }
+    fn score(p: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 {
+        const i = of(p).inner;
+        return i.vtable.score.?(i.ptr, prompt, labels, logits, mass);
     }
     fn held(p: *anyopaque, s: *Stream, out: []u32) anyerror!void {
         const i = of(p).inner;

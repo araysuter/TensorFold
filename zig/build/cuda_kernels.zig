@@ -1,4 +1,5 @@
 //! CUDA image names and qualification flags.
+const std = @import("std");
 
 /// Each .cu in zig/kernels/cuda (`src`, else `name`) with the flags its Python extension passes in `extra_cuda_cflags`.
 pub const Kernel = struct {
@@ -9,6 +10,31 @@ pub const Kernel = struct {
     min_sm: u32 = 0,
 };
 
+/// One `-Dsm` entry: the SM number and any suffix given with it ("120", "121a").
+pub const Target = struct {
+    number: u32,
+    suffix: []const u8,
+
+    pub fn parse(raw: []const u8) Target {
+        var digits: usize = 0;
+        while (digits < raw.len and std.ascii.isDigit(raw[digits])) : (digits += 1) {}
+        return .{
+            .number = std.fmt.parseInt(u32, raw[0..digits], 10) catch @panic("Invalid CUDA SM target"),
+            .suffix = raw[digits..],
+        };
+    }
+};
+
+/// One SASS profile: an SM number, plain or arch-specific (`sm_<n>a`).
+pub const Profile = struct { number: u32, arch_specific: bool };
+
+/// The one profile `k`'s image holds for `sm` (`sm_<n>a` for arch-specific kernels from 120), null below `min_sm`.
+pub fn profile(k: Kernel, sm: Target) ?Profile {
+    if (sm.number < k.min_sm) return null;
+    const added = k.arch_specific and sm.number >= 120 and sm.suffix.len == 0;
+    return .{ .number = sm.number, .arch_specific = added or std.mem.eql(u8, sm.suffix, "a") };
+}
+
 /// The torch-op replacements' qualification flags (runs/006): no contraction, no flush to zero.
 const torch_ops = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false" };
 
@@ -16,6 +42,10 @@ const torch_ops = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false" };
 const glue = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true" };
 
 pub const kernels = [_]Kernel{
+    .{ .name = "qwen4_projection", .flags = glue },
+    .{ .name = "qwen4_gdn", .flags = glue },
+    .{ .name = "qwen4_hc", .flags = glue },
+    .{ .name = "qwen4_ple", .flags = glue },
     .{ .name = "attn_train", .flags = &.{"-O3"} },
     .{ .name = "qwen27_train", .flags = &.{"-O3"} },
     .{ .name = "gdn_train", .flags = &.{ "-O3", "--fmad=false" } },
@@ -39,6 +69,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "probe", .flags = &.{"-O3"} },
     .{ .name = "qmm_group", .flags = &.{"-O3"} }, // cuda/kernels/qmm.py, tensorfold_qmm_v5
     .{ .name = "qmm_prefill", .flags = &.{"-O3"} },
+    .{ .name = "flashnext_fact", .flags = &.{"-O3"} }, // ours: prompt rows on qmm.cu's factored arithmetic
+    .{ .name = "flashnext_hcf", .flags = glue }, // ours: the hyper-connection read-out's prompt tiles, fn_hc's bits
+    .{ .name = "flashnext_fexp", .flags = &.{"-O3"} }, // ours: prompt pairs' experts on expert_rows' factored arithmetic
+    .{ .name = "w4a8_prefill", .flags = &.{"-O3"} }, // ours: prompt matmuls, int8 activations on MLX affine 4-bit weights
     .{ .name = "experts", .flags = &.{"-O3"} }, // cuda/experts.py, tensorfold_experts_v7
     .{ .name = "experts_prefill", .flags = &.{"-O3"} },
     .{ .name = "experts_pack", .flags = &.{"-O3"} },
@@ -51,7 +85,9 @@ pub const kernels = [_]Kernel{
     .{ .name = "fp8_experts", .flags = &.{"-O3"} }, // fp8/experts.cu's device code, tensorfold_fp8_experts_v6
     .{ .name = "exlr8", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 lane projections, the Metal kernels' order
     .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 dense matrices by row, the Metal order
+    .{ .name = "nvfp4_experts_tile", .flags = &.{"-O3"}, .min_sm = 80 },
     .{ .name = "nvfp4_experts", .flags = &.{"-O3"} }, // nvfp4/experts.cu's device code, the NVFP4 expert kernels
+    .{ .name = "nvfp4_experts32", .flags = &.{"-O3"} }, // ours: GLM's routed experts at block 32 with csf0 scales
     .{ .name = "rank_sum", .flags = &.{"-O3"} }, // ours: the rank-order sum of a reduce-scatter (rank_scatter.zig)
     .{ .name = "lane_gemv", .flags = &.{"-O3"} }, // ours: qmm_group's arithmetic, a column tile's K slices in one CTA
     .{ .name = "sample", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } }, // ours: the Metal engine's keyed draws
@@ -60,9 +96,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "qwen35_draft", .flags = &.{"-O3"} }, // ours: the DFlash2 drafter's glue (draft_ops.metal's rounding)
     .{ .name = "qwen35_keep", .flags = &.{"-O3"} }, // ours: a verified window's kept path applied to its stream's state
     .{ .name = "qwen_vision", .flags = &.{ "-O3", "--fmad=false" } }, // ours: the Qwen3.5 vision tower's glue and attention
+    .{ .name = "gdn_prefill", .flags = &.{ "-O3", "--fmad=false" } }, // ours: a prompt chunk's gated delta rule (v0.6.6's chain)
     .{ .name = "qwen35_kv8", .flags = &.{"-O3"} }, // ours: --kv-cache fp8's e4m3 attention rows for the Qwen3.5 hybrids
-    .{ .name = "nemotron_norms", .flags = glue }, // ours, each with a host reference (glue_ref.zig): Nemotron's glue
-    .{ .name = "nemotron_route", .flags = glue },
+    .{ .name = "qwen35_bf16_rows", .flags = &.{"-O3"} }, // ours: bf16 token rows and small bf16 dense projections (qwen3_5/cuda_bf16_rows.zig)
+    .{ .name = "nemotron_route", .flags = glue }, // ours, each with a host reference (glue_ref.zig): Nemotron's glue
     .{ .name = "nemotron_mamba", .flags = glue },
     .{ .name = "nemotron_attention", .flags = glue },
     .{ .name = "nemotron_keyed", .flags = glue },
@@ -70,9 +107,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "ck_lane", .flags = &.{"-O3"} }, // nvfp4/lane4.cu's A8: FP8 rows times FP8 weights (checkpoint math)
     .{ .name = "ck_experts", .flags = &.{"-O3"}, .arch_specific = true }, // ours: NVFP4 x NVFP4 experts (sm_121a)
     .{ .name = "norms", .flags = &.{"-O3"} }, // ours: RMS norm rows for every family (cuda/norms.zig)
-    .{ .name = "embed_rows", .flags = &.{"-O3"} }, // ours: 4-bit affine and bf16 token rows (cuda/embed_rows.zig)
+    .{ .name = "embed_rows", .flags = &.{"-O3"} }, // ours: MLX affine and bf16 token rows (cuda/embed_rows.zig)
     .{ .name = "lfm2", .flags = glue }, // ours: LFM2's short convolution, QK norm and rotary, gates and label rows
     .{ .name = "vit", .flags = glue }, // ours: vision towers' LayerNorm, Linear epilogues, activations, unshuffle
+    .{ .name = "moss_image", .flags = glue }, // ours: MOSS-Image's modulated norm, q/k rotary, situ, gated add
     .{ .name = "tree_round", .flags = &.{"-O3"} }, // ours: verified tree rounds for every family (cuda/tree_round.zig)
     .{ .name = "act_rows", .flags = &.{"-O3"} }, // ours: SwiGLU, output gates, group sums (cuda/act_rows.zig)
     .{ .name = "gdn_prep", .flags = &.{"-O3"} }, // ours: Gated DeltaNet conv, norms, g and beta (cuda/gdn_prep.zig)
@@ -82,12 +120,17 @@ pub const kernels = [_]Kernel{
     .{ .name = "tree_attention", .flags = &.{"-O3"} }, // ours: committed keys and paths (cuda/tree_attention.zig)
     .{ .name = "block_attention", .flags = &.{"-O3"} }, // ours: a drafter's block over its context (cuda/block_attention.zig)
     .{ .name = "window_attention", .flags = &.{"-O3"} }, // ours: sliding-window attention (cuda/window_attention.zig)
+    .{ .name = "window_rows", .flags = &.{"-O3"} }, // ours: window attention at head dims 256 and 512 (cuda/window_attention.zig)
+    .{ .name = "window_pages", .flags = &.{"-O3"} }, // ours: window_rows.cuh over paged caches (Dory, Gemma 4, Spark)
     .{ .name = "moe_glue", .flags = &.{"-O3"} }, // ours: sigmoid top-k and the weighted combine (cuda/moe_glue.zig)
     .{ .name = "dense_rows", .flags = &.{"-O3"} }, // ours: bf16 rows times weight rows into fp32 (cuda/dense_rows.zig)
     .{ .name = "modelopt_pack", .flags = &.{"-O3"} }, // ours: ModelOpt tensors into the lane, prompt and expert layouts
     .{ .name = "glm_kda", .flags = &.{ "-O3", "--fmad=false" } }, // GLM: the Python family's glm5_next/cuda/kda.cu
     .{ .name = "glm_glue", .flags = &.{"-O3"} }, // ours: the Python family's Triton glue by hand, its PTX op for op
     .{ .name = "glm_ops", .flags = &.{"-O3"} }, // ours: GLM's integer work the Python family did in torch (the DSA token lists)
+    .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
+    .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
+    .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
     .{ .name = "exl3_experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/experts.cu's device code, tensorfold_exl3_experts
@@ -117,3 +160,13 @@ pub const torch_flags = [_][]const u8{
     "--expt-relaxed-constexpr",
     "-std=c++20",
 };
+
+test "profile: arch-specific kernels take sm_<n>a from sm_120 on, others plain, none below min_sm" {
+    const ck: Kernel = .{ .name = "ck", .flags = &.{}, .arch_specific = true };
+    const plain: Kernel = .{ .name = "p", .flags = &.{}, .min_sm = 80 };
+    try std.testing.expectEqual(Profile{ .number = 120, .arch_specific = true }, profile(ck, Target.parse("120")).?);
+    try std.testing.expectEqual(Profile{ .number = 121, .arch_specific = true }, profile(ck, Target.parse("121")).?);
+    try std.testing.expectEqual(Profile{ .number = 86, .arch_specific = false }, profile(ck, Target.parse("86")).?);
+    try std.testing.expectEqual(Profile{ .number = 120, .arch_specific = false }, profile(plain, Target.parse("120")).?);
+    try std.testing.expectEqual(@as(?Profile, null), profile(plain, Target.parse("75")));
+}

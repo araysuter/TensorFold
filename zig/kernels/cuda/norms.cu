@@ -5,6 +5,8 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
+#include "norms_tail.cuh"
 
 namespace tf_norms {
 
@@ -216,23 +218,9 @@ namespace tf_norms {
 constexpr int VNT = 256;
 constexpr int VEC_MOST = 4; // 8,192 wide
 
-__device__ __forceinline__ void unpack8(const uint4& u, float* f) {
-    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float2 t = __bfloat1622float2(h[i]);
-        f[2 * i] = t.x;
-        f[2 * i + 1] = t.y;
-    }
-}
+using tf_common::unpack8;
 
-__device__ __forceinline__ uint4 pack8(const float* f) {
-    uint4 u;
-    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
-    return u;
-}
+using tf_common::pack8;
 
 __device__ __forceinline__ void load8f(const float* p, float* f) {
     const float4 a = reinterpret_cast<const float4*>(p)[0];
@@ -248,17 +236,7 @@ __device__ __forceinline__ void store8f(float* p, const float* f) {
 // 1 / sqrt(sum / width + eps), IEEE division and square root, over a VNT-thread block: warp trees, then the 8 warps'.
 template <bool ONCE = false>
 __device__ __forceinline__ float inv_rms_v(float part, int width, float eps) {
-    __shared__ float warps[VNT / 32];
-    for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-    if ((threadIdx.x & 31) == 0) warps[threadIdx.x >> 5] = part;
-    __syncthreads();
-    // every warp folds the warps' sums in the same tree, so each holds the same total: no broadcast
-    float s = (threadIdx.x & 31) < VNT / 32 ? warps[threadIdx.x & 31] : 0.f;
-    for (int m = 4; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
-    s = __shfl_sync(0xFFFFFFFFu, s, 0);
-    const float r = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
-    if constexpr (!ONCE) __syncthreads(); // `warps` is reused by a second norm in the same block
-    return r;
+    return tf_rms_tail::inv_rms<ONCE>(part, width, eps);
 }
 
 }  // namespace tf_norms
@@ -358,17 +336,7 @@ __device__ __forceinline__ void load8w(const float* p, float* f) { load8f(p, f);
 __device__ __forceinline__ void load8w(const __nv_bfloat16* p, float* f) { unpack8(*reinterpret_cast<const uint4*>(p), f); }
 
 // A thread's 8 stored outputs summed in order, then the group's 8 lanes in a fixed tree (every lane of the warp calls).
-__device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
-    float f[8];
-    unpack8(packed, f);
-    float s = 0.f;
-    if (live)
-#pragma unroll
-        for (int i = 0; i < 8; ++i) s = __fadd_rn(s, f[i]);
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 4));
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 2));
-    return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
-}
+using tf_common::group_sum8;
 
 // h = bf16(x + r) (r null: h = x), y = bf16(rms(h) * w), xs y's 64-value sums; width % 64, 16-byte loads.
 template <typename WT>
@@ -503,3 +471,61 @@ extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_256(const __
                                                                          float* xs, int heads, float eps) {
     gated_rms<32>(y, y_ld, z, z_ld, w, out, xs, heads, eps);
 }
+
+// The bf16 residual's tails (norms_tail.cuh): a norm on the branch before the add, a bf16 scalar on the sum.
+
+// h = bf16(r + bf16(rms(x) wb)) [* sc], y = bf16(rms(h) w), xs y's 64-value sums: each norm rounded once.
+extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_add_rms_rows_bf16h_tail(
+    const __nv_bfloat16* x, const __nv_bfloat16* r, const __nv_bfloat16* wb, const __nv_bfloat16* sc,
+    const __nv_bfloat16* w, __nv_bfloat16* h, __nv_bfloat16* y, float* xs, int width, float eps) {
+    tf_rms_tail::tail<tf_rms_tail::ONCE>(x, r, wb, sc, w, h, y, xs, width, eps);
+}
+
+// The same rows with MLX's bf16 steps: each norm bf16(w * bf16(x * inv)), the sum rounded before the scalar.
+extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_add_rms_rows_bf16h_tail_round(
+    const __nv_bfloat16* x, const __nv_bfloat16* r, const __nv_bfloat16* wb, const __nv_bfloat16* sc,
+    const __nv_bfloat16* w, __nv_bfloat16* h, __nv_bfloat16* y, float* xs, int width, float eps) {
+    tf_rms_tail::tail<tf_rms_tail::MLX>(x, r, wb, sc, w, h, y, xs, width, eps);
+}
+
+// nGPT rows (norms_l2.cuh): L2 norms with eps on the sum, and the normalized lerp residual (Dory).
+#include "norms_l2.cuh"
+
+// y = bf16(l2(s)), s = x, or bf16(x + r) with r (a loop's entry): a block a row, width % 64, at most 8,192.
+extern "C" __global__ void __launch_bounds__(tf_l2::NT) tf_l2_rows(const __nv_bfloat16* x, const __nv_bfloat16* r,
+                                                                   __nv_bfloat16* y, int width, float eps) {
+    tf_l2::l2_rows<tf_l2::SUM>(x, r, y, width, eps);
+}
+
+// h = bf16(l2(a + |alpha scale| (b - a))), a = bf16(l2(res)), b = bf16(l2(out)): dory.py's slerp_norm.
+extern "C" __global__ void __launch_bounds__(tf_l2::NT) tf_slerp_rows(const __nv_bfloat16* res, const __nv_bfloat16* out,
+                                                                      const __nv_bfloat16* alpha, float scale,
+                                                                      __nv_bfloat16* h, int width, float eps) {
+    tf_l2::slerp_rows<tf_l2::A | tf_l2::B>(res, out, alpha, scale, h, width, eps);
+}
+
+// Nemotron's rows in its own order (norms_strided.cuh): a thread's elements strided by the block, sums in order.
+#include "norms_strided.cuh"
+
+// y = bf16((x inv) w), xs its 64-sums, on parts of rows (part p of row r at x + r x_ld + p x_part), to 4,096 wide.
+extern "C" __global__ void __launch_bounds__(256) tf_rms_rows_bf16h_parts(
+    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
+    long long y_ld, long long y_part, float* xs, int width, float eps) {
+    tf_rms_strided::parts<256, 16, false>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
+}
+
+// The same parts with MLX's bf16 steps, y = bf16(w bf16(x inv)), 128 threads a part, to 1,024 wide.
+extern "C" __global__ void __launch_bounds__(128) tf_rms_rows_bf16h_parts_round(
+    const __nv_bfloat16* x, long long x_ld, long long x_part, const __nv_bfloat16* w, long long w_part, __nv_bfloat16* y,
+    long long y_ld, long long y_part, float* xs, int width, float eps) {
+    tf_rms_strided::parts<128, 8, true>(x, x_ld, x_part, w, w_part, y, y_ld, y_part, xs, width, eps);
+}
+
+// h = bf16(x + bf16(routed fma chain + shared sum)) over a row's expert slots ys (fp32 or bf16), then the strided norm.
+extern "C" __global__ void __launch_bounds__(tf_rms_strided::LT) tf_moe_add_rms_rows_bf16h(
+    const __nv_bfloat16* x, const void* ys, int y_f32, const float* wt, const __nv_bfloat16* w, __nv_bfloat16* h,
+    __nv_bfloat16* y, float* xs, float eps, int width, int routed, int slots) {
+    tf_rms_strided::moe_row<false>(x, ys, y_f32, wt, w, h, y, xs, eps, width, routed, slots);
+}
+
+#include "rms_tiles.cuh"

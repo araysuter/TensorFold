@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { EngineCapabilities, EngineLibraryFolder, EngineLibraryModel, EngineLibraryScanOptions, EngineModelLibrarySnapshot } from '../types'
 import { formatName } from './cli'
+import { admitGeometry } from './geometry'
 import { isRepoId } from './paths'
 
 const STATE_LIMIT = 2 * 1024 * 1024
@@ -13,6 +14,7 @@ const INVALID = 'The local model library is invalid. Preserve its settings and r
 const LOCAL_ID = /^local\/[a-f0-9]{64}$/
 const SHA = /^[a-f0-9]{40}$/
 const GIB = 1024 ** 3
+const MEMORY_REASON = 'This checkpoint needs more model memory than the current hardware allows.'
 
 export function isLocalModelId(value: unknown): boolean { return typeof value === 'string' && LOCAL_ID.test(value) }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -27,7 +29,8 @@ class Cancelled extends Error {}
 
 export interface ModelLibraryOptions {
   appHome: string
-  env: NodeJS.ProcessEnv
+  // Live launch environment: HF_HOME/HF_HUB_CACHE overrides move discovery with the saved settings.
+  env: () => NodeJS.ProcessEnv
   capabilities: () => Promise<EngineCapabilities>
   memoryLimitBytes: () => number
   limits?: Partial<typeof DEFAULT_LIMITS>
@@ -95,12 +98,35 @@ export class ModelLibrary {
     return { ...state, scanning: this.running !== null, cancelled: this.cancelled }
   }
 
+  get scanning(): boolean { return this.running !== null }
+
+  // Re-answers the memory question for saved entries after the limit changes, without touching
+  // checkpoint files or re-walking directories. Only the memory verdict and its reason move.
+  async refreshEligibility(limitFor: (modelType: string | null) => number): Promise<EngineModelLibrarySnapshot> {
+    await this.mutate(async (state) => {
+      for (const model of state.models) {
+        if (model.memoryFloorBytes == null) continue
+        const fitsMemory = model.memoryFloorBytes <= limitFor(model.modelType ?? null)
+        if (fitsMemory === model.fitsMemory) continue
+        model.fitsMemory = fitsMemory
+        if (fitsMemory) {
+          if (model.reason === MEMORY_REASON) model.reason = null
+          model.loadable = model.complete && model.compatible
+        } else if (model.reason === null || model.reason === MEMORY_REASON) {
+          model.loadable = false
+          model.reason = MEMORY_REASON
+        }
+      }
+    })
+    return this.snapshot()
+  }
+
   async addFolder(selected: string): Promise<EngineModelLibrarySnapshot> {
     await this.cancel()
     if (typeof selected !== 'string' || !path.isAbsolute(selected) || selected.length > 4096) throw new Error('Choose a local model folder.')
     const directory = await fs.realpath(selected)
     if (!(await fs.lstat(directory)).isDirectory()) throw new Error('Choose a folder, rather than a file.')
-    if (directory === path.parse(directory).root || directory === path.resolve(this.options.env.HOME || os.homedir())) throw new Error('Choose the folder containing your models, rather than your home folder or an entire disk.')
+    if (directory === path.parse(directory).root || directory === path.resolve(this.options.env().HOME || os.homedir())) throw new Error('Choose the folder containing your models, rather than your home folder or an entire disk.')
     await this.mutate(async (state) => {
       if (state.folders.some((folder) => folder.path === directory)) return
       if (state.folders.length >= 16) throw new Error('You can add up to 16 model folders.')
@@ -140,7 +166,7 @@ export class ModelLibrary {
   private async roots(state: State): Promise<Root[]> {
     const roots: Root[] = state.folders.map((folder) => ({ ...folder, source: 'folder' }))
     if (state.includeHuggingFace) {
-      const env = this.options.env
+      const env = this.options.env()
       const candidates = [env.HF_HUB_CACHE, env.HF_HOME ? path.join(env.HF_HOME, 'hub') : null, path.join(env.HOME || os.homedir(), '.cache', 'huggingface', 'hub')]
       for (const candidate of candidates) {
         if (!candidate?.trim()) continue
@@ -230,7 +256,8 @@ export class ModelLibrary {
       model.drafterOnly = !!config.dflash_config
       model.format = formatName(config) ?? 'full precision'
       const formats = caps.families[model.modelType]
-      model.compatible = !!formats && !config.dflash_config && (formats.length === 0 || formats.includes(formatName(config) ?? ''))
+      const geometry = admitGeometry(model.modelType, config)
+      model.compatible = !!formats && !config.dflash_config && geometry.admitted && (formats.length === 0 || formats.includes(formatName(config) ?? ''))
       const weights = names.filter((name) => name.endsWith('.safetensors'))
       if (!weights.length) throw new Error('The checkpoint has no safetensors weights yet.')
       if (names.some((name) => /\.(incomplete|ranges)$/.test(name))) throw new Error('This model is still downloading; finish the download and scan again.')
@@ -257,8 +284,8 @@ export class ModelLibrary {
       model.memoryFloorBytes = bytes + 2 * GIB
       model.fitsMemory = model.memoryFloorBytes <= this.options.memoryLimitBytes()
       fingerprint = `${repo || ''}:${digest(JSON.stringify(config))}:${identities.sort().join('|')}`
-      if (!model.compatible) model.reason = config.dflash_config ? 'This is a drafter checkpoint, not a standalone chat model.' : !formats ? `The bundled engine does not support ${model.modelType}.` : `The bundled engine does not support this ${model.format} checkpoint format.`
-      else if (!model.fitsMemory) model.reason = 'This checkpoint needs more model memory than the current hardware allows.'
+      if (!model.compatible) model.reason = config.dflash_config ? 'This is a drafter checkpoint, not a standalone chat model.' : !formats ? `The bundled engine does not support ${model.modelType}.` : !geometry.admitted ? geometry.reason! : `The bundled engine does not support this ${model.format} checkpoint format.`
+      else if (!model.fitsMemory) model.reason = MEMORY_REASON
       model.loadable = model.complete && model.compatible && model.fitsMemory === true
     } catch (error) {
       if (error instanceof Limit || error instanceof Cancelled) throw error

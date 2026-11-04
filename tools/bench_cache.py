@@ -5,11 +5,14 @@ import json
 import sys
 
 import bench_concurrent as bench
+import bench_timing
 from bench_evidence import token_equal
+from bench_auth import read_api_key, redact
 
 
 FIELDS = ("prompt_tokens", "cached_tokens", "tokens", "cache_state", "complete", "token_sha", "token_sha256",
-          "output_sha256", "ttft_s", "decode_tps", "error", "unmeasured")
+          "output_sha256", "ttft_s", "decode_tps", "error", "unmeasured", "elapsed_s",
+          "chunk_offsets_s", "chunk_gaps_ms")
 
 
 def receipt(run, phase, reference=None):
@@ -23,8 +26,8 @@ def receipt(run, phase, reference=None):
 
 
 def qualify(rows, expected=None, require_cold=False, require_reuse=False):
-    """An assertion needs affirmative usage evidence; unknown cache state cannot satisfy it."""
-    if not rows or any(r.get("error") or not r.get("complete") or not r.get("tokens") for r in rows):
+    """Qualification needs observed output and affirmative evidence for each requested assertion."""
+    if not rows or any(r.get("error") or not r.get("complete") or not r.get("tokens") or not r.get("output_sha256") for r in rows):
         return False
     if any(r.get("equal_first_tokens") is False or r.get("equal_first_output") is False for r in rows):
         return False
@@ -48,8 +51,10 @@ def main(argv=None):
     p.add_argument("--expected-prompt-tokens", type=int)
     p.add_argument("--require-cold", action="store_true", help="require the first request to report zero cached tokens")
     p.add_argument("--require-reuse", action="store_true", help="require repeated requests to report positive cached tokens")
+    p.add_argument("--api-key-env", metavar="NAME", help="read the bearer API key from this environment variable")
     p.add_argument("--output")
     args = p.parse_args(argv)
+    api_key = read_api_key(p, args.api_key_env)
     if min(args.tokens, args.repeats, args.streams) < 1 or args.streams > 512:
         p.error("tokens/repeats/streams must be positive; streams must not exceed 512")
     if args.expected_prompt_tokens is not None and args.expected_prompt_tokens < 1:
@@ -64,16 +69,17 @@ def main(argv=None):
         except (OSError, ValueError):
             p.error("prompt file must contain a nonempty JSON array of unsigned 32-bit token IDs")
     item = {"name": "fixture", "kind": "completion", "prompt": prompt}
-    first = bench.stream(args.base.rstrip("/"), args.model, item, args.tokens, 0, 1234)
+    first = bench.stream(args.base.rstrip("/"), args.model, item, args.tokens, 0, 1234, api_key=api_key)
     rows = [receipt(first, "first")]
     for _ in range(args.repeats):
-        rows.append(receipt(bench.stream(args.base.rstrip("/"), args.model, item, args.tokens, 0, 1234), "repeated", first))
-    runs = bench.together(args.base.rstrip("/"), args.model, [(item, 1234)] * args.streams, args.tokens, 0)
+        rows.append(receipt(bench.stream(args.base.rstrip("/"), args.model, item, args.tokens, 0, 1234, api_key=api_key), "repeated", first))
+    runs = bench.together(args.base.rstrip("/"), args.model, [(item, 1234)] * args.streams, args.tokens, 0, api_key=api_key)
     rows.extend(receipt(r, "concurrent", first) for r in runs)
     report = {"schema_version": 1, "fixture_sha256": hashlib.sha256(json.dumps(prompt).encode()).hexdigest(),
               "requested_reply_tokens": args.tokens, "temperature": 0, "seed": 1234, "rows": rows,
+              "concurrent_timing": bench_timing.workload(runs),
               "qualified": qualify(rows, args.expected_prompt_tokens, args.require_cold, args.require_reuse)}
-    encoded = json.dumps(report, indent=2) + "\n"
+    encoded = json.dumps(redact(report, api_key), indent=2) + "\n"
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(encoded)

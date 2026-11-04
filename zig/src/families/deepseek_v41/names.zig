@@ -14,6 +14,19 @@ pub fn blockPrefix(c: *const Config, layer: u32, buf: []u8) ![]const u8 {
 /// An EXL3 projection of a block, by the forward's name for it.
 pub const Proj = enum { wq_a, wkv, wq_b, wo_a, wo_b, comp_wkv, comp_wgate, ix_wq_b, ix_wk, shared_w1, shared_w2, shared_w3, engram_wkv };
 
+/// A projection of a block in the release's own format, by the forward's name for it.
+pub const ReleaseProj = enum { wq_a, wkv, wq_b, wo_a, wo_b, comp_wkv, comp_wgate, ix_wq_b, ix_wk, shared_w1, shared_w2, shared_w3, engram_wkv, engram_embed };
+
+/// The release's own name for a projection: the block prefix, then the forward's suffix, then ".weight".
+pub fn releaseName(block: []const u8, suffix: []const u8, buf: []u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}.{s}.weight", .{ block, suffix });
+}
+
+/// The release's routed experts' names: `layers.L.ffn.experts.E.wN.weight` and its `.scale`.
+pub fn releaseExpertName(block: []const u8, e: u32, p: ExpertProj, buf: []u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}.ffn.experts.{d}.{t}.weight", .{ block, e, p });
+}
+
 /// A block's EXL3 group: its name under the block prefix, how ranks split it, and its K x N (0: not checked).
 pub const GroupSpec = struct {
     proj: Proj,
@@ -59,6 +72,44 @@ pub fn groupName(spec: GroupSpec, block: []const u8, buf: []u8) ![]const u8 {
     return if (spec.proj == .wo_a) std.fmt.bufPrint(buf, "{s}.{s}.{d}", .{ block, spec.suffix, spec.slice }) else std.fmt.bufPrint(buf, "{s}.{s}", .{ block, spec.suffix });
 }
 
+/// The release's own projections of a block: whole matrices, each with a `.scale` beside it.
+pub const ReleaseSpec = struct {
+    proj: ReleaseProj,
+    suffix: []const u8,
+    k: u32 = 0,
+    n: u32 = 0,
+};
+
+pub const Releases = List(ReleaseSpec, 32);
+
+/// The release's projections of a block, in the forward's order; wo_a is whole and the Engram table is a row.
+pub fn releaseBlocks(c: *const Config, layer: u32, has_shared: bool) !Releases {
+    var r: Releases = .{};
+    const per_group_k = c.heads / c.o_groups * c.head_dim;
+    try r.push(.{ .proj = .wq_a, .suffix = "attn.wq_a", .k = c.hidden, .n = c.q_lora });
+    try r.push(.{ .proj = .wkv, .suffix = "attn.wkv", .k = c.hidden, .n = c.head_dim });
+    try r.push(.{ .proj = .wq_b, .suffix = "attn.wq_b", .k = c.q_lora, .n = c.heads * c.head_dim });
+    try r.push(.{ .proj = .wo_a, .suffix = "attn.wo_a", .k = per_group_k, .n = c.o_lora });
+    try r.push(.{ .proj = .wo_b, .suffix = "attn.wo_b", .k = c.o_groups * c.o_lora, .n = c.hidden });
+    if (c.isBackbone(layer) and c.isKvSource(layer)) {
+        try r.push(.{ .proj = .comp_wkv, .suffix = "attn.compressor.wkv", .k = c.hidden, .n = c.head_dim });
+        if (c.compressRatio(layer) > 1) try r.push(.{ .proj = .comp_wgate, .suffix = "attn.compressor.wgate", .k = c.hidden, .n = c.head_dim });
+        try r.push(.{ .proj = .ix_wk, .suffix = "attn.indexer.wk", .k = c.head_dim, .n = c.index_dim });
+    }
+    if (c.isBackbone(layer) and c.isIndexSource(layer))
+        try r.push(.{ .proj = .ix_wq_b, .suffix = "attn.indexer.wq_b", .k = c.q_lora, .n = c.index_heads * c.index_dim });
+    if (has_shared) {
+        try r.push(.{ .proj = .shared_w1, .suffix = "ffn.shared_experts.w1", .k = c.hidden, .n = c.expert_width });
+        try r.push(.{ .proj = .shared_w2, .suffix = "ffn.shared_experts.w2", .k = c.expert_width, .n = c.hidden });
+        try r.push(.{ .proj = .shared_w3, .suffix = "ffn.shared_experts.w3", .k = c.hidden, .n = c.expert_width });
+    }
+    if (c.isEngram(layer)) {
+        try r.push(.{ .proj = .engram_wkv, .suffix = "engram.wkv" });
+        try r.push(.{ .proj = .engram_embed, .suffix = "engram.embed" });
+    }
+    return r;
+}
+
 /// Routed experts' projections: gate (w1) and up (w3) split by columns, down (w2) by rows.
 pub const ExpertProj = enum {
     w1,
@@ -84,8 +135,10 @@ pub const Store = enum {
     param,
     /// norms: bf16 in the pack (fp32 in the forward), fp32 accepted
     norm,
-    /// fp32 only (sinks, hc_*, router bias)
+    /// fp32 only (sinks, hc_*)
     f32,
+    /// router bias: fp32, or fp16 / bf16 widened exactly to fp32 (some packs store the MTP biases in fp16)
+    bias,
     /// fp16 or bf16, rounded to bf16 once (router gate, indexer weights_proj, Markov heads)
     half,
 
@@ -94,6 +147,7 @@ pub const Store = enum {
             .param => d == .bf16 or d == .f32 or d == .f16,
             .norm => d == .bf16 or d == .f32,
             .f32 => d == .f32,
+            .bias => d == .f32 or d == .f16 or d == .bf16,
             .half => d == .bf16 or d == .f16,
         };
     }
@@ -148,7 +202,7 @@ pub fn blockNatives(c: *const Config, layer: u32) !Natives {
     if (c.isBackbone(layer) and c.isIndexSource(layer)) try n.push(.m("attn.indexer.weights_proj.weight", .half, c.index_heads, c.hidden));
     const ex = c.expertsOf(layer);
     try n.push(.m("ffn.gate.weight", .half, ex.count, c.hidden));
-    try n.push(.v("ffn.gate.bias", .f32, ex.count));
+    try n.push(.v("ffn.gate.bias", .bias, ex.count));
     if (c.isEngram(layer)) {
         try n.push(.m("engram.q_weight", .param, hc, c.hidden));
         try n.push(.m("engram.k_weight", .param, hc, c.hidden));
@@ -178,7 +232,7 @@ pub fn dsparkNatives(c: *const Config) !Natives {
     return n;
 }
 
-/// The optional confidence head: fp32 values [D + r], any shape with that many.
+/// The optional confidence head: [D + r] values in any shape, fp32 or fp16 / bf16 widened exactly to fp32.
 pub const dspark_confidence = "confidence_head.proj.weight";
 pub const dspark_main_proj = "main_proj";
 
@@ -235,4 +289,5 @@ test "natives and the ignore list" {
     try testing.expect(ignored("vision.blocks.3.mlp.w1.weight", Has{}));
     try testing.expect(ignored("layers.9.ffn.gate.bias_vl", Has{}));
     try testing.expect(Store.half.accepts(.f16) and !Store.f32.accepts(.bf16));
+    try testing.expect(Store.bias.accepts(.f16) and Store.bias.accepts(.bf16) and !Store.f32.accepts(.f16));
 }

@@ -14,6 +14,11 @@ prompt cache off (mlx_lm: ``--prompt-cache-size 0``): a cached reply can arrive 
 the reply's usage. A request that fails to connect or errors counts in ``failed``; one whose text came in fewer than
 ``MIN_PIECES`` pieces counts in ``unmeasured``; neither enters the rates. ``--stagger-ms`` spaces the starts (a
 server with a small listen backlog resets simultaneous connections; those resets are reported, not hidden).
+Each request also carries bench_metrics' figures (prefill tok/s, ITL, round gaps; docs/cache-benchmarks.md defines
+them); each rep pools them over its streams, and each cell gives medians ("request" and "pooled").
+Every stream of a default cell sends the same prompt (greedy: and gets the same reply), so a mixture-of-experts
+model routes all of them to the same experts, which can flatter multi-stream rates. ``--prompts FILE`` (for example
+tools/bench_prompts.json) runs one "distinct" cell instead, where request i sends the file's item i (modulo its length).
 Standard library only.
 
   python3 tools/bench_concurrent.py http://127.0.0.1:8080 MODEL --levels 1,2,4,8 --alone --output out.json
@@ -29,6 +34,9 @@ import urllib.request
 
 from bench_evidence import Evidence, token_equal
 from bench_auth import authorize, read_api_key, redact
+from bench_args import validate_temperatures
+import bench_metrics
+import bench_timing
 
 if sys.version_info < (3, 11):
     sys.exit(f"Python 3.11+ is required (this is {sys.version.split()[0]}); "
@@ -51,11 +59,14 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
     except Exception as exc:  # noqa: BLE001 - a failed request is reported, not fatal
         if gate is not None:
             gate.abort()
-        return {"prompt": item["name"], "seed": seed, "sent": None, "first": None, "last": None, "tokens": None,
-                "pieces": [], "ttft_s": None, "decode_tps": None, "token_sha": None, "token_sha256": None,
-                "completed": None,
-                "error": type(exc).__name__, "complete": False, "prompt_tokens": None,
-                "cached_tokens": None, "cache_state": "unverified", "output_sha256": None}
+        return failed_run(item, seed, type(exc).__name__)
+
+
+def failed_run(item: dict, seed: int | None, error: str) -> dict:
+    return {"prompt": item["name"], "seed": seed, "sent": None, "first": None, "last": None, "tokens": None,
+            "pieces": [], "ttft_s": None, "decode_tps": None, "token_sha": None, "token_sha256": None,
+            "completed": None, "error": error, "complete": False, "prompt_tokens": None,
+            "cached_tokens": None, "cache_state": "unverified", "output_sha256": None}
 
 
 def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, seed: int | None, draft: bool,
@@ -121,34 +132,43 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
             out["unmeasured"] = True
     else:
         out["unmeasured"] = True
-    return out
+    return {**out, **bench_timing.request(out), **bench_metrics.request(out)}
 
 
 def together(base: str, model: str, specs: list[tuple[dict, int | None]], tokens: int, temperature: float,
              stagger_ms: float = 0.0, *, api_key: str | None = None) -> list[dict]:
+    if not bench_timing.timestamp(stagger_ms):
+        raise ValueError("stagger_ms must be finite and nonnegative")
+    if not specs:
+        return []
     gate = threading.Barrier(len(specs))
-    out: list[dict | None] = [None] * len(specs)
+    out = [failed_run(item, seed, "worker_incomplete") for item, seed in specs]
 
     def run(i: int) -> None:
-        if stagger_ms:
-            gate.wait(timeout=30)
-            time.sleep(i * stagger_ms / 1e3)
-            out[i] = stream(base, model, specs[i][0], tokens, temperature, specs[i][1], api_key=api_key)
-        else:
-            out[i] = stream(base, model, specs[i][0], tokens, temperature, specs[i][1], gate=gate, api_key=api_key)
+        item, seed = specs[i]
+        try:
+            if stagger_ms:
+                gate.wait(timeout=30)
+                time.sleep(i * stagger_ms / 1e3)
+                out[i] = stream(base, model, item, tokens, temperature, seed, api_key=api_key)
+            else:
+                out[i] = stream(base, model, item, tokens, temperature, seed, gate=gate, api_key=api_key)
+        except Exception as exc:  # noqa: BLE001 - retain failures outside the HTTP request too
+            gate.abort()
+            out[i] = failed_run(item, seed, type(exc).__name__)
 
     threads = [threading.Thread(target=run, args=(i,)) for i in range(len(specs))]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    return [r for r in out if r is not None]
+    return out
 
 
 def aggregates(runs: list[dict]) -> dict:
     done = [r for r in runs if r["decode_tps"] is not None]
     out: dict = {"failed": sum(1 for r in runs if r.get("error")), "unmeasured": sum(1 for r in runs if r.get("unmeasured")),
-                 "aggregate_tps": 0.0}
+                 "aggregate_tps": 0.0, **bench_timing.workload(runs)}
     if not done:
         return out
     first = min(r["first"] for r in done)
@@ -163,6 +183,30 @@ def aggregates(runs: list[dict]) -> dict:
             share += r["tokens"] * sum(c for t, c in r["pieces"] if lo <= t <= hi) / chars
         out["steady_tps"] = share / (hi - lo)
     return out
+
+
+METRICS = ("prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "round_gap_p50_ms", "round_gap_p95_ms",
+           "tokens_per_chunk")
+POOLED = ("aggregate_prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "round_gap_p50_ms", "round_gap_p95_ms",
+          "tokens_per_chunk")
+
+
+def median(values) -> float | None:
+    """The median of the values that are not None, rounded to 3 places; None when there are none."""
+    got = [v for v in values if v is not None]
+    return round(statistics.median(got), 3) if got else None
+
+
+def distinct(path: str) -> list[dict]:
+    """``--prompts``' file: a JSON list of {"name", "kind", "prompt"} items with unique names."""
+    with open(path, encoding="utf-8") as f:
+        items = json.load(f)
+    ok = isinstance(items, list) and len(items) > 0 and all(
+        isinstance(x, dict) and isinstance(x.get("name"), str) and x.get("kind") in ("chat", "completion")
+        and isinstance(x.get("prompt"), str) and len(x["prompt"]) > 0 for x in items)
+    if not ok or len({x["name"] for x in items}) != len(items):
+        raise ValueError("--prompts: expected a JSON list of {name, kind, prompt} items with unique names")
+    return [{"name": x["name"], "kind": x["kind"], "prompt": x["prompt"]} for x in items]
 
 
 def main() -> None:
@@ -180,21 +224,48 @@ def main() -> None:
     p.add_argument("--serial", action="store_true", help="check the alone runs against \"draft\": false")
     p.add_argument("--no-seed", action="store_true", help="sampled requests without a seed (standards; no checks)")
     p.add_argument("--stagger-ms", type=float, default=0.0, help="start request i this many ms after request i - 1")
+    p.add_argument("--prompts", metavar="FILE",
+                   help="one cell where request i sends item i %% len of this JSON list (tools/bench_prompts.json)")
     p.add_argument("--label", default="")
     p.add_argument("--output")
     p.add_argument("--api-key-env", metavar="NAME", help="read the bearer API key from this environment variable")
     args = p.parse_args()
+    if args.tokens < 1:
+        p.error("--tokens must be greater than 0")
+    if args.reps < 1:
+        p.error("--reps must be greater than 0")
+    try:
+        levels = [int(x) for x in args.levels.split(",")]
+    except ValueError:
+        p.error("--levels must be a comma-separated list of positive integers")
+    if any(n < 1 for n in levels):
+        p.error("--levels must be a comma-separated list of positive integers")
+    if not bench_timing.timestamp(args.stagger_ms):
+        p.error("--stagger-ms must be finite and nonnegative")
     api_key = read_api_key(p, args.api_key_env)
+    if not args.mixed:
+        validate_temperatures(p, args.temperatures)
     if args.no_seed:
         args.alone = args.serial = False
-    levels = [int(x) for x in args.levels.split(",")]
     temps = [1.0] if args.mixed else [float(t) for t in args.temperatures.split(",")]
-    cells = [None] if args.mixed else PROMPTS
+    if args.prompts and args.mixed:
+        p.error("--prompts and --mixed are exclusive")
+    pool = PROMPTS
+    if args.prompts:
+        try:
+            pool = distinct(args.prompts)
+        except (OSError, ValueError) as exc:
+            p.error(str(exc))
+    cells = [None] if args.mixed or args.prompts else PROMPTS
     report: dict = {"label": args.label, "tokens": args.tokens, "mixed": args.mixed, "cells": []}
+    if args.prompts:
+        report["prompts"] = [q["name"] for q in pool]
     for temp in temps:
         for item in cells:
             specs: list[tuple[dict, int | None]]
-            if args.mixed or item is None:
+            if args.prompts:
+                specs = [(pool[i % len(pool)], args.seed + i if temp > 0 else args.seed) for i in range(max(levels))]
+            elif args.mixed or item is None:
                 specs = [(PROMPTS[i % 2], args.seed + i // 2) for i in range(max(levels))]
             else:
                 specs = [(item, args.seed + i if temp > 0 else args.seed) for i in range(max(levels))]
@@ -209,7 +280,7 @@ def main() -> None:
                         alone[key] = stream(args.base, args.model, spec[0], args.tokens, temp, spec[1], api_key=api_key)
             if args.serial:
                 for key, ref in alone.items():
-                    serial = stream(args.base, args.model, next(q for q in PROMPTS if q["name"] == key[0]),
+                    serial = stream(args.base, args.model, next(q for q in pool if q["name"] == key[0]),
                                     args.tokens, temp, key[1], draft=False, api_key=api_key)
                     ref["serial_equal"] = token_equal(serial, ref)
                     ref["serial_run"] = serial
@@ -221,10 +292,15 @@ def main() -> None:
                     rep["per_stream_tps"] = [round(r["decode_tps"], 1) for r in runs if r["decode_tps"] is not None]
                     rep["ttft_s"] = [round(r["ttft_s"], 2) if r["ttft_s"] is not None else None for r in runs]
                     rep["errors"] = [r["error"] for r in runs if r.get("error")]
+                    rep["requests"] = [{k: r.get(k) for k in ("prompt_tokens", "ttft_s", "decode_tps", *METRICS)}
+                                       for r in runs]
+                    rep["pooled"] = bench_metrics.pooled(runs)
                     rep["evidence"] = [{k: r.get(k) for k in ("prompt_tokens", "cached_tokens", "tokens",
                                        "cache_state", "complete", "token_sha", "token_sha256", "output_sha256")}
                                        for r in runs]
-                    rep["client_intervals"] = [{"start": r["sent"], "end": r.get("completed")} for r in runs]
+                    rep["client_intervals"] = [{"start": r["sent"], "first": r.get("first"),
+                                                "last": r.get("last"), "end": r.get("completed"),
+                                                **bench_timing.request(r)} for r in runs]
                     if alone:
                         # None: the request or its solo run failed (not an exactness result)
                         rep["equal_alone"] = [token_equal(alone[(r["prompt"], r["seed"])], r) for r in runs]
@@ -235,12 +311,21 @@ def main() -> None:
                             pair = {"concurrent": r, "alone": ref, "serial": ref.get("serial_run", {})}
                             rep["comparisons"].append({k: {f: v.get(f) for f in fields} for k, v in pair.items()})
                     reps.append(rep)
-                cell = {"prompt": "mixed" if args.mixed or item is None else item["name"], "temperature": temp,
+                name = "distinct" if args.prompts else "mixed" if args.mixed or item is None else item["name"]
+                cell = {"prompt": name, "temperature": temp,
                         "streams": n, "failed": sum(r["failed"] for r in reps),
                         "unmeasured": sum(r["unmeasured"] for r in reps),
                         "aggregate_tps": round(statistics.median(r["aggregate_tps"] for r in reps), 1),
                         "per_stream_tps": round(statistics.median([v for r in reps for v in r["per_stream_tps"]] or [0.0]), 1),
                         "ttft_s_max": max((t for r in reps for t in r["ttft_s"] if t is not None), default=None)}
+                # request: medians over every request of every rep; pooled: medians of the reps' pooled figures
+                asked = [q for r in reps for q in r["requests"]]
+                cell["request"] = {k: median(q.get(k) for q in asked) for k in ("ttft_s", "decode_tps", *METRICS)}
+                cell["pooled"] = {k: median(r["pooled"].get(k) for r in reps) for k in POOLED}
+                valid = all(r["timing_valid"] for r in reps)
+                cell["timing_valid"] = valid
+                for key in ("end_to_end_tps", "makespan_s"):
+                    cell[key] = statistics.median(r[key] for r in reps) if valid else None
                 if all("steady_tps" in r for r in reps):
                     cell["steady_tps"] = round(statistics.median(r["steady_tps"] for r in reps), 1)
                 if alone:

@@ -39,11 +39,13 @@ test {
     _ = @import("weights/shard.zig");
     _ = @import("weights/projection.zig");
     _ = @import("weights/checkpoint_test.zig");
+    _ = @import("weights/checkpoint_hf_test.zig");
     _ = @import("weights/real_test.zig");
     _ = view;
     _ = moe;
     _ = sample;
     _ = prefix;
+    _ = hip_lanes;
     _ = radix;
     _ = native_engine;
     _ = pages;
@@ -53,4 +55,6 @@ test {
     @import("std").testing.refAllDecls(hip_lanes.Hip);
     @import("std").testing.refAllDecls(worker.Worker);
     @import("std").testing.refAllDecls(engine.Engine);
+    // the prompt route the lane host actually calls, recorded on the host
+    _ = @import("backend/hip/engine/hip_prompt_test.zig");
 }

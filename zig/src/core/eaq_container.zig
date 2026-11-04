@@ -11,7 +11,6 @@ pub const manifest_name = "eaq_manifest.json";
 pub const marker_name = "EAQ_COMPLETE.json";
 pub const layout = "eaq-container/v0-provisional";
 pub const pack_versions = [_][]const u8{ "eaq.pack/0", "eaq.pack/1" };
-const max_header = 1 << 28;
 
 pub const Format = enum {
     trellis,
@@ -265,7 +264,7 @@ pub fn codebookSha(cb: exl3_format.Codebook, out: *[32]u8) void {
 
 fn shardOf(a: std.mem.Allocator, v: std.json.Value) !Shard {
     const file = str(obj(v, "file")) orelse return error.BadManifest;
-    if (!std.mem.eql(u8, std.fs.path.basename(file), file) or !std.mem.endsWith(u8, file, ".safetensors")) return error.BadManifest;
+    if (!safetensors.index.plainName(file) or !std.mem.endsWith(u8, file, ".safetensors")) return error.BadManifest;
     const bytes = intOf(obj(v, "bytes")) orelse return error.BadManifest;
     var s: Shard = .{ .file = try a.dupe(u8, file), .bytes = bytes, .sha256 = undefined };
     const hex = str(obj(v, "sha256")) orelse return error.BadManifest;
@@ -308,9 +307,8 @@ fn readShard(a: std.mem.Allocator, io: Io, file: Io.File, s: Shard, index: usize
     }
     var prefix: [8]u8 = undefined;
     if (len < 8 or try file.readPositionalAll(io, &prefix, 0) != 8) return badShard(why, s.file);
-    const n = std.mem.readInt(u64, &prefix, .little);
-    if (n > max_header or n > len - 8) return badShard(why, s.file);
-    const json = try a.alloc(u8, @intCast(n));
+    const n = safetensors.headerSize(std.mem.readInt(u64, &prefix, .little), len) catch return badShard(why, s.file);
+    const json = try a.alloc(u8, n);
     if (try file.readPositionalAll(io, json, 8) != json.len) return badShard(why, s.file);
     const header = safetensors.parseHeader(a, json, @intCast(len - 8 - n)) catch return badShard(why, s.file);
     for (header.keys(), header.values()) |name, e| {

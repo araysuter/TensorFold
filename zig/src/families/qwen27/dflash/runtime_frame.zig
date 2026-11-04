@@ -31,8 +31,19 @@ pub const Frame = struct {
     parts: [8]mtl.CommandBuffer = undefined,
     part_count: usize = 0,
     ops: u32 = 0,
+    residency: ?mtl.ResidencySet.Follow = null,
+    profiler: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE: each pass's buffers time its `drafter` class
+    hold: @import("core").gpu_profile.Hold = .{}, // while open, the trace's spans keep this frame's encoder
+    pub fn setResident(f: *Frame, hook: ?mtl.ResidencySet.Follow) void {
+        for (f.pool.items) |buffer| {
+            if (f.residency) |h| h.leave(h.ctx, buffer);
+            if (hook) |h| h.join(h.ctx, buffer);
+        }
+        f.residency = hook;
+    }
     pub fn deinit(f: *Frame) void {
         f.release();
+        f.setResident(null);
         if (f.fence) |fence| mtl.objc.release(fence);
         for (f.pool.items) |buffer| buffer.deinit();
         f.pool.deinit(f.allocator);
@@ -50,6 +61,7 @@ pub const Frame = struct {
         f.completed = false;
         f.part_count = 0;
         f.ops = 0;
+        f.hold.take(f.profiler); // a span's own buffer would overtake this frame's pending ops
         return f.epoch;
     }
     /// Commits the work so far and opens the next buffer behind a fence, so the GPU starts early; between ops only.
@@ -76,12 +88,18 @@ pub const Frame = struct {
             if (failed(cb)) return error.DraftGpuFailure;
         }
         if (failed(f.cb)) return error.DraftGpuFailure;
+        if (f.hold.trace) |t| {
+            var seconds = f.cb.gpuSeconds();
+            for (f.parts[0..f.part_count]) |cb| seconds += cb.gpuSeconds();
+            t.record(.drafter, seconds);
+        }
     }
     pub fn release(f: *Frame) void {
         if (f.active and !f.completed) {
             f.encoder.end();
             for (f.parts[0..f.part_count]) |cb| cb.wait(); // committed parts still use the pool
         }
+        f.hold.release();
         f.active = false;
         f.external = null;
     }
@@ -99,16 +117,21 @@ pub const Frame = struct {
     pub fn alloc(f: *Frame, rows: u32, width: u32, dtype: @import("../checkpoint.zig").DType) !op.View {
         if (!f.active or f.completed or rows == 0 or width == 0) return error.DraftFrameNotActive;
         const bytes = try std.math.mul(usize, try std.math.mul(usize, rows, width), dtype.size());
+        // Each slot keeps less than 64 KiB of spare scratch as context scores grow across rounds.
+        const reserved = (try std.math.add(usize, bytes, 65535)) & ~@as(usize, 65535);
         if (f.cursor == f.pool.items.len) {
-            const buffer = try f.device.buffer(bytes, options);
+            const buffer = try f.device.buffer(reserved, options);
             f.pool.append(f.allocator, buffer) catch |err| {
                 buffer.deinit();
                 return err;
             };
+            if (f.residency) |h| h.join(h.ctx, buffer);
         } else if (f.pool.items[f.cursor].length() < bytes) {
-            const buffer = try f.device.buffer(bytes, options);
+            const buffer = try f.device.buffer(reserved, options);
+            if (f.residency) |h| h.leave(h.ctx, f.pool.items[f.cursor]);
             f.pool.items[f.cursor].deinit();
             f.pool.items[f.cursor] = buffer;
+            if (f.residency) |h| h.join(h.ctx, buffer);
         }
         const buffer = f.pool.items[f.cursor];
         f.cursor += 1;

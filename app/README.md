@@ -4,6 +4,9 @@ An agentic AI coding app for the Mac, with the TensorFold engine built in. It al
 any OpenAI‑compatible LLM endpoint, local or cloud. The look comes from the TensorFold brand:
 graphite and navy surfaces, an electric-blue primary and the fold gradient.
 
+The current desktop release is [beta 9](https://github.com/ashhart/TensorFold/releases/tag/v1.0.0-beta.9).
+It launches the bundled native Zig engine directly.
+
 It reads, edits, and runs your code through a tool‑use loop, with streaming responses,
 live diffs, and per‑action approval.
 
@@ -50,6 +53,22 @@ Electron/node-pty runtime pieces by itself.
 
 Then open **Settings → Providers**, paste an API key (or point at a local endpoint), pick a model
 in the composer, choose a workspace folder, and start a task.
+
+### Optional Parallel web research
+
+Ask the built-in agent to “Use Parallel to search the web” or “Use Parallel to read this URL.”
+The `web_search` and `web_fetch` tools accept `provider: "parallel"` for
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp): general web results
+and readable page excerpts, with no account or API key. Anonymous search uses Fast mode and
+has service rate limits. Queries and requested URLs go to Parallel when this provider is selected.
+
+Omitting `provider` keeps Google News RSS search and direct page fetching. Explicit
+`provider: "google_news"` for search and `provider: "direct"` for fetching select those paths.
+There is no automatic provider fallback after an error. Existing web-tool permissions and
+local-only conversation restrictions apply. In the built-in agent loop, Parallel calls share
+an opaque conversation ID across search, fetch and follow-up turns; a new chat gets a new ID. MCP requests time out
+after 20 seconds and stop when the owning run is cancelled. Fetches return excerpts rather
+than a complete page; `max_chars` still caps the displayed text.
 
 ### Browser demo mode
 
@@ -173,7 +192,8 @@ npm run dist:mac     # Developer ID signed + notarized dmg + zip release artifac
 ```
 
 The pack scripts first run `scripts/fetch-engine.mjs`, which stages the TensorFold engine pinned in
-`build/engine.json` (1.0.12, macos-arm64) into `build/engine/`. It takes the archive from
+`build/engine.json` into `build/engine/`. That manifest pins the engine version independently of the app version.
+It takes the archive from
 `TENSORFOLD_ENGINE_ARCHIVE` when set, otherwise from the pinned release URL (cached in
 `build/.engine-cache/` after the first download). Anything whose sha256 or `SHA256SUMS` does not match
 is refused. The app ships it at `Contents/Resources/engine/{bin,lib}`;

@@ -122,9 +122,23 @@ pub fn Index(comptime Extra: type) type {
             return x.by_key.get(key);
         }
 
+        pub fn has(x: *const Self, id: u32) bool {
+            return id < x.entries.items.len;
+        }
+
+        pub fn holds(x: *const Self, id: u32, pos: u64, key: Digest) bool {
+            if (!x.has(id)) return false;
+            const e = &x.entries.items[id];
+            return e.live and e.pos == pos and std.mem.eql(u8, &e.key, &key);
+        }
+
         fn newNode(x: *Self, digest: Digest, parent: u32, depth: u32) !u32 {
             try x.by_digest.ensureUnusedCapacity(x.gpa, 1);
-            if (x.free_nodes.items.len == 0) try x.nodes.ensureUnusedCapacity(x.gpa, 1);
+            if (x.free_nodes.items.len == 0) {
+                try x.nodes.ensureUnusedCapacity(x.gpa, 1);
+                // Rollback must be able to return every node slot without allocating.
+                try x.free_nodes.ensureTotalCapacity(x.gpa, x.nodes.items.len + 1);
+            }
             const id: u32 = if (x.free_nodes.pop()) |i| i else blk: {
                 x.nodes.appendAssumeCapacity(undefined);
                 break :blk @intCast(x.nodes.items.len - 1);
@@ -191,7 +205,11 @@ pub fn Index(comptime Extra: type) type {
             const tail = try x.gpa.dupe(i32, tail_ids);
             errdefer x.gpa.free(tail);
             try x.by_key.ensureUnusedCapacity(x.gpa, 1);
-            if (x.free_entries.items.len == 0) try x.entries.ensureUnusedCapacity(x.gpa, 1);
+            if (x.free_entries.items.len == 0) {
+                try x.entries.ensureUnusedCapacity(x.gpa, 1);
+                // Entry removal also runs while RAM publication is rolling back.
+                try x.free_entries.ensureTotalCapacity(x.gpa, x.entries.items.len + 1);
+            }
             const id: u32 = if (x.free_entries.pop()) |i| i else blk: {
                 x.entries.appendAssumeCapacity(undefined);
                 break :blk @intCast(x.entries.items.len - 1);
@@ -263,7 +281,7 @@ pub fn Index(comptime Extra: type) type {
             _ = x.by_key.remove(e.key);
             x.gpa.free(e.tail);
             e.live = false;
-            x.free_entries.append(x.gpa, id) catch {};
+            x.free_entries.appendAssumeCapacity(id);
             x.addPath(n, -1, 0);
             x.prune(n);
         }
@@ -283,7 +301,7 @@ pub fn Index(comptime Extra: type) type {
                     if (nd.next_sib != none) x.nodes.items[nd.next_sib].prev_sib = nd.prev_sib;
                 }
                 if (x.by_digest.remove(nd.digest)) x.dropped();
-                x.free_nodes.append(x.gpa, m) catch {};
+                x.free_nodes.appendAssumeCapacity(m);
                 m = nd.parent;
             }
         }

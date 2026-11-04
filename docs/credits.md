@@ -142,6 +142,11 @@ contributions are in it.
   [#165](https://github.com/ashhart/TensorFold/pull/165)
   ([capacity.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/cuda/capacity.py),
   `zig/src/native/cuda_memory.zig`).
+- @fkiene's submission to Layr Labs' cuda.fast Qwen3.8-27B challenge
+  ([Layr-Labs/cudafast-qwen38-27b-tf-engine `d7c540f`](https://github.com/Layr-Labs/cudafast-qwen38-27b-tf-engine/commit/d7c540f),
+  a change to the TensorFold engine vendored there, Apache-2.0) deferred a kept chain's DeltaNet replay into the next
+  slot scan. The Qwen3.5 family's pending kept rows carry its code: the replay and write-back in
+  `zig/kernels/cuda/qwen35_slots.cuh`, and `Cache.flush` and `fold` in `zig/src/families/qwen3_5/cuda_cache.zig`.
 
 ## EXL3
 
@@ -228,3 +233,7 @@ credited here.
   ([#120](https://github.com/ashhart/TensorFold/pull/120)).
 
 - @tpischke requested fresh per-request sampling keys and reproducible done-line seeds in [#1026](https://github.com/ashhart/TensorFold/issues/1026).
+
+## Fluid Subgraph Residency
+
+TensorFold's exact residency implementation follows published techniques: EdgeMoE's storage-backed weights and memory index, MoE-Infinity and Fiddler's expert locality/popularity caching and prefetch, and Fate's cross-layer gate prefetch. These are re-implementations of proven techniques, with no novelty claim. The frozen TensorFold Python engine provides the implementation ancestry for native expert slots and PLE row streaming. Slotstream is an outside comparison for published SSD streaming memory/speed trade-offs, not the design or code source. See [the exact residency design](design/fluid-subgraph-residency.md) for scope and qualification.

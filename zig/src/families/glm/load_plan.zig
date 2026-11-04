@@ -8,6 +8,9 @@ const affine = @import("affine.zig");
 const st = @import("state.zig");
 const prompt_mod = @import("prompt.zig");
 const ep_mod = @import("ep.zig");
+pub const fit = @import("load_fit.zig");
+pub const fit_reading = @import("fit_reading.zig");
+pub const fit_candidates = @import("fit_candidates.zig");
 
 /// The checkpoint's identity for a peer: its config and weight index, hashed.
 pub fn modelHash(gpa: std.mem.Allocator, dir: []const u8, config: []const u8) !u64 {
@@ -26,6 +29,12 @@ pub fn planBytes(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c:
     const plan = try wts.load(gpa, device, dir, c, 16, true);
     defer gpa.destroy(plan);
     defer plan.deinit();
+    var buf: [256]u8 = undefined;
+    const widths = wts.tally(plan, c).summary(&buf);
+    const gb = @as(f64, @floatFromInt(plan.bytes)) / 1e9;
+    const mtp = if (plan.mtp != null) " and the MTP layer" else "";
+    std.debug.print("glm plan: {d} of {d} layers{s}, {d:.2} GB in buffers, " ++
+        "every tensor's name, dtype and shape checked; {s}\n", .{ c.run, c.layers, mtp, gb, widths });
     return plan.bytes;
 }
 
@@ -170,4 +179,10 @@ test "the load limit: 70% of RAM, or GLM_LOAD_LIMIT_GB up to the GPU's working s
     try std.testing.expect(most.bytes == ws and most.capped and std.mem.eql(u8, "GLM_LOAD_LIMIT_GB", most.source()));
     for ([_][]const u8{ "abc", "0", "-5", "nan", "inf", "1e400", "12GB" }) |bad| try std.testing.expectError(error.BadLoadLimit, limitFor(ram, ws, bad));
     try std.testing.expectEqual(@as(usize, 0), (try limitFor(0, ws, "100")).bytes); // RAM unknown: nothing loads
+}
+
+test {
+    _ = fit;
+    _ = fit_reading;
+    _ = fit_candidates;
 }

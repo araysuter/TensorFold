@@ -220,10 +220,8 @@ pub fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
 }
 
 pub fn tmpPath(a: std.mem.Allocator, tmp: std.testing.TmpDir, comptime name: []const u8) ![]u8 {
-    // std.testing.tmpDir parents the dir at <cwd>/.zig-cache/tmp
-    const cwd = try std.process.currentPathAlloc(io, a);
-    defer a.free(cwd);
-    return std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}/{s}", .{ cwd, tmp.sub_path, name });
+    // std.testing.tmpDir puts the dir under <cwd>/.zig-cache/tmp: a relative path is the same length in every checkout.
+    return std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
 }
 
 fn tensorBytes(file: *st.File, name: []const u8) []const u8 {
@@ -530,6 +528,9 @@ test {
 }
 
 test "a pack never reads a tensor at a width the config leaves half-declared, though its shapes would fit" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -544,6 +545,9 @@ test "a pack never reads a tensor at a width the config leaves half-declared, th
 }
 
 test "a directly read tensor (expert, embedding, n-gram table) whose shapes contradict its declared width is refused" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();

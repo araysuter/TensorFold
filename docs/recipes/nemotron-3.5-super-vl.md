@@ -25,6 +25,10 @@ The weights take 70.8 GiB of the GB10's memory (73.2 GiB with the image tower an
 16,384-token window the server admits 8 streams at 0.35 GiB each and keeps a prompt cache of about 8 to 10 GiB, and
 about 24 GB of the GB10's memory stays available. Leave the other ranks' variables below unset.
 
+A [community recipe](https://github.com/plotarmordev/Nemotron-3.5-Super-VL-Single-DGX-Spark-TensorFold/tree/72ef12b05b0b3d839ff973ff624e8410859dfb8c)
+from @plotarmordev sets this up on stock v1.1.3: it downloads the release, checks it and the checkpoint against pinned
+sha256 sums, and has start and stop scripts and smoke and benchmark clients.
+
 The MTP draft head can use the embedded draft vocabulary's FP8 output rows or the already-resident full output head.
 A stream drafts on the subset while the last 16 tokens of its context, its prompt's tail at first, are all draft ids,
 and on the full head otherwise; other streams do not change its choice. Each head has its own captured graphs and
@@ -36,6 +40,9 @@ drafting. The same controls apply in lone and shared rounds, including resumes a
 Positive MTP caps leave copied continuations and Recall on their existing row limits.
 
 ## Run on two GB10s
+
+Use NCCL 2.30.7 or newer, the tested minimum for this setup. The runtime refuses versions below 2.30.0;
+2.28.9 can deadlock during startup window-cost timing (#1060).
 
 Rank 0 runs the whole model and serves; rank 1 holds only its share of every MoE layer's experts (the MTP layer's
 too) and computes it for rank 0's jobs. The ranks meet over NCCL, which the engine opens at run time from the system

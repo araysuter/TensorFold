@@ -5,8 +5,8 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 
-#include "glue_math.cuh"
-#include "qmm_frag.cuh"
+#include "common/glue_math.cuh"
+#include "common/qmm_frag.cuh"
 
 using namespace tf_glue;
 
@@ -49,16 +49,7 @@ __device__ __forceinline__ void group_dot(float (&p)[4], const uint32_t (&a)[2][
 }
 
 // A block's fixed-order sum: each warp's butterfly, then the warps' sums in warp order.
-__device__ __forceinline__ float block_sum(float v, float* scratch) {
-    v = warp_sum(v);
-    const int warps = blockDim.x >> 5;
-    if ((threadIdx.x & 31) == 0) scratch[threadIdx.x >> 5] = v;
-    __syncthreads();
-    float total = 0.0f;
-    for (int w = 0; w < warps; ++w) total = __fadd_rn(total, scratch[w]);
-    __syncthreads();
-    return total;
-}
+using tf_common::block_sum_serial;
 
 }  // namespace fn_hc
 
@@ -120,6 +111,84 @@ extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_slices(const _
                                                                          const float* BR, const __nv_bfloat16* INJ,
                                                                          long long RS, int D, int S, int WORLD) {
     hc_writeback<4>(H, HOUT, PSS, BR, INJ, nullptr, nullptr, RS, D, S, 0, 1, WORLD);
+}
+
+// hc_writeback<MODE> then fn_hc_normalize in one block a row, slices summed and added in their order: the same bits.
+template <int MODE, int NC, int S>
+__device__ __forceinline__ void hc_writeback_norm(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* __restrict__ PSS,
+                                                  const float* __restrict__ BR, const __nv_bfloat16* __restrict__ INJ,
+                                                  const float* __restrict__ Y, const float* __restrict__ WTS,
+                                                  const float* __restrict__ SCALE, __nv_bfloat16* __restrict__ NORM,
+                                                  long long RS, float eps, int TOPK, int SLOTS, int WORLD) {
+    constexpr int D = NC * 256;
+    __shared__ float red[NC][8][S];
+    __shared__ float rinv[S];
+    const int r = blockIdx.x, warp = threadIdx.x >> 5;
+    float hv[NC][S];
+#pragma unroll
+    for (int c = 0; c < NC; ++c) {
+        const int d = c * 256 + threadIdx.x;
+        float branch = 0.0f;
+        if constexpr (MODE == 4) {
+            float acc = BR[static_cast<long long>(r) * D + d];
+            for (int k = 1; k < WORLD; ++k) acc = __fadd_rn(acc, BR[k * RS + static_cast<long long>(r) * D + d]);
+            branch = rbf(acc);
+        } else if constexpr (MODE == 2) {
+            float acc = 0.0f;
+            for (int k = 0; k <= TOPK; ++k) {
+                const long long at = static_cast<long long>(r) * SLOTS + k;
+                acc = __fmaf_rn(Y[at * D + d], WTS[at], acc);
+            }
+            branch = rbf(acc);
+        }
+#pragma unroll
+        for (int s = 0; s < S; ++s) {
+            const long long at = static_cast<long long>(r) * S * D + static_cast<long long>(s) * D + d;
+            float v = bf(H[at]);
+            if constexpr (MODE != 0) {
+                v = rbf(__fmaf_rn(branch, bf(INJ[r * S + s]), v));
+                HOUT[at] = __float2bfloat16_rn(v);
+            }
+            hv[c][s] = v;
+            const float ss = warp_sum(__fmul_rn(v, v));
+            if ((threadIdx.x & 31) == 0) red[c][warp][s] = ss;
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x < S) {
+        float all = 0.0f;
+        for (int c = 0; c < NC; ++c) {
+            float total = 0.0f;
+            for (int w = 0; w < 8; ++w) total = __fadd_rn(total, red[c][w][threadIdx.x]);
+            PSS[(static_cast<long long>(r) * NC + c) * S + threadIdx.x] = total;
+            all = __fadd_rn(all, total);
+        }
+        rinv[threadIdx.x] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(all, static_cast<float>(D)), eps)));
+    }
+    __syncthreads();
+#pragma unroll
+    for (int c = 0; c < NC; ++c)
+#pragma unroll
+        for (int s = 0; s < S; ++s) {
+            const int col = s * D + c * 256 + threadIdx.x;
+            NORM[static_cast<long long>(r) * S * D + col] =
+                __float2bfloat16_rn(__fmul_rn(__fmul_rn(hv[c][s], rinv[s]), SCALE[col]));
+        }
+}
+
+// Flash Next's shape: 2560 columns (10 slices), 4 streams.
+extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm0(const __nv_bfloat16* H, float* PSS, const float* SCALE, __nv_bfloat16* NORM, float eps) {
+    hc_writeback_norm<0, 10, 4>(H, nullptr, PSS, nullptr, nullptr, nullptr, nullptr, SCALE, NORM, 0, eps, 0, 1, 1);
+}
+
+extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm_moe(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS, const __nv_bfloat16* INJ,
+    const float* Y, const float* WTS, const float* SCALE, __nv_bfloat16* NORM, float eps, int TOPK, int SLOTS) {
+    hc_writeback_norm<2, 10, 4>(H, HOUT, PSS, nullptr, INJ, Y, WTS, SCALE, NORM, 0, eps, TOPK, SLOTS, 1);
+}
+
+extern "C" __global__ void __launch_bounds__(256) fn_hc_writeback_norm_slices(const __nv_bfloat16* H, __nv_bfloat16* HOUT, float* PSS, const float* BR,
+    const __nv_bfloat16* INJ, long long RS, const float* SCALE, __nv_bfloat16* NORM, float eps, int WORLD) {
+    hc_writeback_norm<4, 10, 4>(H, HOUT, PSS, BR, INJ, nullptr, nullptr, SCALE, NORM, RS, eps, 0, 1, WORLD);
 }
 
 // qmm._qmm_hcdown, block (16 rows, 64 columns, K slice): the slice's normed rows times the down rows, fp32 to PART.
@@ -237,6 +306,45 @@ extern "C" __global__ void __launch_bounds__(1024) fn_hc_reduce_act(const float*
     }
 }
 
+// fn_hc_norm's 1 / rms of each row's streams [M, SS], a thread each: the column blocks' sums in order.
+extern "C" __global__ void fn_hc_rinv(const float* __restrict__ PSS, float* __restrict__ RINV, int M, float eps, int D,
+                                      int NC, int SS) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x, r = i / SS, st = i % SS;
+    if (r >= M) return;
+    float total = 0.0f;
+    for (int c = 0; c < NC; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * NC + c) * SS + st]);
+    RINV[i] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+}
+
+// fn_hc_mix with each normed value recomputed from the streams as fn_hc_norm rounds it (no normed rows read).
+extern "C" __global__ void __launch_bounds__(256) fn_hc_mix_h(const __nv_bfloat16* __restrict__ UP, const __nv_bfloat16* __restrict__ H,
+                                                              const float* __restrict__ RINV, const float* __restrict__ SCALE,
+                                                              __nv_bfloat16* __restrict__ MIXED, float* __restrict__ XSM,
+                                                              int D, int SS) {
+    __shared__ float ms[256];
+    const int r = blockIdx.x, d = blockIdx.y * 256 + threadIdx.x;
+    const long long row = static_cast<long long>(r) * SS * D;
+    float m = 0.0f;
+    if (d < D) {
+        float total = 0.0f;
+        for (int s = 0; s < SS; ++s) {
+            const long long at = row + static_cast<long long>(s) * D + d;
+            const float nv = rbf(__fmul_rn(__fmul_rn(bf(H[at]), RINV[r * SS + s]), SCALE[s * D + d]));
+            total = __fadd_rn(total, rbf(__fmul_rn(bsig(bf(UP[at])), nv)));
+        }
+        m = rbf(__fdiv_rn(total, static_cast<float>(SS)));
+        MIXED[static_cast<long long>(r) * D + d] = __float2bfloat16_rn(m);
+    }
+    ms[threadIdx.x] = m;
+    __syncthreads();
+    const int g = threadIdx.x;
+    if (g < 8 && blockIdx.y * 256 + g * 32 < D) {
+        float sum = 0.0f;
+        for (int k = 0; k < 32; ++k) sum = __fadd_rn(sum, ms[g * 32 + k]);
+        XSM[static_cast<long long>(r) * (D / 32) + blockIdx.y * 8 + g] = sum;
+    }
+}
+
 // qmm._qmm_upmix, block (16 rows, 32 dims), two warps a stream (SS 4): the up rows, then the streams mixed in order.
 extern "C" __global__ void __launch_bounds__(256) fn_hc_upmix(const __nv_bfloat16* __restrict__ X, const float* __restrict__ XS,
                                                               const uint4* __restrict__ W, const __nv_bfloat16* __restrict__ S,
@@ -321,8 +429,8 @@ extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat1
             kss = __fmaf_rn(kv, kv, kss);
             qss = __fmaf_rn(hv, hv, qss);
         }
-        kss = block_sum(kss, scratch);
-        qss = block_sum(qss, scratch);
+        kss = block_sum_serial(kss, scratch);
+        qss = block_sum_serial(qss, scratch);
         const float krinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(kss, fd), eps)));
         const float qrinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(qss, fd), eps)));
         float dot = 0.0f;
@@ -331,7 +439,7 @@ extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat1
             const float qn = rbf(__fmul_rn(__fmul_rn(bf(H[row + d]), qrinv), NQ[s * D + d]));
             dot = __fadd_rn(dot, rbf(__fmul_rn(kn, qn)));
         }
-        dot = block_sum(dot, scratch);
+        dot = block_sum_serial(dot, scratch);
         float gate = rbf(__fdiv_rn(dot, __fsqrt_rn(fd)));
         const float mag = __fsqrt_rn(fmaxf(fabsf(gate), 1e-6f));
         gate = rbf(gate > 0.0f ? mag : (gate < 0.0f ? -mag : 0.0f));
@@ -342,7 +450,7 @@ extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat1
             GATED[row + d] = __float2bfloat16_rn(gv);
             gss = __fmaf_rn(gv, gv, gss);
         }
-        gss = block_sum(gss, scratch);
+        gss = block_sum_serial(gss, scratch);
         if (threadIdx.x == 0) PSS[static_cast<long long>(r) * S + s] = gss;
     }
 }
@@ -393,45 +501,7 @@ extern "C" __global__ void fn_add_streams(const __nv_bfloat16* __restrict__ E, c
     }
 }
 
-// Dense HC uses the same stored stream sums and FP32 gamma before one BF16 normalization rounding.
-extern "C" __global__ void fn_hc_normalize(const __nv_bfloat16* H, const float* PSS, const float* SCALE,
-                                            __nv_bfloat16* OUT, float eps, int D, int SS) {
-    __shared__ float rinv;
-    const int r = blockIdx.x, stream = blockIdx.y, nc = D / 256;
-    if (threadIdx.x == 0) {
-        float total = 0.0f;
-        for (int c = 0; c < nc; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * nc + c) * SS + stream]);
-        rinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
-    }
-    __syncthreads();
-    for (int d = threadIdx.x; d < D; d += blockDim.x) {
-        const int col = stream * D + d;
-        const long long at = static_cast<long long>(r) * SS * D + col;
-        OUT[at] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(bf(H[at]), rinv), SCALE[col]));
-    }
-}
-
-// Dense up-projection values are already BF16: sigmoid, product and stream mean keep their original rounding seams.
-extern "C" __global__ void fn_hc_dense_mix(const __nv_bfloat16* UP, const __nv_bfloat16* NORMED,
-                                            __nv_bfloat16* MIXED, float* XSM, int D, int SS) {
-    __shared__ float row[32];
-    const int r = blockIdx.x, group = blockIdx.y, d = group * 32 + threadIdx.x;
-    float total = 0.0f;
-    for (int stream = 0; stream < SS; ++stream) {
-        const long long at = (static_cast<long long>(r) * SS + stream) * D + d;
-        const float value = rbf(__fmul_rn(bsig(bf(UP[at])), bf(NORMED[at])));
-        total = __fadd_rn(total, value);
-    }
-    const float mixed = rbf(__fdiv_rn(total, static_cast<float>(SS)));
-    MIXED[static_cast<long long>(r) * D + d] = __float2bfloat16_rn(mixed);
-    row[threadIdx.x] = mixed;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        float sum = 0.0f;
-        for (int i = 0; i < 32; ++i) sum = __fadd_rn(sum, row[i]);
-        XSM[static_cast<long long>(r) * (D / 32) + group] = sum;
-    }
-}
+#include "flashnext_hc_dense.cuh"
 
 // Shared expert uses its own BF16 projection outputs and rounding boundaries.
 extern "C" __global__ void fn_shared_swiglu(const __nv_bfloat16* GATE, const __nv_bfloat16* UP,

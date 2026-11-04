@@ -10,3 +10,8 @@ export fn compileNativeDrama(io: *const std.Io, dir: [*:0]const u8, r: *const ap
     opened.engine.drain();
 }
 fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {}
+
+test {
+    _ = host;
+    _ = @import("drama_reference.zig");
+}

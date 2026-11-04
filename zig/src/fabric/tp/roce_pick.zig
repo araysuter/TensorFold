@@ -6,13 +6,19 @@ const bootstrap = @import("bootstrap.zig");
 const sock = @import("sock.zig");
 const Config = @import("config.zig").Config;
 const Verbs = @import("verbs").Verbs;
+const OpenFn = *const fn (?[:0]const u8) @import("verbs").Error!Verbs;
 
 /// Ports a rank lists to its peers (a DGX Spark's ConnectX-7 shows four RDMA devices).
 pub const max_ports = 8;
 const blob_bytes = 1 + 4 * max_ports;
 
 /// How many devices, and how: on a /24 the peer shares (`shared`), named by TF_TP_ROCE_HCA (`explicit`), or neither.
-pub const Pick = struct { n: usize, shared: bool, explicit: bool = false };
+pub const Pick = struct {
+    n: usize,
+    shared: bool,
+    explicit: bool = false,
+    verbs_open_error: ?@import("verbs").Error = null,
+};
 
 fn usable(p: rv.Port) bool {
     return p.active and p.ethernet and p.ipv4 != null;
@@ -65,6 +71,34 @@ pub fn choose(ports: []const rv.Port, peer: []const [4]u8, out: *[rv.max_hcas]rv
     return .{ .n = n, .shared = true };
 }
 
+fn includes(specs: []const rv.HcaSpec, s: rv.HcaSpec) bool {
+    for (specs) |x| if (std.mem.eql(u8, x.name[0..x.name_len], s.name[0..s.name_len])) return true;
+    return false;
+}
+
+/// Three ranks or more: `choose` toward each peer alone, the most ports a peer (`limit` down) whose union fits.
+pub fn choosePeers(ports: []const rv.Port, peers: []const []const [4]u8, out: *[rv.max_hcas]rv.HcaSpec, limit: usize) Pick {
+    const cap = @min(limit, rv.max_hcas);
+    var k = cap;
+    // a switch: every peer's choice is the same ports; a switchless ring: each neighbour its own
+    next: while (k > 0) : (k -= 1) {
+        var n: usize = 0;
+        for (peers) |peer| {
+            var one: [rv.max_hcas]rv.HcaSpec = undefined;
+            const p = choose(ports, peer, &one, k);
+            // a peer on no /24 of ours: the first usable ports, as `choose` (the wire refuses them)
+            if (!p.shared) return choose(ports, &.{}, out, cap);
+            for (one[0..p.n]) |s| if (!includes(out[0..n], s)) {
+                if (n == cap) continue :next;
+                out[n] = s;
+                n += 1;
+            };
+        }
+        return .{ .n = n, .shared = true };
+    }
+    return .{ .n = 0, .shared = false };
+}
+
 /// `[count][count x IPv4]` of the usable ports, the blob each rank sends.
 fn encode(ports: []const rv.Port, out: *[blob_bytes]u8) []const u8 {
     var n: u8 = 0;
@@ -90,14 +124,23 @@ pub fn resolve(cfg: Config, b: *bootstrap.Bootstrap, out: *[rv.max_hcas]rv.HcaSp
 
 /// `resolve` with how the devices were chosen, over this host's ports (a collective, as `resolve`).
 pub fn select(cfg: Config, b: *bootstrap.Bootstrap, out: *[rv.max_hcas]rv.HcaSpec) !Pick {
+    return selectWithOpen(cfg, b, out, Verbs.open);
+}
+
+fn selectWithOpen(cfg: Config, b: *bootstrap.Bootstrap, out: *[rv.max_hcas]rv.HcaSpec, open: OpenFn) !Pick {
     var ports: [max_ports]rv.Port = undefined;
     var n_ports: usize = 0;
-    if (Verbs.open(null)) |opened| {
+    var open_error: ?@import("verbs").Error = null;
+    if (open(null)) |opened| {
         var v = opened;
         defer v.close();
         n_ports = rv.scanPorts(&v, &ports);
-    } else |_| {}
-    return selectFrom(cfg, b, ports[0..n_ports], out);
+    } else |e| {
+        open_error = e;
+    }
+    var pick = try selectFrom(cfg, b, ports[0..n_ports], out);
+    pick.verbs_open_error = open_error;
+    return pick;
 }
 
 /// `select` over given ports (the scan's, or a test's fixture ports).
@@ -108,11 +151,16 @@ pub fn selectFrom(cfg: Config, b: *bootstrap.Bootstrap, ports: []const rv.Port, 
     const all = try b.allGather(encode(ports, &mine), &buf, &blobs);
     if (cfg.roce_hca) |text| return .{ .n = try rv.parseSpecs(text, out), .shared = false, .explicit = true };
     var peer: [bootstrap.max_ranks * max_ports][4]u8 = undefined;
+    var lists: [bootstrap.max_ranks][]const [4]u8 = undefined;
     var n_peer: usize = 0;
+    var n_list: usize = 0;
     for (all, 0..) |blob, r| if (r != b.rank) {
-        n_peer += decode(blob, peer[n_peer..]);
+        const k = decode(blob, peer[n_peer..]);
+        lists[n_list] = peer[n_peer..][0..k];
+        n_list += 1;
+        n_peer += k;
     };
-    const pick = choose(ports, peer[0..n_peer], out, cfg.roce_hcas);
+    const pick = if (b.world >= 3) choosePeers(ports, lists[0..n_list], out, cfg.roce_hcas) else choose(ports, peer[0..n_peer], out, cfg.roce_hcas);
     if (!pick.shared and pick.n > 0) log.warn("tp roce: no RoCE port shares an IPv4 /24 with the peer's; using the first {d} active (set TF_TP_ROCE_HCA)", .{pick.n});
     return pick;
 }
@@ -135,11 +183,14 @@ pub const HcaError = error{
     NoRoceDevice,
     /// this host's ports share no IPv4 /24 with the peer's: NCCL would not reach the peer on them either
     NoSharedSubnet,
-};
+} || @import("verbs").Error;
 
 /// `tf-tp-test hca`'s line for run_hosts.sh: `NCCL_IB_HCA=` the picked devices; never the first local ports alone.
 pub fn hcaLine(pick: Pick, specs: []const rv.HcaSpec, buf: *[list_bytes + 16]u8) HcaError![]const u8 {
-    if (pick.n == 0) return error.NoRoceDevice;
+    if (pick.n == 0) {
+        if (pick.verbs_open_error) |e| return e;
+        return error.NoRoceDevice;
+    }
     if (!pick.shared and !pick.explicit) return error.NoSharedSubnet;
     const prefix = "NCCL_IB_HCA=";
     @memcpy(buf[0..prefix.len], prefix);
@@ -224,6 +275,40 @@ test "two rails on one /24 count once per peer port; no shared /24 keeps the lis
     var out: [max_ports][4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), decode(&.{ 2, 1, 2, 3, 4 }, &out));
     try std.testing.expectEqual(@as(?u8, 3), specs[0].gid);
+}
+
+test "three ranks: one port toward each neighbour of a switchless ring, the same two ports to every peer of a switch" {
+    var specs: [rv.max_hcas]rv.HcaSpec = undefined;
+    var buf: [128]u8 = undefined;
+    // each port's two functions on two /24s numbered by the neighbour, so the lowest /24s all lead to rank 1
+    const ports = [_]rv.Port{
+        port("rocep1s0f0", true, .{ 10, 1, 0, 1 }),
+        port("rocep1s0f1", true, .{ 10, 2, 0, 1 }),
+        port("roceP2p1s0f0", true, .{ 10, 1, 1, 1 }),
+        port("roceP2p1s0f1", true, .{ 10, 2, 1, 1 }),
+    };
+    const to1 = [_][4]u8{ .{ 10, 1, 0, 2 }, .{ 10, 1, 1, 2 }, .{ 10, 3, 0, 1 }, .{ 10, 3, 1, 1 } };
+    const to2 = [_][4]u8{ .{ 10, 2, 0, 2 }, .{ 10, 2, 1, 2 }, .{ 10, 3, 0, 2 }, .{ 10, 3, 1, 2 } };
+    // every peer's addresses at once (the two-rank rule): both functions toward rank 1, none toward rank 2
+    const both = to1 ++ to2;
+    try std.testing.expectEqualStrings("rocep1s0f0,roceP2p1s0f0", names(specs[0..choose(&ports, &both, &specs, 2).n], &buf));
+    const ring = choosePeers(&ports, &.{ &to1, &to2 }, &specs, 2);
+    try std.testing.expect(ring.shared);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", names(specs[0..ring.n], &buf));
+    // one port cannot reach two neighbours: nothing picked, and the ranks take NCCL
+    try std.testing.expectEqual(@as(usize, 0), choosePeers(&ports, &.{ &to1, &to2 }, &specs, 1).n);
+    // a switch: both peers list the same two /24s of ours, so the two-rank rule's two ports
+    const s1 = [_][4]u8{ .{ 10, 1, 0, 3 }, .{ 10, 2, 0, 3 } };
+    const s2 = [_][4]u8{ .{ 10, 1, 0, 4 }, .{ 10, 2, 0, 4 } };
+    const sw = choosePeers(&ports, &.{ &s1, &s2 }, &specs, 2);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", names(specs[0..sw.n], &buf));
+    const all = s1 ++ s2;
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", names(specs[0..choose(&ports, &all, &specs, 2).n], &buf));
+    // a peer on no /24 of ours: the first usable ports, not shared, as `choose` without a peer
+    const elsewhere = [_][4]u8{.{ 10, 9, 9, 9 }};
+    const far = choosePeers(&ports, &.{ &to1, &elsewhere }, &specs, 2);
+    try std.testing.expect(!far.shared);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", names(specs[0..far.n], &buf));
 }
 
 test "hca's line: the picked names for NCCL; no device or no shared /24 is refused, an explicit list is taken" {
@@ -338,14 +423,14 @@ test "the port scan reads a host's devices through verbs: state, Ethernet, the I
 }
 
 /// One rank's `selectFrom` over a real bootstrap (rank 0 on `l`), its hca line or error into `out`.
-fn hcaRank(cfg: Config, l: ?sock.Fd, ports: []const rv.Port, out: *[list_bytes + 16]u8, line: *HcaError![]const u8, err: *?anyerror) void {
+fn hcaRank(cfg: Config, l: ?sock.Fd, ports: []const rv.Port, open: ?OpenFn, out: *[list_bytes + 16]u8, line: *HcaError![]const u8, err: *?anyerror) void {
     var b = (if (l) |fd| bootstrap.Bootstrap.acceptOn(fd, 2, 5 * std.time.ns_per_s) else bootstrap.Bootstrap.open(cfg)) catch |e| {
         err.* = e;
         return;
     };
     defer b.close();
     var specs: [rv.max_hcas]rv.HcaSpec = undefined;
-    const pick = selectFrom(cfg, &b, ports, &specs) catch |e| {
+    const pick = (if (open) |f| selectWithOpen(cfg, &b, &specs, f) else selectFrom(cfg, &b, ports, &specs)) catch |e| {
         err.* = e;
         return;
     };
@@ -353,16 +438,78 @@ fn hcaRank(cfg: Config, l: ?sock.Fd, ports: []const rv.Port, out: *[list_bytes +
 }
 
 fn hcaPair(cfgs: [2]Config, ports: [2][]const rv.Port, lines: *[2]HcaError![]const u8, bufs: *[2][list_bytes + 16]u8) !void {
+    return hcaPairWithOpen(cfgs, ports, .{ null, null }, lines, bufs);
+}
+
+fn hcaPairWithOpen(cfgs: [2]Config, ports: [2][]const rv.Port, open: [2]?OpenFn, lines: *[2]HcaError![]const u8, bufs: *[2][list_bytes + 16]u8) !void {
     const l = try bootstrap.testListener();
     defer sock.close(l.fd);
     var errs: [2]?anyerror = @splat(null);
     var c1 = cfgs[1];
     c1.link_port = l.port;
     c1.connect_timeout_ns = 5 * std.time.ns_per_s;
-    const t = try std.Thread.spawn(.{}, hcaRank, .{ c1, null, ports[1], &bufs[1], &lines[1], &errs[1] });
-    hcaRank(cfgs[0], l.fd, ports[0], &bufs[0], &lines[0], &errs[0]);
+    const t = try std.Thread.spawn(.{}, hcaRank, .{ c1, null, ports[1], open[1], &bufs[1], &lines[1], &errs[1] });
+    hcaRank(cfgs[0], l.fd, ports[0], open[0], &bufs[0], &lines[0], &errs[0]);
     t.join();
     for (errs) |e| if (e) |x| return x;
+}
+
+fn missingLibrary(_: ?[:0]const u8) @import("verbs").Error!Verbs {
+    return error.LibraryUnavailable;
+}
+
+fn missingSymbol(_: ?[:0]const u8) @import("verbs").Error!Verbs {
+    return error.MissingSymbol;
+}
+
+fn unavailableVerbs(_: ?[:0]const u8) @import("verbs").Error!Verbs {
+    return error.VerbsUnavailable;
+}
+
+test "hca keeps a verbs load failure while completing the peer's port exchange" {
+    var lines: [2]HcaError![]const u8 = undefined;
+    var bufs: [2][list_bytes + 16]u8 = undefined;
+    var scanned: [max_ports]rv.Port = undefined;
+    const peer = ScanFixture.scan(&hosts[1], &scanned);
+    const cfgs: [2]Config = .{ .{ .rank = 0 }, .{ .rank = 1 } };
+    const cases = [_]struct { open: OpenFn, failure: HcaError }{
+        .{ .open = missingLibrary, .failure = error.LibraryUnavailable },
+        .{ .open = unavailableVerbs, .failure = error.VerbsUnavailable },
+    };
+    for (cases) |c| {
+        try hcaPairWithOpen(cfgs, .{ &.{}, peer }, .{ c.open, null }, &lines, &bufs);
+        try std.testing.expectError(c.failure, lines[0]);
+        try std.testing.expectError(error.NoSharedSubnet, lines[1]);
+    }
+}
+
+test "hca distinguishes missing verbs symbols from an empty successful scan" {
+    const cfg: Config = .{ .world = 1 };
+    var b = try bootstrap.Bootstrap.open(cfg);
+    defer b.close();
+    var specs: [rv.max_hcas]rv.HcaSpec = undefined;
+    var buf: [list_bytes + 16]u8 = undefined;
+    const cases = [_]struct { open: OpenFn, failure: HcaError }{
+        .{ .open = missingSymbol, .failure = error.MissingSymbol },
+        .{ .open = unavailableVerbs, .failure = error.VerbsUnavailable },
+    };
+    for (cases) |c| {
+        const pick = try selectWithOpen(cfg, &b, &specs, c.open);
+        try std.testing.expectError(c.failure, hcaLine(pick, &specs, &buf));
+    }
+    try std.testing.expectError(error.NoRoceDevice, hcaLine(try selectFrom(cfg, &b, &.{}, &specs), &specs, &buf));
+}
+
+test "hca keeps an explicit list when the verbs scan cannot open its library" {
+    const cfg: Config = .{ .world = 1, .roce_hca = "fx_rocep1s0f0:3" };
+    var b = try bootstrap.Bootstrap.open(cfg);
+    defer b.close();
+    var specs: [rv.max_hcas]rv.HcaSpec = undefined;
+    var buf: [list_bytes + 16]u8 = undefined;
+    for ([_]OpenFn{ missingLibrary, unavailableVerbs }) |open| {
+        const pick = try selectWithOpen(cfg, &b, &specs, open);
+        try std.testing.expectEqualStrings("NCCL_IB_HCA=fx_rocep1s0f0\n", try hcaLine(pick, &specs, &buf));
+    }
 }
 
 test "hca over a real bootstrap: both ranks print their peer-linked ports; an explicit rank keeps its list; no ports fail both" {
@@ -383,4 +530,57 @@ test "hca over a real bootstrap: both ranks print their peer-linked ports; an ex
     try hcaPair(auto, .{ &.{}, ports[1] }, &lines, &bufs);
     try std.testing.expectError(error.NoRoceDevice, lines[0]);
     try std.testing.expectError(error.NoSharedSubnet, lines[1]);
+}
+
+/// Three Sparks cabled in a triangle, no switch: each port's two functions on the link's two /24s (10.41.ab, 10.42.ab).
+const triangle = [3][4]rv.Port{ .{
+    port("rocep1s0f0", true, .{ 10, 41, 13, 1 }),
+    port("rocep1s0f1", true, .{ 10, 41, 12, 1 }),
+    port("roceP2p1s0f0", true, .{ 10, 42, 13, 1 }),
+    port("roceP2p1s0f1", true, .{ 10, 42, 12, 1 }),
+}, .{
+    port("rocep1s0f0", true, .{ 10, 41, 12, 2 }),
+    port("rocep1s0f1", true, .{ 10, 41, 23, 1 }),
+    port("roceP2p1s0f0", true, .{ 10, 42, 12, 2 }),
+    port("roceP2p1s0f1", true, .{ 10, 42, 23, 1 }),
+}, .{
+    port("rocep1s0f0", true, .{ 10, 41, 13, 2 }),
+    port("rocep1s0f1", true, .{ 10, 41, 23, 2 }),
+    port("roceP2p1s0f0", true, .{ 10, 42, 13, 2 }),
+    port("roceP2p1s0f1", true, .{ 10, 42, 23, 2 }),
+} };
+
+/// One rank's `selectFrom` over a real bootstrap of `cfg.world` ranks (rank 0 accepts on `l`): its pick's names.
+fn pickRank(cfg: Config, l: ?sock.Fd, ports: []const rv.Port, buf: *[list_bytes]u8, got: *[]const u8, err: *?anyerror) void {
+    var b = (if (l) |fd| bootstrap.Bootstrap.acceptOn(fd, cfg.world, 5 * std.time.ns_per_s) else bootstrap.Bootstrap.open(cfg)) catch |e| {
+        err.* = e;
+        return;
+    };
+    defer b.close();
+    var specs: [rv.max_hcas]rv.HcaSpec = undefined;
+    const pick = selectFrom(cfg, &b, ports, &specs) catch |e| {
+        err.* = e;
+        return;
+    };
+    got.* = names(specs[0..pick.n], buf);
+}
+
+test "three ranks over a real bootstrap: each picks one port toward each neighbour of a switchless triangle" {
+    const l = try bootstrap.testListener();
+    defer sock.close(l.fd);
+    var bufs: [3][list_bytes]u8 = undefined;
+    var got: [3][]const u8 = @splat("");
+    var errs: [3]?anyerror = @splat(null);
+    var threads: [2]std.Thread = undefined;
+    for (&threads, 1..) |*t, r| {
+        const cfg: Config = .{ .world = 3, .rank = @intCast(r), .link_port = l.port, .connect_timeout_ns = 5 * std.time.ns_per_s };
+        t.* = try std.Thread.spawn(.{}, pickRank, .{ cfg, null, &triangle[r], &bufs[r], &got[r], &errs[r] });
+    }
+    pickRank(.{ .world = 3 }, l.fd, &triangle[0], &bufs[0], &got[0], &errs[0]);
+    for (threads) |t| t.join();
+    for (errs) |e| if (e) |x| return x;
+    // rank 0 lists rank 1's link first (10.41.12), then rank 2's (10.41.13); the wire pairs each with its neighbour's
+    try std.testing.expectEqualStrings("rocep1s0f1,rocep1s0f0", got[0]);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", got[1]);
+    try std.testing.expectEqualStrings("rocep1s0f0,rocep1s0f1", got[2]);
 }

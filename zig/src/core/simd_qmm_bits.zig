@@ -16,12 +16,15 @@ pub const Pipelines = struct {
     device: mtl.Device,
     lib: mtl.Library,
     built: [bit_widths.len][s_values.len][nt_values.len][2]?mtl.Pipeline = @splat(@splat(@splat(@splat(null)))),
+    /// Simdgroups a 16-row tile of a grid of at least 512 groups takes at most: 4 on the M1, else 16.
+    wide: usize = 16,
     scalar: [bit_widths.len][s_values.len][2][simd.max_scalar_rows]?mtl.Pipeline = @splat(@splat(@splat(@splat(null)))),
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        return .{ .device = device, .lib = try mtl.Library.fromSource(device, sources.core_simd_qmm_bits, mtl.CompileOptions.mlx()) };
+        const wide: usize = if (device.generation() == 13) 4 else 16;
+        return .{ .device = device, .lib = try mtl.Library.fromSource(device, sources.core_simd_qmm_bits, mtl.CompileOptions.mlx()), .wide = wide };
     }
 
     pub fn deinit(p: *Pipelines) void {
@@ -58,11 +61,12 @@ pub const Pipelines = struct {
 pub const Call = struct { pipeline: mtl.Pipeline, args: Args, groups: mtl.Size, threads: usize };
 
 /// y[m * ld + j] = x W^T, g64 codes of `bits`: the twin at 1-2 rows when `scalar` (checked equal), else tiles.
-pub fn call(p: *Pipelines, bits: u8, n: usize, k: usize, rows: usize, ld: usize, scalar: bool) !Call {
+pub fn call(p: *Pipelines, bits: u8, n: usize, k: usize, rows: usize, ld: usize, scalar: bool, whole: usize) !Call {
+    // `whole` is the split rank's full width, whose own tree its K chunks keep (0: `n`).
     if (n == 0 or n % 8 != 0 or n > std.math.maxInt(i32) or k == 0 or k % 64 != 0 or k > std.math.maxInt(i32)) return error.UnsupportedSimdShape;
     if (ld < n or ld > std.math.maxInt(i32)) return error.UnsupportedSimdStride;
     if (rows == 0 or rows > std.math.maxInt(i32)) return error.NoRows;
-    const s = simd.splits(n);
+    const s = simd.chunks(n, whole);
     const args = Args{ .k = @intCast(k), .n = @intCast(n), .r = @intCast(rows), .ld = @intCast(ld) };
     if (scalar and simd.scalarBlock(rows, s) != 0) {
         const nr: usize = if (n > 2048) 2 else 1;
@@ -75,9 +79,11 @@ pub fn call(p: *Pipelines, bits: u8, n: usize, k: usize, rows: usize, ld: usize,
     const rt: u32 = @min(2, @as(u32, @intCast((rows + 7) / 8)));
     const nt = simd.tiles(n, rt, s);
     const pipeline = try p.get(bits, s, nt, rt);
-    const sgs: usize = @min(s, 16, pipeline.maxThreads() / 32);
+    const groups = mtl.Size{ .width = (n + 8 * nt - 1) / (8 * nt), .height = (rows + 8 * rt - 1) / (8 * rt) };
+    const many = rt == 2 and s <= 16 and groups.width * groups.height >= 512;
+    const sgs: usize = @min(s, if (many) p.wide else 16, pipeline.maxThreads() / 32);
     if (sgs == 0) return error.SimdThreads;
-    return .{ .pipeline = pipeline, .args = args, .groups = .{ .width = (n + 8 * nt - 1) / (8 * nt), .height = (rows + 8 * rt - 1) / (8 * rt) }, .threads = sgs * 32 };
+    return .{ .pipeline = pipeline, .args = args, .groups = groups, .threads = sgs * 32 };
 }
 
 /// A checkpoint's [n, k] matrix of `bits` codes: words [n][k*bits/32], scales and biases [n][k/64] bf16.
@@ -94,8 +100,8 @@ pub fn encode(e: mtl.ComputeEncoder, c: Call, m: Matrix, x: mtl.Buffer, x_off: u
     e.dispatchGroups(c.groups, .{ .width = c.threads });
 }
 
-/// Whether the scalar twin's 1-2 row results equal the tiles' for an [n, k] matrix of `bits` codes.
-pub fn twinExact(p: *Pipelines, device: mtl.Device, bits: u8, m: Matrix, n: usize, k: usize) !bool {
+/// Whether the scalar twin's 1-2 row results equal the tiles' for an [n, k] `bits` matrix, chunked as `call` takes it.
+pub fn twinExact(p: *Pipelines, device: mtl.Device, bits: u8, m: Matrix, n: usize, k: usize, whole: usize) !bool {
     const rows = 8;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -113,9 +119,9 @@ pub fn twinExact(p: *Pipelines, device: mtl.Device, bits: u8, m: Matrix, n: usiz
     defer queue.deinit();
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
-    encode(e, try call(p, bits, n, k, rows, n, false), m, x, 0, tiled, 0);
-    for (0..rows) |r| encode(e, try call(p, bits, n, k, 1, n, true), m, x, r * k * 2, twin, r * n * 2);
-    for ([_]usize{ 0, rows - 2 }, 0..) |r, i| encode(e, try call(p, bits, n, k, 2, n, true), m, x, r * k * 2, pairs, i * 2 * n * 2);
+    encode(e, try call(p, bits, n, k, rows, n, false, whole), m, x, 0, tiled, 0);
+    for (0..rows) |r| encode(e, try call(p, bits, n, k, 1, n, true, whole), m, x, r * k * 2, twin, r * n * 2);
+    for ([_]usize{ 0, rows - 2 }, 0..) |r, i| encode(e, try call(p, bits, n, k, 2, n, true, whole), m, x, r * k * 2, pairs, i * 2 * n * 2);
     e.end();
     cb.commit();
     cb.wait();

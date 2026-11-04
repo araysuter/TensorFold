@@ -2,8 +2,8 @@
 
 const std = @import("std");
 
-/// `zig build test-golden` over the server tests' module and the imports it was built with.
-pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.Module, api: *std.Build.Module, tokenizer: *std.Build.Module, template: *std.Build.Module) void {
+/// `zig build test-golden` over the server tests' module; `engines` is the platform registry `cli/hub.zig` reads.
+pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.Module, api: *std.Build.Module, tokenizer: *std.Build.Module, template: *std.Build.Module, engines: *std.Build.Module) void {
     const fake_serve = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/server/fake_serve.zig"),
         .target = target,
@@ -29,4 +29,43 @@ pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.
         all.dependOn(&run.step);
         if (std.mem.eql(u8, file, "security-cases.json")) b.step("test-security-golden-host", "Native HTTP key, host and origin security with the local fake server").dependOn(&run.step);
     }
+    const security = b.step("test-server-security", "API authentication and hostile HTTP framing on the CPU");
+    const wire = b.addSystemCommand(&.{"python3"});
+    wire.addFileArg(b.path("zig/tests/server/security_check.py"));
+    wire.addArtifactArg(fake_serve);
+    wire.addArg("--fixtures");
+    wire.addDirectoryArg(b.path("zig/tests/server/fixtures"));
+    wire.setCwd(b.path("."));
+    security.dependOn(&wire.step);
+    security.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"security:"} })).step);
+    const pull = b.step("test-pull-security", "Checkpoint download paths, byte limits and metadata refusal on the CPU");
+    for ([_][]const u8{ "zig/src/cli/hub.zig", "zig/src/cli/pull_test.zig" }) |path| {
+        const checks = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path(path),
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+            .imports = &.{.{ .name = "native_engines", .module = engines }},
+        }), .filters = &.{"security:"} });
+        const run = b.addRunArtifact(checks);
+        run.setCwd(b.path("."));
+        pull.dependOn(&run.step);
+    }
+    const core = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/root.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "tokenizer", .module = tokenizer }},
+    });
+    const oracle = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/cli/cuda_checks.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "core", .module = core }},
+    }), .filters = &.{"security:"} });
+    const oracle_run = b.addRunArtifact(oracle);
+    oracle_run.setCwd(b.path("."));
+    pull.dependOn(&oracle_run.step);
 }

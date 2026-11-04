@@ -3,8 +3,9 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
-constant constexpr int PG = 6, PD = 256, PH = 128, PCK = 512, PTK = 32;
-struct Q27PromptArgs { int start, rows, chunks, rp, key_stride, value_stride; float scale2; };
+constant constexpr int PG = Q27_G, PKVH = Q27_KVH, PD = 256, PH = 128, PCK = 512, PTK = 32; // after attention_mpp.metal's G
+// kv_heads is the rank's, not the model's: a split attention writes local node rows.
+struct Q27PromptArgs { int start, rows, chunks, rp, key_stride, value_stride; float scale2; int kv_heads; };
 typedef vec<float, 8> q27f8;
 typedef vec<bfloat, 8> q27b8;
 typedef vec<half, 8> q27h8;
@@ -166,5 +167,29 @@ kernel void q27_attn_prompt_merge(device const float* PO [[buffer(0)]], device c
     m = nm;
   }
   const int node = r / PG, head = hk * PG + r % PG;
-  for (int i = 0; i < DP; i++) OUT[((int64_t)node * (PG * 4) + head) * PD + lane * DP + i] = static_cast<bfloat>(o[i] / l);
+  const int64_t at = ((int64_t)node * (PG * args.kv_heads) + head) * PD + lane * DP;
+  for (int i = 0; i < DP; i++) OUT[at + i] = static_cast<bfloat>(o[i] / l);
+}
+
+// A single Mac's query heads (Q27_G * Q27_KVH) are known at compile time: main's kernel, so one Mac runs unpaired code.
+kernel void q27_attn_prompt_merge_single(device const float* PO [[buffer(0)]], device const float* PM [[buffer(1)]], device const float* PL [[buffer(2)]],
+    constant Q27PromptArgs& args [[buffer(3)]], device bfloat* OUT [[buffer(4)]],
+    uint3 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  const int hk = int(tg.x), r = int(tg.y);
+  constexpr int DP = PD / 32;
+  float m = -INFINITY, l = 0.0f, o[DP];
+  for (int i = 0; i < DP; i++) o[i] = 0.0f;
+  for (int c = 0; c < args.chunks; c++) {
+    const int64_t row = ((int64_t)hk * args.chunks + c) * args.rp + r;
+    const float mc = PM[row];
+    if (mc == -INFINITY) continue;
+    const float lc = PL[row];
+    const float nm = max(m, mc);
+    const float f1 = fast::exp2(m - nm), f2 = fast::exp2(mc - nm);
+    l = l * f1 + lc * f2;
+    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + PO[row * PD + lane * DP + i] * f2;
+    m = nm;
+  }
+  const int node = r / PG, head = hk * PG + r % PG;
+  for (int i = 0; i < DP; i++) OUT[((int64_t)node * (PG * PKVH) + head) * PD + lane * DP + i] = static_cast<bfloat>(o[i] / l);
 }

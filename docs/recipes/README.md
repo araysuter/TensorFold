@@ -7,20 +7,26 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 
 | Family | Recipe |
 | --- | --- |
+| dots.mocr | [Native HIP OCR, BF16, one GPU](dots-mocr-hip.md) |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
-| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md) |
+| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md), [exact SSD residency on Metal](fluid-subgraph-residency.md) |
+| Qwen4 dense | [Native preparation, device qualification pending](qwen4-dense.md) |
 | Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
-| GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
+| GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md), [native CUDA](glm-5.3-flash-cuda.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
 | Gemma 4 31B | [Native Metal, affine 4-bit](gemma-4-native.md) |
 | Gemma 4 12B | [Native Metal, affine 4-bit, MTP assistant](gemma-4-12b-native.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
 | Step-5-Preview | [Native Metal on one 256 GB Mac: 2-bit experts, MTP drafts, images](step-5-preview.md) |
+| MiniMax-M3.1-Flash | [Native Metal on one 256 GB Mac: affine 3/4-bit experts, exact bf16 cache, DFlash2 drafts, images](minimax-m3.1-flash.md) |
 | Kolibri-1 | [Native CUDA, block FP8, research checkpoint](kolibri-1.md) |
+| LFM2.5-24B-A2B | [Native Metal, MLX 4-bit, shared rounds](lfm2.5-24b-a2b.md) |
+| Spark-X2.6-4B | [Native CUDA](spark-x2.6-4b-cuda.md), [native Metal, the bf16 release, contexts to 1M](spark-x2.6-4b-metal.md) |
+| Nanbeige4.3-33B | [Native Metal, the bf16 and INT4 releases, the Llama family](nanbeige-4.3-33b-metal.md) |
 
 ## Capability floor
 
@@ -91,6 +97,8 @@ All 0.3.5 decode, prefill, concurrency and peak-memory results are TBD [release-
 results in the CUDA family pages are historical measurements, not release qualification.
 
 ## Kernel checks
+
+For CUDA refactors that promise unchanged machine code, use the [five-SM SASS identity runner](cuda-sass-identity.md).
 
 Use exact equality for serial versus multi-row kernels and committed caches. Use a separate trusted
 forward for model-quality checks; agreement with one's own serial implementation does not establish

@@ -1,9 +1,18 @@
 # Qwen3.8 Flash Next
 
 The `qwen4_exp` family has Gated DeltaNet, sparse attention, MoE, hyper-connections and hashed n-gram
-embeddings. The native engine's supported Metal checkpoint uses MLX affine 6-bit weights in groups of 32
-and includes an MTP head. On a Mac the native engine refuses the 4-bit/group-32 checkpoint at load; on CUDA it serves
-that one ([Flash Next on CUDA](flash-next-cuda.md)).
+embeddings. Native Metal serves supported MLX affine checkpoints, including the 4-bit/group-32 MTP checkpoint.
+Startup checks separate load and cold pack-construction budgets against the RAM/GPU-bounded ceiling.
+A validated cached pack or a supplied pack skips construction pricing; supplied packs retain their existing source check.
+The load plan counts retained raw/packed weights, both prompt planes, selectors, KV/state, configured vision and
+requested storage, with the shared runtime reserve. Unused source-file padding is not retained model storage.
+`info` prints the base text load and cold pack budgets separately; these are conservative plans, not measured fit results.
+A 128 GB Mac may not hold the complete load even when the weight files fit.
+Use a smaller quantization or raise the OS wired limit where supported; fewer streams or a shorter context reduce
+additional session storage. Native Metal's `--ple-on-ssd` leaves the n-gram tables in the checkpoint and reads their
+rows from SSD in batches ([Exact Fluid Subgraph Residency](fluid-subgraph-residency.md)). CUDA also serves the 4-bit
+checkpoint ([Flash Next on CUDA](flash-next-cuda.md)), and HIP serves it and two oQ checkpoints on a Strix Halo iGPU
+([native HIP](#native-hip-on-a-strix-halo-igpu)).
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP
@@ -90,8 +99,8 @@ An explicit count that does not fit is refused, as below. Explicit `--parallel 1
 
 The ceiling is 70% of RAM, or `FLASHNEXT_LOAD_LIMIT_GB` (GB, up to the GPU's recommended working set). It covers the
 server's whole footprint: the model, the sessions and the prompt cache. Left out, `--prompt-cache-gib` takes what the
-sessions leave under it; a given budget must fit under the same ceiling, and only `--prompt-cache-over-cap` lets it
-pass.
+sessions leave under it; a given budget must fit under the same ceiling. `--prompt-cache-over-cap` does not bypass model startup
+admission or the runtime reserve.
 
 Additional slots allocate caches for the selected context. Startup reserves their metadata and the prompt-cache
 budget, then checks the physical footprint before accepting requests. A fixed slot count that does not fit is
@@ -149,6 +158,8 @@ python tools/zig/flashnext_batch_serve.py zig-out/native/bin/tensorfold-native \
   MODEL_DIR /tmp/flashnext-prompts /tmp/flashnext-served \
   --parallel 1,4 --context 16384 --require-shared-rounds
 ```
+
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
 
 The served gate starts one server at a time on loopback port 52417. `default` omits `--parallel`; `auto` passes
 it explicitly. Each block uses the same context and requests, including thinking on and off. It compares response
@@ -404,7 +415,7 @@ reply still equals its solo run. The cost is decode speed while prompts fill: a 
 most of the experts, so live replies decode at about a tenth of their usual rate during a burst's prefill (2.6-3.2
 of 32-41 tok/s on one Spark) instead of stopping. `--decode-share S` sizes the passes so a round's decoding takes
 that share of the pass's time: 0.25 about doubles decode during a prefill and roughly halves prompt speed. The
-default, 0, keeps whole passes. The native binary refuses `--decode-share`.
+default, 0, keeps whole passes. The native server takes `--decode-share` as a time share instead: see [the API](../api.md).
 
 Prompt pieces are 2,048 rows, or 4,096 while nothing decodes on a DGX Spark serving the MLX checkpoint without
 `--vision`, when the admitted window leaves room (the startup log names the choice). `TENSORFOLD_PREFILL_ROWS=N`
@@ -418,7 +429,7 @@ allocations for RAM, so a checkpoint's GPU allocation alone does not describe it
 `--context` that leaves them no room is reported at startup; their lookups then page from disk, a cost of about 1.3x
 on prompts.
 
-`--ple-on-ssd` and `--ssd-experts` below are the Python engine's flags; the native binary refuses both.
+`--ple-on-ssd` and `--ssd-experts` below describe the Python engine's flags and measurements. The native binary takes both on one Mac: see [Exact Fluid Subgraph Residency](fluid-subgraph-residency.md).
 
 `--ple-on-ssd` leaves the 29.8 GiB of n-gram tables in the checkpoint and reads each lookup's rows from SSD,
 so a 128 GB Mac can hold Flash Next. It is an opt-in trade. On an M3 Ultra, replies were the same tokens,
@@ -465,6 +476,44 @@ families refuse `--kv-dtype` before any download.
 
 `--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
 default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
+
+## Native HIP on a Strix Halo iGPU
+
+The native HIP build serves Flash Next on gfx1151 (AMD Ryzen AI MAX+ 395, Radeon 8060S, 128 GB unified memory) from MLX
+affine checkpoints whose fused stacks each have one bit width and group size. Decode on this iGPU is bandwidth-bound and
+the dense mixers (attention, Gated DeltaNet projections, hyper-connection mixers, n-gram key/value projections) dominate
+each decoded token's reads, so the checkpoint choice sets both speed and quality. Three checkpoints load:
+
+| Checkpoint (revision) | Dense mixers | Bytes per decoded token | Code / chat tok/s | MTP tokens per round (code) | KL vs bf16, prose / code | GSM8K / HumanEval / MMLU-Pro |
+|---|---|---|---|---|---|---|
+| `TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 4-bit g32 | 4.00 GiB | 50.0 / 44.0 | 3.07 | 0.401 / 0.204 | 93.0 / 93.9 / 55.9 |
+| `unigilby/Qwen3.8-Flash-Next-oQ4e-HIP` (`5a0fb414`) | 8-bit g64 | 5.44 GiB | 42.0 / 36.2 | 2.61 | 0.064 / 0.013 | 94.7 / 93.9 / 69.1 |
+| `unigilby/Qwen3.8-Flash-Next-oQ4e-mix5-HIP` (`1b5c83a6`) | 5-bit g64 | 4.45 GiB | 51.3 / 41.4 | 3.05 | 0.096 / 0.022 | 94.3 / 93.3 / 67.6 |
+
+The two oQ checkpoints are oMLX oQe quantizations (imatrix) with routed and shared experts at 4-bit group 32 and the MTP
+head under `language_model.mtp.*`; they differ only in the dense mixers. oQ4e is the quality pick and the one to start
+with. oQ4e-mix5's 5-bit dense mixers are a speed-for-quality trade you choose, not an engine default: it decodes about
+22% faster on code than oQ4e and keeps MTP acceptance (3.05 tokens per round), at about 1.5x its KL (0.059 against 0.039
+over both slices). A 6-bit-mixer variant reads fewer bytes than oQ4e but its MTP acceptance falls (2.44 tokens per round
+on code), so it decodes no faster and is not listed. The uniform 4-bit checkpoint is the fastest on chat but the
+furthest from bf16, and it costs on tasks: MMLU-Pro falls to 55.9% against oQ4e's 69.1%, and 159 of its 700 replies
+there are format misses (no answer letter within 16 tokens), so weigh that before choosing it for speed.
+
+How these were measured: TensorFold `7c068895` built with `zig build native-hip -Dhip-arch=gfx1151` (Ubuntu archive HIP
+7.1, clang 21), MTP 3 drafts, `--parallel 1 --context 131072 --prompt-cache-gib 0`, `tools/bench_openai.py` decode
+medians over two server starts. KL(bf16 || quant) is exact over the full 248,320-entry vocabulary, teacher-forced on
+WikiText-2 raw test and HumanEval prompt plus canonical solution (31,728 scored tokens each), through mlx-vlm 0.7.10's
+`qwen4_exp` model against `Qwen/Qwen3.8-Flash-Next` in bf16; the HIP engine does not return logprobs. That model class
+does not shift norm weights at load, and the uniform 4-bit checkpoint stores its RMSNorm gains as gain + 1, so its KL is
+taken after removing that offset. Task scores come from the HIP server: greedy, thinking off, GSM8K 300 zero-shot exact
+match, HumanEval 164 pass@1, MMLU-Pro 700 (50 a category, a letter within 16 tokens; replies without one count as wrong,
+159 of them for the uniform 4-bit checkpoint, 14 for oQ4e-mix5 and 4 for oQ4e).
+
+```bash
+zig build native-hip -Dhip=true -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Doptimize=ReleaseFast
+./zig-out/native-hip/bin/tensorfold-native serve ./Qwen3.8-Flash-Next-oQ4e-mix5-HIP \
+  --parallel 1 --context 131072
+```
 
 ## Draft vocabulary provenance
 
@@ -527,3 +576,5 @@ least two. Image requests always prefill fresh; text prefix caching remains avai
 [image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3 sidecar conversion and verification.
 The native binary's CUDA engine takes `--vision` too, experimental, through the Qwen-VL tower that Qwen's CUDA family
 runs (see [Flash Next on CUDA](flash-next-cuda.md)).
+
+The maintained Metal DeltaNet window body in decode/fn_gdn.metal takes up to 16 rows with each row's own convolution, Q/K norms and gates. The recurrence keeps its per-row arithmetic across window widths. FZ_GDN_REPLAY=0 stores each row's state; FZ_GDN_REPLAY=1 keeps one state per layer and replays the previous window's accepted rows from its saved K, V, norms and gates before the next window. Qwen4 specializations retain this body and declare their own head geometry, gate and exact weight storage.

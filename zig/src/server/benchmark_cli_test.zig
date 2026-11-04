@@ -296,6 +296,16 @@ pub fn managedWorld(a: std.mem.Allocator, chat_trickles: bool) !*fake.Fake {
     }));
 }
 
+/// ``managedWorld`` whose replies end with ``speculative`` draft counters (members of a JSON object).
+pub fn draftedWorld(a: std.mem.Allocator, speculative: []const u8) !*fake.Fake {
+    return fake.Fake.start(std.testing.allocator, try a.dupe(fake.Route, &.{
+        .{ .method = "GET", .path = "/health", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"status\": \"ok\", \"warming\": false}")}) },
+        .{ .method = "GET", .path = "/v1/models", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"data\": [{\"id\": \".tensorfold-benchmark\"}]}")}) },
+        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.drafted(a, false, 4, 15, speculative)}) },
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.drafted(a, true, 4, 15, speculative)}) },
+    }));
+}
+
 pub fn childGone(r: *Run) !bool {
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("pid"), r.a, .limited(64));
     const pid = try std.fmt.parseInt(std.posix.pid_t, std.mem.trim(u8, text, " \n"), 10);
@@ -323,7 +333,7 @@ test "a managed run starts its own serve, measures through it, stops it and save
     try std.testing.expectEqualStrings(server.buildBackend(), rt.get("backend").?.string);
     const m = v.get("model").?;
     try std.testing.expect(m.get("local").?.bool and m.get("repo_id").? == .null and std.mem.eql(u8, m.get("quantization").?.string, "mlx-4bit-g64"));
-    try std.testing.expect(v.get("settings").?.get("managed").?.bool and std.mem.eql(u8, v.get("settings").?.get("rank_count").?.int, "1"));
+    try std.testing.expect(v.get("settings").?.get("managed").?.bool and v.get("settings").?.get("rank_count").? == .null);
     try std.testing.expect(std.mem.indexOf(u8, try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out, a, .limited(1 << 20)), "private-checkpoint") == null);
     const again = server.lockRun(std.testing.io, try r.path(".tensorfold/benchmarks"), &problem) orelse return error.TestUnexpectedResult;
     again.close(std.testing.io);

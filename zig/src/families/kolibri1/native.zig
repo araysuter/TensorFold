@@ -7,6 +7,8 @@ const kern = @import("kernels.zig");
 const fwd = @import("forward.zig");
 const be = @import("backend.zig");
 const snap = @import("snap.zig");
+const limits = @import("context.zig");
+const kv = @import("core").kv_pool;
 
 pub const model_type = "kolibri1";
 pub const formats: []const []const u8 = &.{"fp8-block"};
@@ -21,11 +23,13 @@ pub const drafter_refusal = "--drafter: Kolibri-1 on CUDA loads no drafter yet; 
 
 /// `explain` words this family's open refusals too.
 pub const explains_open = true;
+/// A request's verify reserve: its pages hold that many rows past its prompt and reply.
+pub const window_rows: u32 = be.max_window;
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-/// No `vision` or `precision` field: the server refuses --vision and --precision for this family by name.
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null };
+/// No `vision` or `precision` field (refused by name). kv_pages false, or TENSORFOLD_KOLIBRI_KV_PAGES=0: linear caches.
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, kv_pages: bool = true };
 
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
@@ -41,6 +45,10 @@ pub const Loaded = struct {
     lone: ?LoneRun = null,
     learn_bytes: usize = 0,
     target: *be.Kolibri, // the prompt cache keeps this backend's states (snap_*)
+    /// The full layers' caches as pages of the core pool (null: every stream's linear, made at open).
+    layout: ?kv.Layout = null,
+    /// With a layout: the first stream's full rows are pages too, a window of them set aside by the plan.
+    engine_paged: bool = true,
 };
 
 const Owned = struct { gpa: std.mem.Allocator, w: weights.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, kb: be.Kolibri };
@@ -56,27 +64,54 @@ fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
     return n;
 }
 
-/// The device bytes `n` streams take: their caches, the forward's scratch and the backend's buffers.
+/// The device bytes `n` streams take: their caches, the forward's scratch and the backend's buffers (paged: no pages).
 const Plan = struct {
     own: *const Owned,
     d: *const cuda.Driver,
     context: usize,
+    paged: bool,
 
     fn bytes(p: Plan, n: usize) !u64 {
         const o = p.own;
-        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, &o.k, p.context, n, be.prompt_rows) + be.Kolibri.openBytes(o.w.config.vocab, n);
+        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, &o.k, p.context, n, be.prompt_rows, p.paged) + be.Kolibri.openBytes(o.w.config.vocab, if (p.paged) be.round_rows else n);
     }
 };
 
-/// Positions a stream's caches hold: the window, whole 1,024s.
-fn positions(context: usize) usize {
-    return (context + 1023) / 1024 * 1024;
+/// Whether the full layers' caches lease the pool's pages: asked, and not turned off by TENSORFOLD_KOLIBRI_KV_PAGES=0.
+fn pagesOn(o: Options) bool {
+    const v = std.c.getenv("TENSORFOLD_KOLIBRI_KV_PAGES") orelse return o.kv_pages;
+    return o.kv_pages and !std.mem.eql(u8, std.mem.span(v), "0");
+}
+
+/// Paged: the first stream's rings and the scratch must fit; the host plans the pool after.
+fn fitFirst(room: u64, plan: anytype) !usize {
+    if (try plan.bytes(1) > room) return error.NoStreamFits;
+    return 1;
+}
+
+/// The pool: `streams` more slots beside the first and an arena of `n` pages.
+pub fn attach(p: *anyopaque, streams: u32, n: usize) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    try own.kb.attach(streams, n);
+}
+
+/// Whether a request's caches could start now (the lane host's admission, on its engine thread).
+pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
+    const own: *const Owned = @ptrCast(@alignCast(p));
+    return own.kb.admits(prompt, max_tokens);
+}
+
+/// Physical positions include the verification reserve, in whole 1,024s; the served window is unchanged.
+fn positions(context: usize) !usize {
+    return limits.capacity(context);
 }
 
 /// The checkpoint, the shared kernels and every stream's caches.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    const priority_copies = try cuda.priority_copies.read("TF_KOLIBRI_COPIES", o.drafts);
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound; // before the weights load
+    const context = try positions(o.context);
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
@@ -86,20 +121,21 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.k.deinit();
     own.s = try cuda.Stream.init(ctx.d, false);
     errdefer own.s.deinit();
-    const context = positions(o.context);
     // every stream's caches are allocated here and none later: plan them inside the room the weights leave
-    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context };
+    const paged = pagesOn(o);
+    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .paged = paged };
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
-    const n = fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
+    const n = if (paged) try fitFirst(room, plan) else fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
         if (e == error.ParallelPastMemory) {
             const most = fit(room, o.lanes, false, plan) catch 0;
             std.log.err("--parallel {d} needs {d:.2} GiB at a {d}-token window and the CUDA memory budget leaves {d:.2} GiB after the weights: {d} stream{s} fit", .{ o.lanes, gib(try plan.bytes(o.lanes)), context, gib(room), most, if (most == 1) "" else "s" });
         }
         return e;
     };
-    own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, context, n, be.prompt_rows);
+    own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, context, n, be.prompt_rows, paged);
     errdefer own.m.deinit();
     own.kb = try be.Kolibri.init(gpa, ctx.d, &own.m, &own.k, own.s);
+    own.kb.priority_copies = priority_copies;
     return .{
         .backend = own.kb.backend(),
         .facts = own.kb.facts(),
@@ -109,6 +145,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .ctx = own,
         .deinit = release,
         .target = &own.kb,
+        .layout = if (paged) own.m.layout() else null,
     };
 }
 
@@ -120,9 +157,22 @@ fn kolibri(ptr: *anyopaque) *be.Kolibri {
     return @ptrCast(@alignCast(ptr));
 }
 
-/// Bytes a state at `at` prompt tokens takes.
+/// Bytes a state at `at` prompt tokens takes (TF_KV_SHARE: the pool pages its rings take, past the store's pages).
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
-    return snap.bytes(kolibri(ptr).m, at);
+    const x = kolibri(ptr);
+    if (x.prompts == null) return snap.bytes(x.m, at, 0);
+    return snap.blobPages(x.m, at, at) * x.m.pageBytes();
+}
+
+/// TF_KV_SHARE: the pool the store keeps prompts in (null: linear caches, no pool).
+pub fn share_pool(ptr: *anyopaque) ?*kv.Pool {
+    const x = kolibri(ptr);
+    return if (x.pool) |*p| p else null;
+}
+
+/// TF_KV_SHARE: the store the prompt passes keep and resume through (null: none, as before).
+pub fn share_attach(ptr: *anyopaque, prompts: ?@import("core").kv_prompts.Prompts) void {
+    kolibri(ptr).prompts = prompts;
 }
 
 /// The prompt pass stands at `at` (a chunk start): copy the stream's caches there.
@@ -173,7 +223,7 @@ test "every refusal of its own is worded, the rest left to the server" {
         try std.testing.expect(explain(null, e) != null);
     }
     try std.testing.expect(explain(null, error.OutOfMemory) == null);
-    try std.testing.expectEqual(@as(usize, 65536), positions(65000));
+    try std.testing.expectEqual(@as(usize, 65536), try positions(65000));
 }
 
 /// A synthetic plan: `stream` bytes a stream plus `fixed` bytes of scratch.
@@ -205,4 +255,11 @@ test "a fixed --parallel past a round's rows refuses, whatever the room" {
     const one: Fake = .{ .stream = g, .fixed = 0 };
     try std.testing.expectError(error.ParallelPastRound, fit(1024 * g, be.round_rows + 1, true, one));
     try std.testing.expectEqual(@as(usize, be.round_rows), try fit(1024 * g, be.round_rows, true, one));
+}
+
+test "Kolibri context: native capacity producer covers the logical limit and rejects overflow" {
+    const physical = try positions(262144);
+    try std.testing.expectEqual(@as(usize, 263168), physical);
+    try std.testing.expect(limits.fits(physical, 262080, 64));
+    try std.testing.expectError(error.Overflow, positions(std.math.maxInt(usize)));
 }

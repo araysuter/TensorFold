@@ -2,6 +2,8 @@
 const std = @import("std");
 const q = @import("qwen35");
 const cuda = @import("cuda");
+/// lanes.cost_rule.reps: each of the 64 live widths is timed that many times.
+const reps = 7;
 const Shape = q.engine.Engine.Shape;
 
 test "a lone window does not launch the widest row and stream capacity" {
@@ -55,13 +57,16 @@ test "selected live shape reaches real tiled projections and DeltaNet scan dispa
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Trace.launch;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = &d;
     e.stream = .{ .d = &d, .handle = null };
     e.fns.sums = function(&d, 1);
     e.fns.gdn_slots_1 = function(&d, 3);
+    e.affine.mlp128 = false;
     e.affine.gemv_fn = function(&d, 2);
     e.affine.gemv_blocks = 1;
     e.affine.pdl = false;
+    e.affine.wide_verify = false;
     e.affine.split = null;
     e.tables = .{ .d = &d, .ptr = 0x1000, .len = q.round.bytes };
     e.g.v_heads = 4;
@@ -83,6 +88,35 @@ test "selected live shape reaches real tiled projections and DeltaNet scan dispa
     try std.testing.expectEqual(@as(u32, 1), Trace.scan_segments);
 }
 
+/// The test's own clock: the fake probe advances it, so a timed window is one tick and never zero.
+const FakeClock = struct {
+    const tick_ns: i96 = std.time.ns_per_ms;
+    var ticks: i96 = 0;
+    fn reset() void {
+        ticks = 0;
+    }
+    fn advance() void {
+        ticks += 1;
+    }
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = @as(i96, ticks) * tick_ns };
+    }
+};
+
+var fake_vtable: std.Io.VTable = undefined;
+var fake_vtable_ready = false;
+
+/// The test's Io: the real one with the clock replaced by the test's own.
+fn fakeIo() std.Io {
+    if (!fake_vtable_ready) {
+        fake_vtable = std.testing.io.vtable.*;
+        fake_vtable.now = FakeClock.now;
+        fake_vtable_ready = true;
+    }
+    FakeClock.reset();
+    return .{ .userdata = std.testing.io.userdata, .vtable = &fake_vtable };
+}
+
 const WarmProbe = struct {
     const Cache = struct {
         advanced: bool = false,
@@ -95,6 +129,7 @@ const WarmProbe = struct {
     n_taps: usize = 5,
     calls: [65]usize = @splat(0),
     costs: [64]bool = @splat(false),
+    ms: [64]f64 = @splat(0),
     failed: bool = false,
     failed_at: usize = 0,
     pub fn forward(p: *WarmProbe, parts: []const Part, ids: []const u32, keep: q.engine.Keep) !void {
@@ -104,12 +139,14 @@ const WarmProbe = struct {
         try std.testing.expectEqual(parts[0].rows, ids.len);
         try std.testing.expectEqual(ids.len, keep.draws.len);
         for (ids) |id| try std.testing.expectEqual(@as(u32, 0), id);
+        FakeClock.advance();
         c.advanced = true;
         p.calls[ids.len] += 1;
         if (p.failed or p.failed_at == ids.len) return error.PlantedWarmFailure;
     }
-    pub fn setCost(p: *WarmProbe, rows: u32, _: f64) void {
+    pub fn setCost(p: *WarmProbe, rows: u32, cost: f64) void {
         p.costs[rows - 1] = true;
+        p.ms[rows - 1] = cost;
     }
 };
 
@@ -117,14 +154,16 @@ test "startup warms shared shapes once but measures all live widths independentl
     var probe: WarmProbe = .{};
     var cache: WarmProbe.Cache = .{};
     var seen: q.native.warm.Seen = .{};
-    try q.native.warm.time(std.testing.io, &probe, &probe, &cache, &seen);
+    try q.native.warm.time(fakeIo(), &probe, &probe, &cache, &seen);
     var calls: usize = 0;
     for (probe.calls) |n| calls += n;
-    try std.testing.expectEqual(@as(usize, 74), calls);
-    try std.testing.expectEqual(@as(usize, 3), probe.calls[1]);
-    try std.testing.expectEqual(@as(usize, 3), probe.calls[2]);
-    try std.testing.expectEqual(@as(usize, 1), probe.calls[3]);
+    try std.testing.expectEqual(@as(usize, 10 + 64 * reps), calls);
+    try std.testing.expectEqual(@as(usize, 2 + reps), probe.calls[1]);
+    try std.testing.expectEqual(@as(usize, 2 + reps), probe.calls[2]);
+    try std.testing.expectEqual(@as(usize, reps), probe.calls[3]);
     for (probe.costs) |measured| try std.testing.expect(measured);
+    // The injected clock gives every measured window one tick, so none of them can be zero.
+    for (probe.ms) |m| try std.testing.expectEqual(@as(f64, 1.0), m);
     try std.testing.expectEqual(@as(usize, 5), seen.len);
     for (1..65) |rows| try std.testing.expect(seen.contains(Shape.init(rows, 1, true, true, 1)));
     var again: usize = 0;
@@ -137,7 +176,7 @@ test "startup warms shared shapes once but measures all live widths independentl
     try std.testing.expectEqual(@as(usize, 11), again);
     probe.failed = true;
     var empty: q.native.warm.Seen = .{};
-    try std.testing.expectError(error.PlantedWarmFailure, q.native.warm.time(std.testing.io, &probe, &probe, &cache, &empty));
+    try std.testing.expectError(error.PlantedWarmFailure, q.native.warm.time(fakeIo(), &probe, &probe, &cache, &empty));
     try std.testing.expectEqual(@as(usize, 0), empty.len);
 }
 
@@ -147,20 +186,21 @@ test "shared warmups count actual passes without replacing any width measurement
     var seen: q.native.warm.Seen = .{};
     const shape = Shape.init(1, 1, true, true, 1);
     seen.mark(shape);
-    try q.native.warm.time(std.testing.io, &probe, &probe, &cache, &seen);
+    try q.native.warm.time(fakeIo(), &probe, &probe, &cache, &seen);
     var calls: usize = 0;
     for (probe.calls) |n| calls += n;
-    try std.testing.expectEqual(@as(usize, 73), calls);
-    try std.testing.expectEqual(@as(usize, 2), probe.calls[1]);
+    try std.testing.expectEqual(@as(usize, 9 + 64 * reps), calls);
+    try std.testing.expectEqual(@as(usize, 1 + reps), probe.calls[1]);
     try std.testing.expect(!cache.advanced);
     for (probe.costs) |measured| try std.testing.expect(measured);
+    for (probe.ms) |m| try std.testing.expectEqual(@as(f64, 1.0), m);
 }
 
 test "a failed width sweep publishes no partial measured table" {
     var probe: WarmProbe = .{ .failed_at = 17 };
     var cache: WarmProbe.Cache = .{};
     var seen: q.native.warm.Seen = .{};
-    try std.testing.expectError(error.PlantedWarmFailure, q.native.warm.time(std.testing.io, &probe, &probe, &cache, &seen));
+    try std.testing.expectError(error.PlantedWarmFailure, q.native.warm.time(fakeIo(), &probe, &probe, &cache, &seen));
     for (probe.costs) |measured| try std.testing.expect(!measured);
 }
 
@@ -179,6 +219,12 @@ test "deferred calibration: a late failure frees temporary storage and publishes
 
 test "served scratch: one drafter frame does not allocate 128 streams of logits and attention" {
     var d: q.draft.Draft = undefined;
+    var target: q.engine.Engine = undefined;
+    target.g.hidden = 5120;
+    target.g.layers = 64;
+    target.g.experts = 0;
+    d.e = &target;
+    d.projection_role = .proposal;
     d.c = .{ .hidden = 5120, .intermediate = 17408, .layers = 5, .vocab = 248320, .heads = 32, .kv_heads = 8, .head_dim = 128, .block = 16, .mask = 248070, .window = 2048, .group = 16, .rank = 256, .topk = 16, .eps = 1e-6, .theta = 10000000, .taps = @splat(0), .n_taps = 5 };
     d.frame_streams = 1;
     d.scratch_one = 23667968;

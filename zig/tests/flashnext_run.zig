@@ -295,7 +295,7 @@ pub fn main(init: std.process.Init) !void {
     r.gdn_step = platform.c.getenv("FZ_GDN_STEP") != null;
     r.hc_mma = platform.c.getenv("FZ_HC_MMA") != null;
     r.hc_up = platform.c.getenv("FZ_HCCHECK") != null or if (platform.c.getenv("FZ_HC_UP")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else false;
-    r.event = try device.sharedEvent();
+    r.event = try device.event();
     r.dense = r.xnew and platform.c.getenv("FZ_DENSE") != null;
     r.dense_target = r.dense and platform.c.getenv("FZ_DENSE_TARGET") != null;
     r.xpack = r.xnew and platform.c.getenv("FZ_XPACK") != null;
@@ -509,7 +509,7 @@ pub fn main(init: std.process.Init) !void {
         return @import("flashnext_bench.zig").run(&r, m, &toks, gpa, arena);
     }
     if (platform.c.getenv("FZ_PROFILE") != null) {
-        if (platform.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
+        if (platform.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, init.io, r.device, std.mem.span(path));
         var hcskips: std.ArrayList(u32) = .empty; // FZ_HCSKIP=1,2,4: the profile again under each hc knock-out
         if (platform.c.getenv("FZ_HCSKIP")) |v| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
@@ -1396,10 +1396,10 @@ pub fn main(init: std.process.Init) !void {
             if (r.split) { // untracked buffers: the window waits on the head's signal, not on queue order alone
                 r.enc.end();
                 r.event_value += 1;
-                cb.signal(r.event, r.event_value);
+                cb.signalEvent(r.event, r.event_value);
                 cb.commit();
                 wcb = r.queue.commandBuffer();
-                wcb.waitFor(r.event, r.event_value);
+                wcb.waitForEvent(r.event, r.event_value);
                 r.enc = wcb.compute(if (r.serial) .serial else .concurrent);
             }
             m.windowMeta(d + 1);
@@ -1600,7 +1600,7 @@ pub fn main(init: std.process.Init) !void {
         while (true) {
             const wr = widths.items[round];
             const cb = r.queue.commandBuffer();
-            if (round > 0) cb.waitFor(r.event, base + round);
+            if (round > 0) cb.waitForEvent(r.event, base + round);
             r.enc = cb.compute(if (r.serial) .serial else .concurrent);
             m.t.rows = rows_w[wr];
             m.t.mdims = mdims_w[wr];
@@ -1626,7 +1626,7 @@ pub fn main(init: std.process.Init) !void {
             r.enc.setBuffer(g_hist, 0, 6);
             r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
             r.enc.end();
-            cb.signal(r.event, base + round + 1);
+            cb.signalEvent(r.event, base + round + 1);
             cb.commit();
             try cbs.append(gpa, cb);
             round += 1;

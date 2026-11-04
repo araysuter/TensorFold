@@ -48,7 +48,7 @@ pub const Images = struct {
     pub const video = video_mod;
 
     /// Rank 0 (`tower`) or another rank: the rows buffer, and rank 0's tower; null with `problem` when no tower.
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, dir: []const u8, limits: Limits, max_rows: usize, tower: bool, problem: *[]const u8) !?*Images {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, dir: []const u8, limits: Limits, max_rows: usize, tower: bool, ql: cuda.qlinear.Linear, problem: *[]const u8) !?*Images {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
         const a = arena.allocator();
@@ -71,7 +71,7 @@ pub const Images = struct {
         errdefer v.map.free();
         v.host_map = try gpa.alloc(i32, max_rows);
         errdefer gpa.free(v.host_map);
-        if (tower) v.tower = try vision.Tower.load(gpa, io, d, dir);
+        if (tower) v.tower = try vision.Tower.load(gpa, io, d, dir, ql);
         v.marks = .{ .image = cfg.image_token, .open = cfg.image_start, .close = cfg.image_end };
         v.mark_ids = .{ cfg.image_start, cfg.image_token, cfg.image_end };
         return v;
@@ -150,6 +150,11 @@ pub const Images = struct {
 
     /// Rank 0: a prompt pass on `slot` from row `from`: the images whose rows end past it, through the tower.
     pub fn begin(v: *Images, slot: u32, images: []const lanes.stream.Image, from: usize) !void {
+        return v.beginUsing(slot, images, from, vision.Tower.encode);
+    }
+
+    /// The production admission and suffix selection, with the encoder fixed at compile time.
+    pub fn beginUsing(v: *Images, slot: u32, images: []const lanes.stream.Image, from: usize, comptime encode: anytype) !void {
         try v.activate(slot);
         v.clear();
         errdefer v.clear();
@@ -159,7 +164,7 @@ pub const Images = struct {
             if (img.gh * img.gw != img.tokens * vcfg.patches_per_token) return error.ImageOutOfStep;
             if (img.at + img.tokens <= from) continue; // in the kept state already
             if (img.tokens > (try v.rowLimit()) -| row) return error.ImageRows; // the server holds a request to its limits
-            try t.encode(&v.run, img.pixels, .{ 1, img.gh, img.gw }, v.rows.ptr + @as(u64, row) * vcfg.out_hidden * 2);
+            try encode(t, &v.run, img.pixels, .{ 1, img.gh, img.gw }, v.rows.ptr + @as(u64, row) * vcfg.out_hidden * 2);
             try v.spans.append(v.gpa, .{ .at = img.at, .n = img.tokens, .row = row });
             row += img.tokens;
         }

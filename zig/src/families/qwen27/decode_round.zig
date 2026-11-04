@@ -1,10 +1,10 @@
 //! One command buffer verifies every layer; cache publication waits for the accepted path.
 const std = @import("std");
 const mtl = @import("metal");
-const source = @import("qwen_runtime_sources");
 const Model = @import("model.zig").Model;
 const Frame = @import("gpu_frame.zig").Frame;
 const forward = @import("forward.zig");
+const Ref = @import("projection.zig").Ref;
 /// Layers a verify encodes before committing them, so the GPU starts while the CPU encodes the rest.
 const commit_every = 4;
 const wts = @import("gpu_weights.zig");
@@ -27,7 +27,9 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
 
 pub const Runner = struct {
     allocator: std.mem.Allocator,
+    residency: ?mtl.ResidencySet.Follow = null,
     model: *Model,
+    geometry: attn.planning.Geometry = .{},
     gdn: GdnPool,
     attention: attn.Attention,
     scratch: attn.Scratch,
@@ -44,8 +46,11 @@ pub const Runner = struct {
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
+    tail: ?forward.Tail = null,
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
+    gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
+    trace: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE's: each pass run while it is enabled is a round
     current_round: ?*const Round = null,
     current_gdn: ?*const GdnPlan = null,
     current_attention: ?*const attn.Plan = null,
@@ -54,6 +59,12 @@ pub const Runner = struct {
     rope: [attn.planning.max_streams]mrope.Layout = @splat(.{}),
     /// A prompt pass's image rows, while it runs.
     images: ?image_rows.Images = null,
+    /// A kept state's blit still reading a slot, by slot: the slot's next write waits for it (settleSlot).
+    reading: [attn.planning.max_streams]?mtl.CommandBuffer = @splat(null),
+    /// A tensor-parallel rank's all-reduce, threaded straight into the layer program; null on one Mac.
+    reduce: ?forward.Reduce = null,
+    /// The pair's head-seam picks (one u32 a row), required with `reduce`: unexchanged halves make the ranks diverge.
+    picks: ?Ref = null,
 
     pub fn init(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32) !Runner {
         return initReady(a, m, slots, capacity, slots);
@@ -62,6 +73,7 @@ pub const Runner = struct {
     /// A runner of `slots` whose first `ready` take their K/V rows now, the rest when first used (ensure).
     pub fn initReady(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32) !Runner {
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
+        const geometry = try attn.planning.Geometry.fromConfig(m.config, m.device.tensorUnits());
         const linear_index = try a.alloc(u32, m.config.layers);
         errdefer a.free(linear_index);
         const attention_index = try a.alloc(u32, m.config.layers);
@@ -84,13 +96,21 @@ pub const Runner = struct {
         const units = m.device.tensorUnits();
         // before M5 the tail attention reads its tensor-op results in the simdgroup-matrix layout (simd_attention.zig)
         if (!units) try @import("simd_attention.zig").check(m.device, m.queue);
-        const text = if (units) try a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt) else try @import("simd_attention.zig").rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
+        // both builds take the kernels' KV group as the defines attention_mpp.metal reads
+        const text = try @import("simd_attention.zig").grouped(a, units, true, geometry.group(), geometry.kv_heads);
         defer a.free(text);
-        const library = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
+        // before M5 the prompt kernels are optional: a chip that cannot build them keeps the decode path for prompts
+        const library = mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx()) catch |err| blk: {
+            if (units) return err;
+            std.log.info("qwen27: the prompt attention kernels do not build here ({t}); prompt rows take the decode path", .{err});
+            const base = try @import("simd_attention.zig").grouped(a, units, false, geometry.group(), geometry.kv_heads);
+            defer a.free(base);
+            break :blk try mtl.Library.fromSource(m.device, base, mtl.CompileOptions.mlx());
+        };
         defer library.deinit();
-        var attention = try attn.Attention.init(m.device, library, units);
+        var attention = try attn.Attention.init(m.device, library);
         errdefer attention.deinit();
-        const limits = attn.Limits{ .rows = m.frame.capacity, .streams = slots, .keys = capacity, .shared_prefix = m.device.tensorUnits() };
+        const limits = attn.Limits{ .rows = m.frame.capacity, .streams = slots, .keys = capacity, .shared_prefix = geometry.shared_prefix, .geometry = geometry };
         var scratch = try attn.Scratch.init(m.device, limits);
         errdefer scratch.deinit();
         const bindings = try a.alloc(attn.Binding, na);
@@ -117,7 +137,7 @@ pub const Runner = struct {
         errdefer a.free(offsets);
         @memset(offsets, 0);
         const taps = try Taps.init(m.device, m.frame.capacity, @intCast(m.config.hidden));
-        return .{ .allocator = a, .model = m, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity };
+        return .{ .allocator = a, .model = m, .geometry = geometry, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity };
     }
 
     /// One slot's K/V rows across the attention layers.
@@ -137,6 +157,7 @@ pub const Runner = struct {
         const layers = r.caches.len / r.slots;
         for (0..layers) |layer| r.caches[layer * r.slots + slot] = try slotCache(r.allocator, r.model, &r.owned, r.capacity);
         r.ready += 1;
+        if (r.residency) |f| for (r.owned.items[first..]) |b| f.join(f.ctx, b);
         return r.owned.items[first..];
     }
 
@@ -148,7 +169,13 @@ pub const Runner = struct {
         };
     }
 
+    pub fn setResident(r: *Runner, hook: ?mtl.ResidencySet.Follow) void {
+        @import("residency.zig").setRunner(r, hook);
+    }
+
     pub fn deinit(r: *Runner) void {
+        for (0..r.slots) |slot| r.settleSlot(@intCast(slot));
+        r.setResident(null);
         r.taps.deinit();
         r.gdn.deinit();
         r.attention.deinit();
@@ -164,10 +191,12 @@ pub const Runner = struct {
     }
 
     pub fn profile(r: *Runner, trace: ?*@import("core").gpu_profile.Trace) void {
+        r.trace = trace;
         r.model.kernels.profiler = trace;
         r.model.glue.profiler = trace;
         r.gdn.profiler = trace;
         r.attention.profiler = trace;
+        if (r.model.moe) |*k| k.profiler = trace;
     }
 
     pub fn verify(r: *Runner, round: *const Round) !void {
@@ -185,7 +214,13 @@ pub const Runner = struct {
     }
 
     fn verifyImpl(r: *Runner, round: *const Round, head: forward.Head, accepted: bool) !void {
+        const metric = mtl.pass_metrics.phase(.verify);
+        defer metric.end();
         if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
+        mtl.pass_metrics.rows(round.ids.len);
+        if (r.tail != null and (accepted or head != .all)) return error.BadVerifyTail;
+        // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
+        if (r.tail != null and r.reduce != null) return error.TailOnRank;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
         defer r.allocator.free(paths);
@@ -202,6 +237,10 @@ pub const Runner = struct {
         defer r.accepted_chain = false;
         var recurrent = try round.recurrent(try r.params(round.ids.len), paths);
         defer recurrent.deinit();
+        if (r.gdn.marks) |m| {
+            if (!accepted or !r.model.kernels.prompt or r.capture_taps) return error.BadPromptMarks;
+            try m.check(recurrent);
+        }
         var attention_plan = try r.attentionPlan(round);
         defer attention_plan.deinit();
         try r.gdn.prepare(r.model.device, recurrent, accepted);
@@ -221,15 +260,26 @@ pub const Runner = struct {
         if (r.capture_taps) r.taps.begin();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .images = placed.images };
+        const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
+        const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
+        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
+        };
+        // A seam cannot fail while encoding: the transport reports it out of band, and a broken pair fails the round.
+        if (r.reduce) |red| if (red.broken()) {
+            r.failed = true;
+            return error.PairFailed;
         };
         if (r.model.ane) |share| share.drain() catch |err| {
             r.failed = true;
             return err;
         };
+        if (r.trace) |t| {
+            r.gpu_seconds += r.last_gpu_seconds + (t.spanned - spanned) + (if (r.model.ane) |share| share.gpu_seconds - handed else 0);
+            t.round();
+        }
         if (r.capture_taps) try r.taps.complete();
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
@@ -275,14 +325,32 @@ pub const Runner = struct {
 
     /// A validated single-window round consumes authoritative GPU keep metadata without host path selection.
     pub fn keepDevice(r: *Runner, round: *const Round, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
-        const active = r.active orelse return error.RoundNotReady;
-        if (r.failed or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
+        try r.checkDeviceKeep(round);
         var recurrent = try round.recurrent(try r.params(round.ids.len), &.{&.{}});
         defer recurrent.deinit();
         var attention_plan = try r.attentionPlan(round);
         defer attention_plan.deinit();
         const m = r.metadata();
         try m.upload(recurrent);
+        return r.encodeDeviceKeep(round, recurrent, attention_plan, e, ops, result);
+    }
+
+    pub fn checkDeviceKeep(r: *const Runner, round: *const Round) !void {
+        const active = r.active orelse return error.RoundNotReady;
+        if (r.failed or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
+    }
+
+    /// Encode only: the caller commits after the lane core publishes its authoritative path.
+    pub fn prepareDeviceKeep(r: *Runner, round: *const Round, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
+        if (r.failed or r.accepted_chain or r.current_round != round or r.tail == null) return error.RoundNotReady;
+        if (round.windows.len != 1) return error.RoundNotReady;
+        const recurrent = r.current_gdn orelse return error.RoundNotReady;
+        const attention_plan = r.current_attention orelse return error.RoundNotReady;
+        return r.encodeDeviceKeep(round, recurrent.*, attention_plan.*, e, ops, result);
+    }
+
+    fn encodeDeviceKeep(r: *Runner, round: *const Round, recurrent: GdnPlan, attention_plan: attn.Plan, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
+        const m = r.metadata();
         const p = @import("core").tree_commit_gpu.Meta{ .rows = @intCast(round.ids.len), .slot = round.slots[0] };
         const keep_ref = @import("core").tree_commit_gpu.Ref{ .buf = m.keeps.buffer, .off = m.keeps.offset };
         const rows = @import("core").tree_commit_gpu.Ref{ .buf = m.kept_rows.buffer, .off = m.kept_rows.offset };
@@ -327,7 +395,22 @@ pub const Runner = struct {
         if (r.active == null) r.gdn.releaseBefore();
     }
 
+    /// A kept state's blit reading `slot` lands before the slot is written: its reset, next chunk or first round.
+    pub fn settleSlot(r: *Runner, slot: u32) void {
+        const cb = r.reading[slot] orelse return;
+        r.reading[slot] = null;
+        cb.wait();
+        cb.release();
+    }
+
+    /// `cb` reads `slot` (committed, not waited): the slot's next write settles it first.
+    pub fn readingSlot(r: *Runner, slot: u32, cb: mtl.CommandBuffer) void {
+        r.settleSlot(slot);
+        r.reading[slot] = cb.retain();
+    }
+
     pub fn reset(r: *Runner, slot: u32) !void {
+        r.settleSlot(slot);
         if (r.failed or r.active != null or slot >= r.ready) return error.RoundNotReady;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -354,14 +437,14 @@ pub const Runner = struct {
     }
 
     pub fn promptRows(r: *const Runner, requested: u32) u32 {
-        return (attn.planning.Geometry{ .shared_prefix = r.model.device.tensorUnits() }).promptRows(@min(requested, r.model.frame.capacity));
+        return r.geometry.promptRows(@min(requested, r.model.frame.capacity));
     }
 
     fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
         for (round.windows, 0..) |window, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = r.capacity };
-        return attn.Plan.init(r.allocator, windows[0..round.windows.len], .{ .shared_prefix = r.model.device.tensorUnits() });
+        return attn.Plan.init(r.allocator, windows[0..round.windows.len], r.geometry);
     }
 
     fn layerCaches(r: *Runner, layer: usize, round: *const Round, views: *[attn.planning.max_streams]attn.Cache) []const attn.Cache {
@@ -385,11 +468,12 @@ pub const Runner = struct {
         try r.model.kernels.quant(e, weights.q, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.q_gate), rows);
         try r.model.kernels.quant(e, weights.kv, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.mixed), rows);
         e.barrier();
-        try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = 1024, .stride = 2048, .offset = 0 });
-        try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = 1024, .stride = 2048, .offset = 1024 });
+        const kv: u32 = @intCast(r.model.config.kvDim());
+        try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = 0 });
+        try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
         e.barrier();
-        try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity });
-        try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt);
+        try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry });
+        try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
     }
 
     fn tap(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: @import("projection.zig").Ref, rows: u32) !void {

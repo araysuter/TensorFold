@@ -44,7 +44,7 @@ pub const Weights = struct {
         var files = try open(gpa, io, dir);
         defer {
             for (files.items) |*f| {
-                f.release();
+                f.release(gpa);
                 f.close(io);
             }
             files.deinit(gpa);
@@ -191,7 +191,7 @@ fn open(gpa: Allocator, io: std.Io, dir: []const u8) !std.ArrayList(st.File) {
     var named = try indexed(gpa, io, dir);
     defer if (named) |*n| freeNames(gpa, n);
     for (paths) |path| {
-        if (named) |n| if (!n.contains(std.fs.path.basename(path))) continue;
+        if (named) |n| if (!n.contains(path[dir.len + 1 ..])) continue;
         var f = try st.File.open(gpa, io, path);
         const has = for (f.names.keys()) |k| {
             if (ours(k)) break true;
@@ -215,13 +215,16 @@ fn ours(name: []const u8) bool {
 fn indexed(gpa: Allocator, io: std.Io, dir: []const u8) !?std.StringHashMapUnmanaged(void) {
     const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors.index.json" });
     defer gpa.free(path);
-    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 27)) catch return null;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 27)) catch |err| {
+        if (err == error.FileNotFound) return null;
+        return err;
+    };
     defer gpa.free(text);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
     defer parsed.deinit();
     var out: std.StringHashMapUnmanaged(void) = .empty;
     errdefer freeNames(gpa, &out);
-    var it = (parsed.value.object.get("weight_map") orelse return error.BadIndex).object.iterator();
+    var it = (try core.safetensors.index.weightMap(parsed.value)).iterator();
     while (it.next()) |e| if (ours(e.key_ptr.*) and !out.contains(e.value_ptr.string)) {
         try out.put(gpa, try gpa.dupe(u8, e.value_ptr.string), {});
     };
@@ -237,6 +240,29 @@ fn freeNames(gpa: Allocator, names: *std.StringHashMapUnmanaged(void)) void {
 test "a layer's tensors are known; a layer scale is not" {
     try std.testing.expect(Planner.known(tower ++ "blocks.31.mlp.fc2.bias"));
     try std.testing.expect(!Planner.known(tower ++ "blocks.3.ls1.gamma"));
+}
+
+test "the image tensors' shard is found in the folder the index names" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tensors");
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(dir);
+    const path = try std.fs.path.join(gpa, &.{ dir, "tensors", "vision.safetensors" });
+    defer gpa.free(path);
+    try core.shard_edit.create(gpa, path, &.{}, &.{.{ .name = "vision_model.x", .dtype = .u8, .shape = &.{4}, .bytes = "seen" }});
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "model.safetensors.index.json",
+        .data = "{\"weight_map\":{\"vision_model.x\":\"tensors/vision.safetensors\"}}",
+    });
+    var files = try open(gpa, io, dir);
+    defer {
+        for (files.items) |*f| f.close(io);
+        files.deinit(gpa);
+    }
+    try std.testing.expectEqual(@as(usize, 1), files.items.len);
 }
 
 const Failed = struct {

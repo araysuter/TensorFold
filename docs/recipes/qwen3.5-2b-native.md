@@ -15,6 +15,8 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/qwen35-2b" \
   --name bench --port 8090 --parallel 8 --context 70000 --no-thinking
 ```
 
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 An existing download at that revision can be used directly. The native binary serves
 `http://127.0.0.1:8090/v1`; decoding and tokenization run in Zig. This preview recipe invokes the native
 binary directly. It does not add a release gate for Python's automatic engine selection.
@@ -40,8 +42,13 @@ one-row rounds still go through the shared lane engine. GPU execution failures s
 The qualified path has up to 16 rows per stream and 32 rows per shared forward. Prompt chunks have up to
 128 rows and follow the server's planned boundaries. `--no-drafts` supplies the plain reference.
 
-There is no cross-request prompt reuse in the native preview. Follow-up turns process the rendered
-conversation afresh. A repeated reply is a fresh-execution check, not validation of a restored prefix cache.
+Cross-request prompt reuse is opt-in with `--prompt-cache-gib N`; omitting it or passing zero keeps fresh execution.
+The core prompt-cache store keeps committed recurrence, convolution tails, attention K/V and logits in host memory.
+It reuses only compatible prompt cuts on the 128-token grid or the request's explicit chunk boundaries, within the
+memory budget. The optional paged K/V path restores the same image into newly allocated pages. This is RAM retention;
+restart persistence and learned-state files are not enabled for the 2B. With the 4-bit checkpoint on an M5 Ultra and an
+M3 Ultra, every resumed chat reply equalled a fresh one. On the M3 Ultra, two prompts resuming from one 896-token kept
+state, at 1, 2 and 4 streams and temperatures 0 and 1.0, gave each request the same tokens as alone (28 Oct 2026).
 The checkpoint's config allows 262,144 positions, but that is not a memory or throughput qualification for
 that length. `--context` controls request admission; KV buffers are sized for each request's prompt and reply.
 

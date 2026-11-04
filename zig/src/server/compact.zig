@@ -52,7 +52,14 @@ pub fn reserveTokens(window: i64, at: CompactAt) i64 {
 }
 
 pub fn noteBudgetTokens(window: i64, at: CompactAt) i64 {
-    return @min(8192, @max(1, @divTrunc(reserveTokens(window, at) * 4, 5)));
+    return @min(8192, @max(1, @divTrunc(reserveInWindow(window, at) * 4, 5)));
+}
+
+/// Auto's 16384 floor applies only while the window holds it; a smaller window reserves fifteen percent.
+fn reserveInWindow(window: i64, at: CompactAt) i64 {
+    const reserve = reserveTokens(window, at);
+    if (at != .auto or reserve < window) return reserve;
+    return @max(@as(i64, 1), @divTrunc(window * 15, 100));
 }
 
 pub fn keepTokens(window: u32, override: ?u32) usize {
@@ -71,7 +78,7 @@ fn threshold(window: i64, f: f64) i64 {
 fn over(prompt: usize, max_out: i64, window: i64, at: CompactAt) bool {
     const sum = @as(i64, @intCast(prompt)) + @max(0, max_out);
     return switch (at) {
-        .auto => sum > window - reserveTokens(window, at),
+        .auto => sum > window - reserveInWindow(window, at),
         .fraction => |f| sum > threshold(window, f),
     };
 }
@@ -107,7 +114,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype) chat.Fai
     if (chat.prepare(srv, cx, input, gone)) |prepared| {
         if (!over(prepared.prompt_len, wanted(srv, input), window, at))
             return .{ .prepared = prepared, .stamp = .{ .window = window, .used = prepared.prompt_len } };
-        chat.release(srv, prepared.preparing);
+        srv.release(prepared.preparing, prepared.request);
     } else |e| if (!(e == error.Refused and cx.kind == .context_length)) return e;
     return rebuild(srv, cx, input, gone, at, input.messages.array);
 }
@@ -128,14 +135,14 @@ pub fn stamp(cx: *Cx, reply: *chat.Reply, s: Stamp) chat.Failure!void {
 
 fn rebuild(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype, at: CompactAt, msgs: []Value) chat.Failure!Ready {
     const a = cx.a;
-    const marker = findMarker(msgs);
+    const marker = try findMarker(a, msgs);
     const slot = stored.loadMem(srv, a, msgs);
     const hash_ok = if (slot) |m| stored.hashes(a, msgs, m) else false;
     var prev: []const u8 = "";
     if (hash_ok) {
         prev = slot.?.note;
     } else if (marker) |i| {
-        prev = markerBody(msgs[i]) orelse "";
+        prev = try markerBody(a, msgs[i]) orelse "";
     }
     const skip: usize = if (hash_ok) slot.?.covered else if (marker) |i| i + 1 else 0;
     const prefix = prefixLen(msgs);
@@ -265,7 +272,7 @@ fn oneNote(srv: *Server, cx: *Cx, gone: anytype, task: []const u8, prev: []const
         };
         const room = srv.info.context_window - @as(i64, @intCast(fitted.prompt_len));
         if (room < 1) {
-            chat.release(srv, fitted.preparing);
+            srv.release(fitted.preparing, fitted.request);
             return .{ .text = prev, .tokens = 0 };
         }
         var out = fitted;
@@ -329,8 +336,11 @@ fn withoutExtra(note: []const u8) []const u8 {
     var end = note.len;
     for ([_][]const u8{ files_head, split_head }) |h| if (std.mem.indexOf(u8, note, h)) |i| {
         var at = i;
-        if (at > 0 and note[at - 1] == '\n') at -= 1;
-        if (at > 0 and note[at - 1] == '\n') at -= 1;
+        var breaks: usize = 0;
+        while (at > 0 and breaks < 2) : (breaks += 1) {
+            if (note[at - 1] == '\n') at -= 1 else if (note[at - 1] != '\r') break;
+            if (at > 0 and note[at - 1] == '\r') at -= 1; // a carriage return belongs to the line break
+        }
         if (at < end) end = at;
     };
     return note[0..end];
@@ -348,9 +358,21 @@ fn roleOf(m: Value) []const u8 {
     return if (r == .string) r.string else "";
 }
 
-fn contentOf(m: Value) []const u8 {
+/// A message's words: its content string, or its text parts joined with nothing between them.
+fn contentOf(a: Allocator, m: Value) Allocator.Error![]const u8 {
     const c = m.get("content") orelse return "";
-    return if (c == .string) c.string else "";
+    if (c == .string) return c.string;
+    if (c != .array) return "";
+    var buf: std.ArrayList(u8) = .empty;
+    for (c.array) |part| {
+        if (part != .object) continue;
+        const kind = part.get("type") orelse continue;
+        if (kind != .string or !std.mem.eql(u8, kind.string, "text")) continue;
+        const t = part.get("text") orelse continue;
+        if (t != .string) continue;
+        try buf.appendSlice(a, t.string);
+    }
+    return buf.items;
 }
 
 fn isLead(m: Value) bool {
@@ -369,21 +391,22 @@ fn prefixLen(msgs: []const Value) usize {
     return i;
 }
 
-fn findMarker(msgs: []const Value) ?usize {
+fn findMarker(a: Allocator, msgs: []const Value) Allocator.Error!?usize {
     var found: ?usize = null;
     for (msgs, 0..) |m, i| {
-        if (markerBody(m) != null) found = i;
+        if (try markerBody(a, m) != null) found = i;
     }
     return found;
 }
 
-fn markerBody(m: Value) ?[]const u8 {
+fn markerBody(a: Allocator, m: Value) Allocator.Error!?[]const u8 {
     const r = roleOf(m);
     if (!std.mem.eql(u8, r, "system") and !std.mem.eql(u8, r, "user") and !std.mem.eql(u8, r, "developer")) return null;
-    const c = contentOf(m);
-    if (!std.mem.startsWith(u8, c, marker_line)) return null;
-    var rest = c[marker_line.len..];
-    if (std.mem.startsWith(u8, rest, "\n")) rest = rest[1..];
+    const words = try contentOf(a, m); // text parts count, as a string note does
+    if (!std.mem.startsWith(u8, words, marker_line)) return null;
+    var rest = words[marker_line.len..];
+    if (rest.len > 0 and rest[0] == '\r') rest = rest[1..]; // a carriage return is not part of the note
+    if (rest.len > 0 and rest[0] == '\n') rest = rest[1..];
     return rest;
 }
 
@@ -457,7 +480,7 @@ fn lineOf(a: Allocator, m: Value) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     try buf.appendSlice(a, roleOf(m));
     try buf.appendSlice(a, ": ");
-    try buf.appendSlice(a, contentOf(m));
+    try buf.appendSlice(a, try contentOf(a, m));
     try appendCalls(a, &buf, m);
     return buf.items;
 }
@@ -525,7 +548,7 @@ fn pathsFromNote(a: Allocator, list: *std.ArrayList([]const u8), note: []const u
         const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
         const line = rest[0..end];
         if (std.mem.startsWith(u8, line, "- ")) {
-            const p = std.mem.trim(u8, line[2..], " \t");
+            const p = std.mem.trim(u8, line[2..], " \t\r"); // a carriage return is not part of the path
             if (p.len > 0) try addUnique(a, list, p);
         } else if (line.len > 0) break;
         if (end == rest.len) break;
@@ -536,4 +559,38 @@ fn pathsFromNote(a: Allocator, list: *std.ArrayList([]const u8), note: []const u
 fn addUnique(a: Allocator, list: *std.ArrayList([]const u8), p: []const u8) !void {
     for (list.items) |seen| if (std.mem.eql(u8, seen, p)) return;
     try list.append(a, p);
+}
+
+test "a memory marker made of text parts keeps its note" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"" ++ marker_line ++ "\\n\"},{\"type\":\"text\",\"text\":\"STORED-NOTE\"}]}";
+    const m = (try json.parseText(a, raw)).ok;
+    try std.testing.expectEqualStrings("STORED-NOTE", (try markerBody(a, m)).?);
+}
+
+test "a memory marker's note starts after a carriage return" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try msg(a, "user", marker_line ++ "\r\nSTORED-NOTE");
+    try std.testing.expectEqualStrings("STORED-NOTE", (try markerBody(a, m)).?);
+}
+
+test "a remembered file path drops a trailing carriage return" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var list: std.ArrayList([]const u8) = .empty;
+    try pathsFromNote(a, &list, "## Files read and changed\n- src/a.zig\r\n");
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqualStrings("src/a.zig", list.items[0]);
+}
+
+test "a generated section after carriage returns is left out of the note" {
+    const unix = "Goal\n\n" ++ files_head ++ "- src/a.zig\n";
+    const crlf = "Goal\r\n\r\n" ++ files_head ++ "- src/a.zig\r\n";
+    try std.testing.expectEqualStrings("Goal", withoutExtra(unix));
+    try std.testing.expectEqualStrings("Goal", withoutExtra(crlf));
 }

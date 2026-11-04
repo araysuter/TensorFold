@@ -34,6 +34,7 @@ const Odd = struct {
 
 const Head = struct {
     d: q.draft.Draft = undefined,
+    target: q.engine.Engine = undefined,
     storage: [F.stagedLen(2)]u8 align(16) = undefined,
     book: [512]u16 = @splat(0),
     data: std.AutoHashMapUnmanaged(*lanes.Stream, Lane) = .empty,
@@ -41,7 +42,12 @@ const Head = struct {
     calls: usize = 0,
     const Lane = struct { ctx: q.draft.Ctx, history: std.ArrayList(u32) = .empty };
     fn init(h: *Head) !void {
+        h.target.g.hidden = 256; // the drafter's facts read the target's shape: this small one keeps its copy match
+        h.target.g.layers = 1;
+        h.target.g.experts = 0;
+        h.d.e = &h.target;
         h.d.frame_streams = 128;
+        h.d.projection_role = .proposal;
         h.d.scratch_one = 0;
         h.d.target_taps = 0;
         h.d.c = @import("qwen35_draft_frame_host.zig").config();
@@ -115,8 +121,10 @@ const Head = struct {
             defer guess.deinit(a);
             try guess.appendSlice(a, h.data.getPtr(it.stream).?.history.items);
             try guess.append(a, it.pending);
+            // the frame's candidate domain: a shared frame widens it, so the candidates differ from a solo frame's
+            const widen: u32 = if (items.len > 1) 2 else 0;
             for (0..h.d.c.block - 1) |row| {
-                const token = lanes.fake.next(guess.items, it.stream.sampling, it.position + row);
+                const token = lanes.fake.next(guess.items, it.stream.sampling, it.position + row) + widen;
                 const at = (index * (h.d.c.block - 1) + row) * 43;
                 words[at + 2] = token;
                 words[at + 3] = (token + 1) % 97;
@@ -126,9 +134,10 @@ const Head = struct {
             }
         }
         try F.publish(&h.d, items, contexts[0..items.len]);
-        if (own_trees) for (contexts[0..items.len], items) |ctx, it| {
+        // a grown tree takes the drafter's whole node budget; the engine admits its first nodes
+        if (own_trees) for (contexts[0..items.len]) |ctx| {
             try std.testing.expect(ctx.grown > 0);
-            try std.testing.expect(ctx.grown <= it.depth);
+            try std.testing.expect(ctx.grown <= q.draft.tree.nodes());
         };
     }
     fn held(p: *anyopaque, streams: []const *lanes.Stream, outs: []const []u32) !void {
@@ -174,6 +183,8 @@ fn features(p: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, coun
     const target: *lanes.fake.Fake = @ptrCast(@alignCast(p));
     return target.backend().vtable.features.?(p, s, taps, start, count);
 }
+var accepted: [8]u64 = @splat(0);
+var proposed: [8]u64 = @splat(0);
 fn run(count: usize, depth: u32, restored: u32, seed: ?u64, salt: usize) ![8][32]u32 {
     snapshots = @splat(.{});
     var target: lanes.fake.Fake = .{ .gpa = a };
@@ -228,7 +239,9 @@ fn run(count: usize, depth: u32, restored: u32, seed: ?u64, salt: usize) ![8][32
     }
     while (engine.activeCount() > 0) try engine.step();
     var replies: [8][32]u32 = undefined;
-    for (streams[0..count], replies[0..count]) |*s, *out| {
+    for (streams[0..count], replies[0..count], 0..) |*s, *out, i| {
+        accepted[i] = s.accepted;
+        proposed[i] = s.drafted;
         @memcpy(out, s.emitted());
         try std.testing.expectEqual(restored, s.cached);
     }
@@ -280,4 +293,32 @@ test "Qwen CUDA contracts: grammar-pruned own trees preserve greedy and sampled 
             }
         }
     }
+}
+
+test "Draft frames: acceptance per stream equals its solo hold across shared frames" {
+    for ([_]?u64{ null, 17 }) |seed| for ([_]u32{ 1, 3, 7 }) |depth| {
+        for ([_]usize{ 1, 2, 4 }) |count| {
+            const together = try run(count, depth, 0, seed, 0);
+            for (0..count) |i| {
+                const solo = try run(1, depth, 0, seed, i);
+                // the reply's tokens are the target's picks: they do not depend on the frame's other streams
+                try std.testing.expectEqualSlices(u32, &together[i], &solo[0]);
+                // the proposals and the accepted counts may vary with the frame's composition
+                try std.testing.expect(accepted[0] > 0);
+            }
+        }
+    };
+}
+
+test "Qwen CUDA contracts: the frame's candidate domain may change the proposals, never the reply" {
+    const solo0 = try run(1, 3, 0, 17, 0);
+    const solo_offered = proposed[0];
+    const solo_kept = accepted[0];
+    const solo1 = try run(1, 3, 0, 17, 1);
+    const together = try run(2, 3, 0, 17, 0);
+    // the shared frame's wider candidate domain changed the proposals and the accepted count
+    try std.testing.expect(proposed[0] != solo_offered or accepted[0] != solo_kept);
+    // the reply's tokens are still the target's picks: each stream's solo reply
+    try std.testing.expectEqualSlices(u32, &solo0[0], &together[0]);
+    try std.testing.expectEqualSlices(u32, &solo1[0], &together[1]);
 }

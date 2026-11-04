@@ -146,6 +146,10 @@ const Engine = struct {
 };
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "CUDA")) |why| {
+        problem.* = why;
+        return null;
+    }
     const window: u32 = if (o.context) |c| blk: {
         if (c < 1 or c > default_context) {
             problem.* = try std.fmt.allocPrint(a, "--context {d}: d1 reads 1 to {d} tokens a decision", .{ c, default_context });
@@ -174,8 +178,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         const path = try std.fs.path.join(a, &.{ o.dir, "tokenizer.json" });
         var tok = try core.tokenizer.loadTokenizer(io, gpa, path);
         defer tok.deinit();
-        e.marks = lfm2.image.Marks.resolve(&tok);
-        if (e.marks != null) e.vision = try lfm2.vision.Vision.init(gpa, &e.driver, &e.cfg, vw);
+        var warning: []const u8 = "";
+        e.marks = lfm2.image.Marks.forPictures(&tok, &warning);
+        if (e.marks != null)
+            e.vision = try lfm2.vision.Vision.init(gpa, &e.driver, &e.cfg, vw)
+        else
+            std.log.warn("{s}", .{warning});
     }
     return .{ .engine = .{ .ctx = e, .vtable = &Engine.vtable }, .close = Engine.close, .ctx = e };
 }

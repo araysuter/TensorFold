@@ -3,9 +3,15 @@
 const std = @import("std");
 const Io = std.Io;
 const st = @import("safetensors.zig");
+const index_format = @import("checkpoint_index.zig");
+const prefetching = @import("checkpoint_prefetch.zig");
 
+pub const cache = @import("checkpoint_cache.zig");
 pub const Tensor = st.Tensor;
 pub const DType = st.DType;
+pub const Ahead = prefetching.Ahead;
+pub const max_readers = prefetching.max_readers;
+pub const loadReaders = prefetching.configured;
 
 /// The checkpoint's shard paths in name order: model.safetensors.index.json's weight map, else every model*.safetensors.
 pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
@@ -22,14 +28,15 @@ pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
         defer parsed.deinit();
         var seen: std.StringHashMapUnmanaged(void) = .empty;
         defer seen.deinit(gpa);
-        var it = parsed.value.object.get("weight_map").?.object.iterator();
+        var it = (try index_format.weightMap(parsed.value)).iterator();
         while (it.next()) |e| {
             const file = e.value_ptr.string;
             if ((try seen.getOrPut(gpa, file)).found_existing) continue;
             try names.ensureUnusedCapacity(gpa, 1);
             names.appendAssumeCapacity(try std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ dir, file }, 0));
         }
-    } else |_| {
+    } else |err| {
+        if (err != error.FileNotFound) return err;
         var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
         defer d.close(io);
         var it = d.iterate();
@@ -73,18 +80,23 @@ pub const Checkpoint = struct {
         return openModelPrefix(gpa, io, dir, null);
     }
     pub fn openModelPrefix(gpa: std.mem.Allocator, io: Io, dir: []const u8, prefix: ?[]const u8) !Checkpoint {
+        return openModelPrefixes(gpa, io, dir, if (prefix) |p| &.{p} else &.{});
+    }
+    /// Every shard of `dir`, mapped, with only names under `prefixes` indexed (an empty list: every name).
+    pub fn openModelPrefixes(gpa: std.mem.Allocator, io: Io, dir: []const u8, prefixes: []const []const u8) !Checkpoint {
         try @import("save_guard").check(io, dir);
         const paths = try shardFiles(gpa, io, dir);
         defer freeShardFiles(gpa, paths);
         var ck: Checkpoint = .{ .gpa = gpa, .io = io };
         errdefer ck.close();
         try ck.files.ensureTotalCapacityPrecise(gpa, paths.len);
-        for (paths) |p| ck.files.appendAssumeCapacity(try st.File.openPrefix(gpa, io, p, prefix));
+        for (paths) |p| ck.files.appendAssumeCapacity(try st.File.openPrefixes(gpa, io, p, prefixes));
         return ck;
     }
 
     /// One more file (an MTP head beside the model's files).
     pub fn add(self: *Checkpoint, dir: []const u8, name: []const u8) !void {
+        if (!index_format.plainName(name)) return error.BadIndex;
         const path = try std.fs.path.join(self.gpa, &.{ dir, name });
         defer self.gpa.free(path);
         try self.files.ensureUnusedCapacity(self.gpa, 1);
@@ -139,7 +151,29 @@ pub const Checkpoint = struct {
 
     /// Every file's pages out of the page cache (safetensors.File.release).
     pub fn release(self: *const Checkpoint) void {
-        for (self.files.items) |*f| f.release();
+        for (self.files.items) |*f| f.release(self.gpa);
+    }
+
+    /// `release`, leaving `keep`'s bytes (parts of these files read later) in the pages they live in.
+    pub fn releaseExcept(self: *const Checkpoint, keep: []const []const u8) void {
+        for (self.files.items) |*f| f.releaseExcept(keep, self.gpa);
+    }
+
+    /// Every tensor named `short`... read into the page cache by `readers` threads of their own until `join`.
+    pub fn prefetch(self: *const Checkpoint, short: []const u8, readers: usize) Ahead {
+        var buf: [320]u8 = undefined;
+        return prefetching.start(self, self.scoped(&buf, short) catch return .{}, readers);
+    }
+
+    /// `short`'s bytes marked read in no order (safetensors.File.adviseRandom): a table's rows, not its file.
+    pub fn adviseRandom(self: *Checkpoint, short: []const u8) !void {
+        var buf: [320]u8 = undefined;
+        const name = try self.scoped(&buf, short);
+        for (self.files.items) |*f| if (f.get(name)) |t| {
+            f.adviseRandom(t.bytes);
+            return;
+        };
+        return error.MissingTensor;
     }
 
     /// Names no `get` took (the loader refuses a checkpoint with leftovers).
@@ -286,6 +320,61 @@ test "has finds a name without taking it; skip marks a prefix used" {
     try std.testing.expectEqual(@as(usize, 0), ck.unused());
 }
 
+/// Whether the smaps block holding `at` is marked read in no order (`rr`, MADV_RANDOM); null with no such block.
+fn randomAdviceAt(gpa: std.mem.Allocator, io: Io, at: usize) !?bool {
+    // procfs reports size 0: read the stream, not the length
+    var file = try Io.Dir.cwd().openFile(io, "/proc/self/smaps", .{});
+    defer file.close(io);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    var buf: [64 << 10]u8 = undefined;
+    while (true) {
+        const got = file.readStreaming(io, &.{&buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (got == 0) break;
+        try text.appendSlice(gpa, buf[0..got]);
+    }
+    var lines = std.mem.splitScalar(u8, text.items, '\n');
+    var inside = false;
+    while (lines.next()) |line| {
+        if (std.mem.indexOfScalar(u8, line, '-')) |dash| {
+            const sp = std.mem.indexOfScalarPos(u8, line, dash, ' ') orelse continue;
+            const lo = std.fmt.parseInt(usize, line[0..dash], 16) catch continue;
+            const hi = std.fmt.parseInt(usize, line[dash + 1 .. sp], 16) catch continue;
+            inside = at >= lo and at < hi;
+        } else if (inside and std.mem.startsWith(u8, line, "VmFlags:")) {
+            var flags = std.mem.tokenizeAny(u8, line["VmFlags:".len..], " ");
+            while (flags.next()) |flag| if (std.mem.eql(u8, flag, "rr")) return true;
+            return false;
+        }
+    }
+    return null;
+}
+
+test "adviseRandom marks the mapping's pages as read in no order, and leaves the bytes alone" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "x", 64 << 10);
+    defer gpa.free(image);
+    for (image[image.len - (64 << 10) ..], 0..) |*b, i| b.* = @truncate(i * 7 + 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    const t = try ck.get("x");
+    const at = @intFromPtr(t.bytes.ptr);
+    // a fresh mapping: the kernel has not been told how it will be read
+    try std.testing.expectEqual(@as(?bool, false), try randomAdviceAt(gpa, io, at));
+    try ck.adviseRandom("x");
+    try std.testing.expectEqual(@as(?bool, true), try randomAdviceAt(gpa, io, at));
+    try std.testing.expectEqualSlices(u8, image[image.len - (64 << 10) ..], t.bytes);
+}
+
 test "after release the mapping stays readable: a later read faults the same bytes back in" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -302,6 +391,28 @@ test "after release the mapping stays readable: a later read faults the same byt
     try std.testing.expectEqualSlices(u8, image[image.len - 4096 ..], t.bytes);
     ck.release();
     try std.testing.expectEqualSlices(u8, image[image.len - 4096 ..], t.bytes);
+}
+
+test "releaseExcept keeps the kept tensor's bytes where they are, and a read of them is unchanged" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "x", 1 << 20);
+    defer gpa.free(image);
+    for (image[image.len - (1 << 20) ..], 0..) |*b, i| b.* = @truncate(i * 13 + 3);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    const t = try ck.get("x");
+    // a middle span, so bytes are dropped on both sides of it and the mapping stays readable either way
+    const keep = t.bytes[4096 .. 4096 + 8192];
+    const copy = try gpa.dupe(u8, keep);
+    defer gpa.free(copy);
+    ck.releaseExcept(&.{keep});
+    try std.testing.expectEqualSlices(u8, copy, keep);
+    try std.testing.expectEqualSlices(u8, image[image.len - (1 << 20) ..], t.bytes);
 }
 
 test "release keeps a map that fell back to reads (no mmap): its heap copy is the only one" {
@@ -341,4 +452,27 @@ test "Save recovery: an unresolved partial save refuses actual checkpoint reopen
         ck.close();
         return error.UncertainCheckpointReopened;
     } else |err| try std.testing.expectEqual(error.CheckpointSaveUncertain, err);
+}
+
+test "a checkpoint whose index names shards in a folder opens and reads them" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // NVIDIA's own export writes `tensors/model-00001-of-00001.safetensors`.
+    try tmp.dir.createDirPath(io, "tensors");
+    const image = try testImage(gpa, "a", 4);
+    defer gpa.free(image);
+    try tmp.dir.writeFile(io, .{ .sub_path = "tensors/model-00001-of-00001.safetensors", .data = image });
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"a\":\"tensors/model-00001-of-00001.safetensors\"}}" });
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const listed = try shardFiles(gpa, io, dir);
+    defer freeShardFiles(gpa, listed);
+    try std.testing.expectEqual(@as(usize, 1), listed.len);
+    try std.testing.expectEqualStrings("tensors/model-00001-of-00001.safetensors", listed[0][dir.len + 1 ..]);
+    var ck = try Checkpoint.openModel(gpa, io, dir);
+    defer ck.close();
+    _ = try ck.get("a");
+    try std.testing.expectEqual(@as(usize, 0), ck.unused());
 }

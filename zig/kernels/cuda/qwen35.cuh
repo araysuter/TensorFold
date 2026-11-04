@@ -3,6 +3,7 @@
 #pragma once
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_q35 {
 
@@ -12,7 +13,7 @@ constexpr int HD = 256;   // attention head width
 constexpr int MAXQ = 32;  // attention query heads at most
 constexpr int MAXW = 64;  // a window's rows at most (the log's rows a stream)
 constexpr int MAXCH = 64; // attention chunks a row at most (cuda_engine.zig's max_chunks)
-constexpr int MAXR = 128;  // a forward's rows at most (cuda_engine.zig's max_rows): an image chunk's position rows
+constexpr int MROPE = 3;  // an image row's t, h and w positions (cuda_round.zig's mrope_axes)
 
 // The model's widths: hidden, linear key heads, linear value heads, attention query and key/value heads, linear layers.
 struct Geo {
@@ -34,7 +35,20 @@ struct Seg {
     unsigned long long before; // exact pre-round state for a one-row in-place update
     int cap, len, row0, rows, tap_rows, taps;
     int delta;                // an image prompt's rotary shift: rows past it rotate at position + delta
+    unsigned long long pt;    // the stream's KV page table (int a page; 0: kv holds cap contiguous rows)
+    unsigned long long ps;    // elements a KV page holds (bf16, or bytes for fp8): every attention layer's ptok rows
+    int ptok;                 // positions a KV page holds
+    int pn;                   // pending kept rows the slot scan replays first (negative: replayed, not written back)
+    unsigned long long plog;  // their heads: cuda_cache.zig's pending buffer (pend_row)
 };
+
+// Seg.kv's element of layer a's key (s 0) or value (s 1) at pos, head h: cap rows a head, or pos's page's row.
+__device__ __forceinline__ size_t kv_row(const Seg& sg, int kvh, int a, int s, int h, int pos) {
+    const size_t blk = ((size_t)a * 2 + s) * kvh + h;
+    if (sg.pt == 0) return (blk * sg.cap + pos) * HD;
+    const int* pt = reinterpret_cast<const int*>(sg.pt);
+    return (size_t)pt[pos / sg.ptok] * sg.ps + (blk * sg.ptok + pos % sg.ptok) * HD;
+}
 
 // A window row's record of one linear layer (Seg.log).
 struct LogRow {
@@ -51,6 +65,18 @@ __device__ __forceinline__ LogRow log_row(const Geo& geo, const Seg& sg, int lay
     l.delta = l.g + geo.nv;
     l.k = reinterpret_cast<__nv_bfloat16*>(l.delta + (size_t)geo.nv * DK);
     l.conv = l.k + (size_t)geo.nk * DK;
+    return l;
+}
+
+// A pending kept row's decay, write and key (cuda_cache.zig's pending buffer): rows of nl layers' heads, packed.
+__device__ __forceinline__ LogRow pend_row(const Geo& geo, unsigned long long plog, int layer, int row) {
+    const size_t hb = (size_t)(geo.nv + (size_t)geo.nv * DK) * sizeof(float) + (size_t)geo.nk * DK * sizeof(__nv_bfloat16);
+    char* base = reinterpret_cast<char*>(plog) + ((size_t)row * geo.nl + layer) * hb;
+    LogRow l;
+    l.g = reinterpret_cast<float*>(base);
+    l.delta = l.g + geo.nv;
+    l.k = reinterpret_cast<__nv_bfloat16*>(l.delta + (size_t)geo.nv * DK);
+    l.conv = nullptr;
     return l;
 }
 
@@ -73,11 +99,7 @@ __device__ __forceinline__ int back(const int* __restrict__ rowpar, int w, int s
 __device__ __forceinline__ float bf(__nv_bfloat16 x) { return __bfloat162float(x); }
 __device__ __forceinline__ float rbf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
-__device__ __forceinline__ float warp_sum(float x) {
-#pragma unroll
-    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(0xffffffffu, x, m);
-    return x;
-}
+using tf_common::warp_sum;
 
 // P (device counts): the row past the forward's rows, as qwen35.cu's other counts read it.
 __device__ __forceinline__ bool past_rows(const int* P, int m) { return P != nullptr && m >= P[2]; }
@@ -86,14 +108,25 @@ __device__ __forceinline__ bool past_rows(const int* P, int m) { return P != nul
 __device__ __forceinline__ int mrope_axis(int i) { return (i % 3 == 1 && i < 33) ? 1 : ((i % 3 == 2 && i < 30) ? 2 : 0); }
 
 // RoPE on the first 64 of HD: pairs (i, i + 32) turned by pos[axis(i)] * theta^(-i / 32); text has one position.
-__device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, const int pos[3]) {
+template <bool YARN>  // Y: YaRN's factor, then 32 frequencies; false is its own code, contracted as before YaRN
+__device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, const int pos[3], const float* __restrict__ Y) {
     if (d >= 64) return x[d];
     const int i = d % 32;
-    const float angle = (float)pos[mrope_axis(i)] * powf(10000000.0f, -(float)i / 32.0f);
-    float sn, cs;
-    sincosf(angle, &sn, &cs);
-    const float a = bf(x[i]), b = bf(x[i + 32]);
-    return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
+    if constexpr (!YARN) {
+        const float angle = (float)pos[mrope_axis(i)] * powf(10000000.0f, -(float)i / 32.0f);
+        float sn, cs;
+        sincosf(angle, &sn, &cs);
+        const float a = bf(x[i]), b = bf(x[i + 32]);
+        return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
+    } else {
+        const float angle = (float)pos[mrope_axis(i)] * Y[1 + i];
+        float sn, cs;
+        sincosf(angle, &sn, &cs);
+        cs *= Y[0];
+        sn *= Y[0];
+        const float a = bf(x[i]), b = bf(x[i + 32]);
+        return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
+    }
 }
 
 // A tree uses all 64 ancestor bits; prompt chains keep their depth separately, including rows past 64.
@@ -110,18 +143,18 @@ __device__ __forceinline__ int seen_row(Ancestor anc, int n) {
     return __ffsll(anc.bits) - 1;
 }
 
-// A row's t, h and w: an image prompt's chunk reads them from M ([3][MAXR]); other rows are text, shifted past images.
+// A row's t, h and w: an image chunk reads them from M (three axes a row); other rows are text.
 __device__ __forceinline__ void row_positions(const Seg& sg, Ancestor anc, size_t m, const int* M, int pos[3]) {
     const int text = sg.len + rows_seen(anc) - 1 + sg.delta;
-    for (int a = 0; a < 3; a++) pos[a] = M != nullptr ? M[a * MAXR + m] : text;
+    for (int a = 0; a < MROPE; a++) pos[a] = M != nullptr ? M[m * MROPE + a] : text;
 }
 
-// The rope kernels' body for either cache: queries rotated in place, each key head's rotated key and value stored.
-template <typename Store>
-__device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
+// The rope kernels' body, a block a row and head (y: query heads, then key heads): rotated in place, or stored.
+template <bool YARN, typename Store>
+__device__ __forceinline__ void rope_rows_as(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                           const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
                                           const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc,
-                                          const int* __restrict__ P, const int* __restrict__ M, Store store) {
+                                          const int* __restrict__ P, const int* __restrict__ M, const float* __restrict__ Y, Store store) {
     const int QH = geo.qh, KVH = geo.kvh;
     const int d = threadIdx.x;
     if (past_rows(P, blockIdx.x)) return;
@@ -130,11 +163,26 @@ __device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restr
     int pos[3];
     row_positions(sg, rowanc[m], m, M, pos);
     const int slot = sg.len + (int)m - sg.row0;
-    __shared__ __nv_bfloat16 qs[MAXQ * HD];
-    for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];
-    __syncthreads();
-    for (int h = 0; h < QH; h++) Qn[(m * QH + h) * HD + d] = rotate(qs + h * HD, d, pos);
-    for (int h = 0; h < KVH; h++) store(sg, h, slot, d, rotate(Kn + (m * KVH + h) * HD, d, pos), Vr[(m * KVH + h) * HD + d]);
+    const int h = blockIdx.y;
+    if (h < QH) {
+        __shared__ __nv_bfloat16 qs[HD];
+        qs[d] = Qn[(m * QH + h) * HD + d];
+        __syncthreads();
+        Qn[(m * QH + h) * HD + d] = rotate<YARN>(qs, d, pos, Y);
+    } else if (h < QH + KVH) {
+        const int kh = h - QH;
+        store(sg, kh, slot, d, rotate<YARN>(Kn + (m * KVH + kh) * HD, d, pos, Y), Vr[(m * KVH + kh) * HD + d]);
+    }
+}
+
+// rope_rows_as for the launch's table: one uniform branch, then each rope's own code (Y null: plain rope).
+template <typename Store>
+__device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
+                                          const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
+                                          const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc,
+                                          const int* __restrict__ P, const int* __restrict__ M, const float* __restrict__ Y, Store store) {
+    if (Y == nullptr) rope_rows_as<false>(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, Y, store);
+    else rope_rows_as<true>(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, Y, store);
 }
 
 }  // namespace tf_q35

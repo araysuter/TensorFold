@@ -31,7 +31,8 @@ pub fn Io(comptime core: type) type {
             defer arena_state.deinit();
             const arena = arena_state.allocator();
             var files: Files = .{ .gpa = gpa, .io = io, .dir = dir, .paths = .init(gpa) };
-            defer files.close();
+            var mapped = true;
+            defer if (mapped) files.close();
             var edits: std.ArrayList(se.Replacement) = .empty;
             var bytes: usize = 0;
             const n = neurons * d;
@@ -51,6 +52,9 @@ pub fn Io(comptime core: type) type {
                 // the MTP head's expert in the index: grown with the model's own, zero neurons
                 bytes += try expert(F, arena, &files, &edits, m.base, own, neurons, d, &zs, z);
             };
+            // the replacements own their bytes (arena copies): unmap first, as Windows will not replace a mapped file
+            files.close();
+            mapped = false;
             try se.save_guard.begin(io, dir);
             if (widen) try se.grow(gpa, io, dir, edits.items) else try se.overwrite(gpa, io, dir, edits.items);
             if (mtp) |m| if (m.file) |name| {
@@ -59,8 +63,11 @@ pub fn Io(comptime core: type) type {
                 if (hasMtp(F, gpa, io, path, m.base)) {
                     var only: std.ArrayList(se.Replacement) = .empty;
                     var single: Files = .{ .gpa = gpa, .io = io, .dir = dir, .single = path, .paths = .init(gpa) };
-                    defer single.close();
+                    var single_mapped = true;
+                    defer if (single_mapped) single.close();
                     bytes += try expert(F, arena, &single, &only, m.base, own, neurons, d, &zs, z);
+                    single.close(); // as above: the file's map goes before its rewrite
+                    single_mapped = false;
                     _ = try se.rewrite(gpa, io, path, only.items);
                 }
             };
@@ -206,6 +213,16 @@ pub fn Io(comptime core: type) type {
 
 /// One layer's pocket ([neurons, D] each) rounded in place as `write` hands it back: input rows, then output columns.
 pub fn round(comptime F: Family, gpa: std.mem.Allocator, d: usize, inputs: []const []f32, down: []f32) !void {
+    return roundWith(F, gpa, d, inputs, down, false);
+}
+
+/// A freshly fitted layer on a grid whose endpoints survive the next ordinary write, before it is judged.
+pub fn roundFixed(comptime F: Family, gpa: std.mem.Allocator, d: usize, inputs: []const []f32, down: []f32) !void {
+    return roundWith(F, gpa, d, inputs, down, true);
+}
+
+fn roundWith(comptime F: Family, gpa: std.mem.Allocator, d: usize, inputs: []const []f32, down: []f32, comptime fixed: bool) !void {
+    const quantize = if (fixed) affine.quantizeFixed else affine.quantize;
     const q = F.quant;
     const g = q.group;
     const neurons = down.len / d;
@@ -221,14 +238,14 @@ pub fn round(comptime F: Family, gpa: std.mem.Allocator, d: usize, inputs: []con
     // each input row on its own groups, as `expert` writes a learned row
     for (inputs) |rows| for (0..neurons) |k| {
         const x = rows[k * d ..][0..d];
-        affine.quantize(q, x, w[0..affine.wordsOf(q, d)], s[0 .. d / g], b[0 .. d / g]);
+        quantize(q, x, w[0..affine.wordsOf(q, d)], s[0 .. d / g], b[0 .. d / g]);
         affine.dequantize(q, w[0..affine.wordsOf(q, d)], s[0 .. d / g], b[0 .. d / g], x);
     };
     // each output's learned columns on their own groups, as `expert` writes the output projection's
     const col = try arena.alloc(f32, neurons);
     for (0..d) |o| {
         for (col, 0..) |*x, k| x.* = down[k * d + o];
-        affine.quantize(q, col, w[0..affine.wordsOf(q, neurons)], s[0 .. neurons / g], b[0 .. neurons / g]);
+        quantize(q, col, w[0..affine.wordsOf(q, neurons)], s[0 .. neurons / g], b[0 .. neurons / g]);
         affine.dequantize(q, w[0..affine.wordsOf(q, neurons)], s[0 .. neurons / g], b[0 .. neurons / g], col);
         for (col, 0..) |x, k| down[k * d + o] = x;
     }

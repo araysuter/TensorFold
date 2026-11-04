@@ -1,7 +1,9 @@
 //! The native engine: model loading, families and the lane core, over our Metal runtime.
 const std = @import("std");
 
+pub const benchmark_group = @import("core/benchmark_group.zig");
 pub const safetensors = @import("core/safetensors.zig");
+pub const gguf = @import("core/gguf.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
 pub const checkpoint_metal = checkpoint;
@@ -11,14 +13,18 @@ pub const qwen_vl = @import("core/qwen_vl/qwen_vl.zig");
 pub const qwen_vl_tower = @import("core/qwen_vl/metal.zig");
 /// Qwen-Image-2.1's transformer on Metal: a denoiser driven by tf-qwen-image, outside the lane engine.
 pub const qwen_image = @import("families/qwen_image/qwen_image.zig");
+/// MOSS-Image's transformer on Metal: a denoiser driven by tf-moss-image, outside the lane engine.
+pub const moss_image = @import("families/moss_image/moss_image.zig");
 pub const checkpoint = @import("core/checkpoint_metal.zig");
 pub const shard_edit = @import("core/shard_edit.zig");
 pub const lora_merge = @import("core/lora_merge_dir.zig");
 pub const npy = @import("core/npy.zig");
+pub const picture = @import("core/picture/picture.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const segments = @import("core/segments.zig");
 pub const row_projection = @import("core/row_projection.zig");
+pub const frags = @import("core/frags.zig");
 pub const affine_mm = @import("core/affine_mm.zig");
 /// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
 pub const quant = @import("core/quant/quant.zig");
@@ -28,9 +34,15 @@ pub const exlr8 = @import("core/exlr8.zig");
 pub const exlr8_projection = @import("core/exlr8_projection.zig");
 pub const exlr8_dense_gpu = @import("core/exlr8_dense_gpu.zig");
 pub const exlr8_prompt = @import("core/exlr8_prompt.zig");
+/// The two-Mac pair seam's row split: the transport, its layout and the one-Mac Loopback the stage-2 checks use.
+pub const pair_rows = @import("core/pair_rows.zig");
 pub const glm_dsa = @import("families/glm_dsa/glm_dsa.zig");
+/// DeepSeek-V4.1's Metal family in one export: tf.dsv41_metal.NAME (families/deepseek_v41/metal/contract_exports.zig).
+pub const dsv41_metal = @import("families/deepseek_v41/metal/contract_exports.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_vision_contract = @import("families/flashnext/vision_contract.zig");
+pub const flashnext_fsr_fixture = @import("families/flashnext/fsr_gpu_fixture.zig");
+pub const flashnext_fsr_contract = @import("families/flashnext/fsr_contract_source.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_rows = @import("families/flashnext/rows_load.zig");
 pub const flashnext_sample = @import("families/flashnext/host_sample.zig");
@@ -49,6 +61,9 @@ pub const glm = @import("families/glm/glm.zig");
 pub const qwen35 = @import("families/qwen3_5/qwen3_5.zig");
 pub const gemma4 = @import("families/gemma4/gemma4.zig");
 pub const step5 = @import("families/step5/step5.zig");
+pub const spark25_metal = @import("families/spark25/metal.zig");
+pub const minimax_m3 = @import("families/minimax_m3/minimax_m3.zig");
+pub const llama = @import("families/llama/llama.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 
@@ -58,6 +73,7 @@ test {
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
+    _ = @import("families/nemotron/zero_budget_test.zig");
     _ = @import("families/nemotron/kernels.zig");
     _ = @import("families/nemotron/living_test.zig"); // saved lessons and their routers, beside the shards
     _ = @import("families/nemotron/pocket_shards_test.zig"); // learned neurons in the shards themselves
@@ -77,9 +93,14 @@ test {
     _ = @import("families/gemma4/gemma4.zig");
     _ = @import("families/qwen3_5/backend.zig");
     _ = @import("families/step5/step5.zig");
+    _ = @import("families/spark25/metal.zig");
+    _ = @import("families/minimax_m3/minimax_m3.zig");
+    _ = @import("families/llama/llama.zig");
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
     _ = @import("families/lfm2_moe/state.zig");
+    _ = @import("families/lfm2_moe/dspark_test.zig");
+    _ = @import("families/deepseek_v41/metal/glue.zig"); // the launch wrappers' shape refusals, reached by no other test root
 }
 
 pub const lane_projection = @import("core/lane_projection.zig");
@@ -87,6 +108,10 @@ pub const lane_projection = @import("core/lane_projection.zig");
 pub const recurrent_forks = @import("core/recurrent_forks.zig");
 
 pub const shared_kv = @import("core/shared_kv.zig");
+
+pub const kv_pool = @import("core/kv_pool.zig");
+
+pub const rope_freq = @import("core/rope_freq.zig");
 
 pub const shared_attention = @import("core/shared_attention.zig");
 
@@ -108,3 +133,18 @@ pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 
 pub const tree_slots = @import("core/tree_slots.zig");
+
+pub const weight_only = @import("core/weight_only.zig");
+pub const weight_only_contract = @import("core/contract/weight_only.zig");
+pub const weight_only_cuda_adapter = @import("core/weight_only_cuda_impl.zig").Adapter;
+pub const weight_only_metal_adapter = @import("core/weight_only_metal_impl.zig").Adapter;
+pub const hc_activation = @import("core/hc_activation.zig");
+pub const hc_activation_contract = @import("core/contract/hc_activation.zig");
+pub const hc_activation_cuda_adapter = @import("core/hc_activation_cuda_impl.zig").Adapter;
+pub const hc_activation_metal_adapter = @import("core/hc_activation_metal_impl.zig").Adapter;
+pub const hc_pointwise = @import("core/hc_pointwise.zig");
+pub const hc_pointwise_cuda_adapter = @import("core/hc_pointwise_cuda_impl.zig").Adapter;
+pub const hc_pointwise_metal_adapter = @import("core/hc_pointwise_metal_impl.zig").Adapter;
+pub const hc_pointwise_contract = @import("core/contract/hc_pointwise.zig");
+
+pub const attention_ref = @import("core/attention_ref.zig");

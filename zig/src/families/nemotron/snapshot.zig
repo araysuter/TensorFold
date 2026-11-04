@@ -5,11 +5,12 @@ const cfg = @import("config.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Metal = @import("backend.zig").Metal;
+const kvp = @import("../../core/metal_kv_pages.zig");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// One kept state: `at` prompt tokens of one stream, in one buffer the GPU copies on the engine's queue.
-pub const Snap = struct { at: u32, head: bool, buf: mtl.Buffer, bytes: usize };
+pub const Snap = struct { at: u32, head: bool, buf: mtl.Buffer, bytes: usize, residency: ?mtl.ResidencySet.Follow = null };
 
 fn convBytes(c: cfg.Config) usize {
     return (c.conv_kernel - 1) * c.convDim() * 2;
@@ -66,6 +67,19 @@ const Copies = struct {
         const n = rowBytes(c, self.snap.at);
         for (0..self.c.attentions + @intFromBool(self.c.mtp != null)) |i| {
             const kv = if (i < self.c.attentions) self.c.kv[i] else self.c.mtp.?;
+            if (!self.into) @import("kv_pages.zig").holds(kv, self.snap.at);
+            if (kv.paged) |p| {
+                // the same bytes as a contiguous cache's: a head's rows in order, a page's run of them a part
+                for ([2]usize{ p.k_off, p.v_off }) |half| for (0..c.kv_heads) |h| {
+                    var row: usize = 0;
+                    while (row < self.snap.at) : (row += kvp.page_tokens) {
+                        const rows = @min(kvp.page_tokens, self.snap.at - row);
+                        const at = half + p.ids()[row / kvp.page_tokens] * p.pageBytes() + rowBytes(c, h * kvp.page_tokens);
+                        self.part(b, e, &off, p.arena(), at, rowBytes(c, rows));
+                    }
+                };
+                continue;
+            }
             for ([2]mtl.Buffer{ kv.k, kv.v }) |live| for (0..c.kv_heads) |h| self.part(b, e, &off, live, rowBytes(c, h * kv.capacity), n);
         }
         if (off != self.snap.bytes) return error.SnapshotSize;
@@ -82,6 +96,8 @@ pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
     snap.* = .{ .at = at, .head = head, .buf = try b.m.device.buffer(n, opts), .bytes = n };
     errdefer snap.buf.deinit();
     try b.submit(.prefill, b.next, Copies{ .c = cache, .slot = cache.slot, .snap = snap, .into = true });
+    snap.residency = b.residency;
+    if (snap.residency) |f| f.join(f.ctx, snap.buf);
     return snap;
 }
 
@@ -89,6 +105,7 @@ pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
 pub fn restore(b: *Metal, cache: *st.Cache, snap: *const Snap) !void {
     if (cache.len != 0 or snap.head != (cache.mtp != null)) return error.SnapshotLayout;
     if (snap.at + 1 > cache.kv[0].capacity) return error.ContextFull;
+    try @import("kv_pages.zig").grow(cache, snap.at);
     const slot = try b.pool.take();
     errdefer b.pool.give(slot);
     try b.submit(.prefill, b.next, Copies{ .c = cache, .slot = slot, .snap = snap, .into = false });
@@ -99,6 +116,7 @@ pub fn restore(b: *Metal, cache: *st.Cache, snap: *const Snap) !void {
 /// A state's buffer goes once no command buffer in flight reads it (the queue holds unretained references).
 pub fn drop(b: *Metal, snap: *Snap) void {
     b.drain() catch {};
+    if (snap.residency) |f| f.leave(f.ctx, snap.buf);
     snap.buf.deinit();
     b.gpa.destroy(snap);
 }

@@ -15,14 +15,14 @@ fn sha(bytes: []const u8) [64]u8 {
     return std.fmt.bytesToHex(d, .lower);
 }
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+const env = @import("sys").env;
 
 fn put(name: [*:0]const u8, value: []const u8) !void {
     var buf: [512]u8 = undefined;
     if (value.len >= buf.len) return error.Setenv;
     @memcpy(buf[0..value.len], value);
     buf[value.len] = 0;
-    if (setenv(name, @ptrCast(&buf), 1) != 0) return error.Setenv;
+    if (env.setenv(name, @ptrCast(&buf), 1) != 0) return error.Setenv;
 }
 
 pub fn main(gpa: std.mem.Allocator, io: std.Io, mode_name: []const u8, pack: []const u8, ref: []const u8, out: []const u8) !u8 {
@@ -58,7 +58,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, mode_name: []const u8, pack: []c
     try put("TF_DSV41_KV_SPLIT_COMPACT", if (mode == .compact) "force" else "0");
     if (mode == .park) try put("TF_DSV41_SESSION_DISK", try std.fmt.allocPrint(a, "{s}/disk-r{d}", .{ out, rank }));
     if (std.c.getenv("TF_DSV41_KV_CHECK_TOPP")) |v| try put("TF_DSV41_EXPERT_TOPP", std.mem.span(v));
-    if (meta0.object.get("env")) |env| if (env.object.get("TF_DSV41_MHC_DEFER")) |v| if (v == .string and std.mem.eql(u8, v.string, "1")) try put("TF_DSV41_R1", "1");
+    if (meta0.object.get("env")) |meta_env| if (meta_env.object.get("TF_DSV41_MHC_DEFER")) |v| if (v == .string and std.mem.eql(u8, v.string, "1")) try put("TF_DSV41_R1", "1");
     var lo: u32 = 0;
     var hi: u32 = 0;
     {
@@ -136,7 +136,7 @@ fn onePrompt(gpa: std.mem.Allocator, io: std.Io, a: std.mem.Allocator, m: *model
     };
     // the decode steps (park: a RAM round trip a third in, an NVMe one two thirds in)
     const steps = want_tokens.len - 1;
-    const V: usize = m.cfg.vocab / f.comm.world();
+    const V: usize = (try @import("partition.zig").share(m.cfg.vocab, f.comm.rank(), f.comm.world())).len;
     const host_logits = try gpa.alloc(u8, 4 * V);
     defer gpa.free(host_logits);
     var tok: u32 = @intCast(want_tokens[0].integer);

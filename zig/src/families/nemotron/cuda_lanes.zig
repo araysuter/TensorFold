@@ -64,7 +64,6 @@ pub const Cuda = struct {
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
     copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
-
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
         errdefer pinned.free();
@@ -74,7 +73,6 @@ pub const Cuda = struct {
         errdefer prompt_out.free();
         return .{ .gpa = gpa, .e = e, .head = head, .pinned = pinned, .rows_out = rows_out, .rows_dev = try rows_out.device(), .prompt_out = prompt_out, .prompt_dev = try prompt_out.device() };
     }
-
     pub fn deinit(self: *Cuda) void {
         var it = self.lanes.valueIterator();
         while (it.next()) |l| if (l.paged) {
@@ -88,7 +86,6 @@ pub const Cuda = struct {
         if (self.tapped) |*b| b.free();
         self.prompt_out.free();
     }
-
     pub fn backend(self: *Cuda) be.Backend {
         return .{ .ptr = self, .vtable = &.{
             .prefill = prefillFn,
@@ -149,7 +146,6 @@ pub const Cuda = struct {
     fn probabilitiesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
         return @import("cuda_mtp_policy.zig").probabilities(of(ptr), s, out);
     }
-
     /// The checkpoint's verify width, shared target forwards and this GPU's measured costs.
     pub fn facts(self: *const Cuda) lanes.Model {
         const drafting = self.head != null;
@@ -157,8 +153,13 @@ pub const Cuda = struct {
         return .{
             .exact_width = @intCast(width),
             .copy_drafts = self.copy_drafts,
+            .root_copies = self.copy_drafts,
+            .context_copies = self.copy_drafts,
+            .copy_match = if (self.copy_drafts) 4 else 8,
             .gpu_tokens = false,
             .mtp = drafting,
+            .allocate_shared_drafts = drafting,
+            .limit_shared_drafts = drafting and self.mtp_confidence == null,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &config.draft_prior,
@@ -309,15 +310,16 @@ pub const Cuda = struct {
             e.prompt_rows = .{ .k = k, .rows = rows, .logits = if (self.prompt_logits) |b| b.ptr else e.b.logits, .picks = words[picks_at..][0..rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
         }
         defer e.prompt_rows = null;
-        if (s.images.len > 0) try (e.vision orelse return error.NoVision).begin(e.stream, s.images, from);
-        defer if (e.vision) |v| v.end();
         var tap: TapSink = .{ .self = self, .taps = &gop.value_ptr.taps };
         tap.taps.prompt.clearRetainingCapacity();
         tap.taps.from = from;
         tap.taps.verified = null;
         if (self.tapped != null) e.taps = .{ .ctx = &tap, .call = TapSink.take };
         defer e.taps = null;
-        const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep);
+        const first = e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep) catch |err| {
+            if (err == error.Cancelled) s.keepInterruptedPrefill(@intCast(e.pos));
+            return err;
+        };
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
         const last = ids.len - 1 - e.last_chunk;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
@@ -581,4 +583,18 @@ test "latent Bolt allows copy drafts and shared rounds without an MTP head" {
     try std.testing.expect(f.hidden_rows);
     try std.testing.expect(f.max_streams > 1);
     try std.testing.expect(!f.mtp);
+}
+
+test "zero grant: Nemotron CUDA preserves later drafts through a long shared skip" {
+    var e: Engine = undefined;
+    e.c.latent = 0;
+    var b: Cuda = undefined;
+    b.e = &e;
+    b.head = @ptrFromInt(16);
+    b.copy_drafts = true;
+    b.cost_count = 0;
+    b.mtp_ms = 0;
+    b.mtp_drafts = null;
+    b.mtp_confidence = null;
+    try lanes.shared_draft_check.check(b.facts(), false);
 }

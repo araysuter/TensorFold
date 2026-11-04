@@ -47,6 +47,8 @@ const Automations = lazy(() => import('./components/Automations').then((module) 
 const ProjectsIndex = lazy(() => import('./components/Rooms').then((module) => ({ default: module.ProjectsIndex })))
 const ProjectView = lazy(() => import('./components/Rooms').then((module) => ({ default: module.ProjectView })))
 const RoomView = lazy(() => import('./components/Rooms').then((module) => ({ default: module.RoomView })))
+import { useEngine } from './lib/engine'
+import { engineManagementVisible } from './lib/engine-visibility'
 const Models = lazy(() => import('./components/Models').then((module) => ({ default: module.Models })))
 const Bots = lazy(() => import('./components/Bots').then((module) => ({ default: module.Bots })))
 const WorkspaceDock = lazy(() => import('./components/WorkspaceDock').then((module) => ({ default: module.WorkspaceDock })))
@@ -183,6 +185,10 @@ export default function App() {
     }
   }, [ready])
 
+  // Every hook must run before the bootstrap early return below, or React reports a hook-count
+  // change when the workspace becomes ready (error #310).
+  const { snapshot: engineSnapshot } = useEngine()
+  const engineStatus = engineSnapshot?.status ?? null
   const bootstrap = applicationBootstrapState(ready, settings)
   if (bootstrap !== 'ready') return <BootstrapRecovery unavailable={bootstrap === 'settings-unavailable'} onRetry={() => init({ retry: true })} />
 
@@ -222,7 +228,7 @@ export default function App() {
                 {contentView.name === 'projects' && <ProjectsIndex />}
                 {contentView.name === 'project' && <ProjectView key={`${contentView.id}:${contentView.tab ?? 'overview'}`} id={contentView.id} initialTab={contentView.tab} />}
                 {contentView.name === 'room' && <RoomView key={contentView.id} id={contentView.id} />}
-                {contentView.name === 'models' && <Models minimal={showOnboarding && readOnboardingDraft().mode === 'minimal'} />}
+                {contentView.name === 'models' && <Models noLocalEngine={!engineManagementVisible(api.platform, engineStatus)} minimal={showOnboarding && readOnboardingDraft().mode === 'minimal'} />}
                 {contentView.name === 'bots' && <Bots />}
                 </div></div>}
               </Suspense>

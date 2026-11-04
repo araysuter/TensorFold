@@ -1,4 +1,5 @@
 import { useAuthoredText } from '../lib/preferences/useAuthoredText'
+import { localExecutionSource } from '../lib/bot-labels'
 import { useStore } from '../lib/store'
 import { Icon } from '../lib/icons'
 import { api } from '../lib/ipc'
@@ -41,7 +42,7 @@ export function TitleBar({ simple = false }: { simple?: boolean }) {
 
   if (simple) return <ChatWorkspaceHeader title={title || (view.name === 'home' ? tx("New task") : "TensorFold")} thread={thread} />
   return (
-    <header className={clsx('drag relative z-10 flex h-11 shrink-0 items-center gap-2 pr-3', sidebarCollapsed ? 'pl-[96px]' : 'pl-3')}>
+    <header className={clsx('drag relative z-10 flex h-11 shrink-0 items-center gap-2 pr-3', sidebarCollapsed && api.platform !== 'linux' ? 'pl-[96px]' : 'pl-3')}>
       <button onClick={toggleSidebar} title={tx("Toggle sidebar (⌘B)")} className="no-drag flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink"><Icon name="sidebar" size={15} /></button>
       <div className="flex min-w-0 flex-1 items-center gap-2">
         {thread && <Icon name={thread.kind === 'chat' ? 'message' : 'file'} size={14} className="shrink-0 text-ink-3" />}
@@ -50,7 +51,7 @@ export function TitleBar({ simple = false }: { simple?: boolean }) {
         )}
         {title && <span className="truncate text-[13px] font-medium text-ink">{title}</span>}
         {thread && <ThreadTrustBadge thread={thread} />}
-        {thread?.bot && <button className="no-drag hidden max-w-[220px] shrink-0 truncate rounded-full border border-line px-2 py-0.5 text-[12px] text-ink-2 sm:block" onClick={() => setView({ name: 'bots' })} title={tx("This chat keeps the bot instructions, model and permissions from when it was created.")}>{thread.bot.name}<span className="hidden lg:inline"> · {thread.bot.executionTarget === 'vm' ? tx("Bot VM") : tx("This Mac")} · {thread.bot.approvalScope === 'readonly' ? tx("Read only") : tx("Review actions")}</span></button>}
+        {thread?.bot && <button className="no-drag hidden max-w-[220px] shrink-0 truncate rounded-full border border-line px-2 py-0.5 text-[12px] text-ink-2 sm:block" onClick={() => setView({ name: 'bots' })} title={tx("This chat keeps the bot instructions, model and permissions from when it was created.")}>{thread.bot.name}<span className="hidden lg:inline"> · {thread.bot.executionTarget === 'vm' ? tx("Bot VM") : tx(localExecutionSource(api.platform))} · {thread.bot.approvalScope === 'readonly' ? tx("Read only") : tx("Review actions")}</span></button>}
         {thread && <CortheonBadge thread={thread} />}
         {thread?.parentId && (
           <ThreadLineageChip parentId={thread.parentId} />

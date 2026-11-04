@@ -4,10 +4,14 @@ const platform = @import("sys");
 const posix = platform.posix;
 const builtin = @import("builtin");
 const log = @import("log.zig");
+const meta = @import("file_meta.zig").meta;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const scope = @import("auth_scope.zig");
 
-const Key = struct { digest: [32]u8, label: []const u8 };
+const Key = struct { digest: [32]u8, label: []const u8, scopes: scope.Scopes = scope.full };
+/// A verified key: the request's own copy of its label, its digest (admission's principal) and its scopes.
+pub const Matched = struct { label: []const u8, digest: [32]u8, scopes: scope.Scopes };
 
 pub var reload_requested: std.atomic.Value(bool) = .init(false);
 
@@ -112,25 +116,39 @@ pub const Store = struct {
         }
         if (!std.unicode.utf8ValidateSlice(text[0..got])) return error.Unsafe;
         var keys: std.ArrayList(Key) = .empty;
+        // one key, one set of scopes: a restricted line cannot be shadowed by a full copy of the same key
+        var assigned: std.AutoHashMapUnmanaged([32]u8, scope.Scopes) = .empty;
+        for (s.static.items) |old| try assigned.put(a, old.digest, old.scopes);
         var lines = std.mem.splitAny(u8, text[0..got], "\n\r");
         while (lines.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\x0b\x0c\x1c\x1d\x1e\x1f");
             if (line.len == 0 or line[0] == '#') continue;
             var label: []const u8 = undefined;
+            var scopes = scope.full;
             var key: []const u8 = line;
             if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
-                label = std.mem.trim(u8, line[0..colon], " \t");
-                key = std.mem.trim(u8, line[colon + 1 ..], " \t");
-                if (!validLabel(label)) {
-                    problem.* = "API key labels need 1-64 letters, digits, dots, underscores or hyphens";
+                const parsed = scope.parseLabel(std.mem.trim(u8, line[0..colon], " \t")) catch |e| {
+                    problem.* = if (e == error.InvalidLabel)
+                        "API key labels need 1-64 letters, digits, dots, underscores or hyphens"
+                    else
+                        "API key scopes are [inference], [read], [inference,read] or [admin]";
                     return error.Invalid;
-                }
+                };
+                label = parsed.name;
+                scopes = parsed.scopes;
+                key = std.mem.trim(u8, line[colon + 1 ..], " \t");
             } else label = try std.fmt.allocPrint(a, "file-{d}", .{keys.items.len + 1});
             const d = digest(key) orelse {
                 problem.* = "API keys must be nonempty text without whitespace";
                 return error.Invalid;
             };
-            try keys.append(a, .{ .digest = d, .label = try a.dupe(u8, label) });
+            const seen = try assigned.getOrPut(a, d);
+            if (seen.found_existing and !seen.value_ptr.eql(scopes)) {
+                problem.* = "the same API key cannot have different scopes";
+                return error.Invalid;
+            }
+            seen.value_ptr.* = scopes;
+            try keys.append(a, .{ .digest = d, .label = try a.dupe(u8, label), .scopes = scopes });
         }
         if (keys.items.len == 0) {
             problem.* = "API key file contains no keys";
@@ -173,6 +191,11 @@ pub const Store = struct {
 
     /// The label of the key a request carries (Authorization: Bearer, or x-api-key), or null.
     pub fn match(s: *Store, a: Allocator, authorization: ?[]const u8, x_api_key: ?[]const u8) ?[]const u8 {
+        return if (s.matchIdentity(a, authorization, x_api_key)) |matched| matched.label else null;
+    }
+
+    /// The key a request carries with its scopes; the first configured key wins when both headers hold one.
+    pub fn matchIdentity(s: *Store, a: Allocator, authorization: ?[]const u8, x_api_key: ?[]const u8) ?Matched {
         const m = log.io();
         s.mutex.lockUncancelable(m);
         defer s.mutex.unlock(m);
@@ -185,14 +208,16 @@ pub const Store = struct {
             }
         }
         candidates[1] = if (x_api_key) |value| headerDigest(a, value) else emptyDigest();
-        var label: ?[]const u8 = null;
+        var selected: ?Key = null;
         for ([_][]Key{ s.static.items, s.file }) |keys| for (keys) |key| {
             var matched = false;
             for (candidates) |c| matched = std.crypto.timing_safe.eql([32]u8, key.digest, c) or matched;
-            if (matched and label == null) label = key.label;
+            if (matched and selected == null) selected = key;
         };
         if (!s.valid) return null;
-        return a.dupe(u8, label orelse return null) catch null; // the request's own copy: a reload frees the file's
+        const key = selected orelse return null;
+        // the request's own copy: a reload frees the file's
+        return .{ .label = a.dupe(u8, key.label) catch return null, .digest = key.digest, .scopes = key.scopes };
     }
 };
 
@@ -202,12 +227,6 @@ const latin1_space = " \t\r\n\x0b\x0c\x1c\x1d\x1e\x1f\x85\xa0";
 fn headerDigest(a: Allocator, value: []const u8) [32]u8 {
     const text = @import("http_conn.zig").latin1(a, value) catch return emptyDigest();
     return digest(text) orelse emptyDigest();
-}
-
-fn validLabel(label: []const u8) bool {
-    if (label.len == 0 or label.len > 64) return false;
-    for (label) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '-')) return false;
-    return true;
 }
 
 fn emptyDigest() [32]u8 {
@@ -238,7 +257,7 @@ fn isSpace(cp: u21) bool {
 pub fn gated(raw_path: []const u8, metrics_open: bool) bool {
     const path = routePath(raw_path);
     if (path.len == 0 or std.mem.eql(u8, path, "/health") or std.mem.eql(u8, path, "/slide") or publicAsset(path)) return false;
-    if (metrics_open and (std.mem.eql(u8, path, "/metrics") or std.mem.eql(u8, path, "/v1/metrics"))) return false;
+    if (metrics_open and (std.mem.eql(u8, path, "/metrics") or std.mem.eql(u8, path, "/v1/metrics") or std.mem.eql(u8, path, "/v1/load"))) return false;
     return true;
 }
 
@@ -326,39 +345,6 @@ fn readKeys(fd: platform.c.fd_t, buf: []u8) !usize {
     return if (n < 0) error.ReadFailed else @intCast(n);
 }
 
-/// A file's type and permission bits, size, identity and mtime: statx on Linux (its libc has no stat), stat elsewhere.
-const Meta = struct { mode: u32, size: u64, dev: u64, ino: u64, mtime_ns: i128 };
-
-/// `path` at the working directory, or the open `fd` itself when `path` is null.
-fn meta(fd: posix.fd_t, path: ?[*:0]const u8) ?Meta {
-    if (builtin.os.tag == .linux) {
-        const linux = std.os.linux;
-        var sx: linux.Statx = undefined;
-        const want: linux.STATX = .{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .MTIME = true };
-        const rc = if (path) |p| platform.c.statx(posix.AT.FDCWD, p, 0, want, &sx) else platform.c.statx(fd, "", 0x1000, want, &sx); // AT_EMPTY_PATH
-        if (rc != 0) return null;
-        const dev = (@as(u64, sx.dev_major) << 32) | sx.dev_minor;
-        return .{ .mode = sx.mode, .size = sx.size, .dev = dev, .ino = sx.ino, .mtime_ns = @as(i128, sx.mtime.sec) * std.time.ns_per_s + sx.mtime.nsec };
-    }
-    if (builtin.os.tag == .windows) {
-        // NTFS keeps access in ACLs, not mode bits: the type and size are checked, and the profile's ACL is the guard
-        var st: platform.c.Stat = undefined;
-        const f = if (path) |p| platform.c.open(p, .{ .ACCMODE = .RDONLY }) else fd;
-        if (f < 0) return null;
-        defer if (path != null) {
-            _ = platform.c.close(f);
-        };
-        if (platform.c.fstat(f, &st) != 0) return null;
-        const t = st.mtime();
-        return .{ .mode = (st.mode & platform.c.S.IFMT) | 0o600, .size = @intCast(st.size), .dev = st.dev, .ino = st.ino, .mtime_ns = @as(i128, t.nsec) + @as(i128, t.sec) * std.time.ns_per_s };
-    }
-    var st: posix.Stat = undefined;
-    const rc = if (path) |p| posix.system.stat(p, &st) else posix.system.fstat(fd, &st);
-    if (posix.errno(rc) != .SUCCESS) return null;
-    const t = st.mtime();
-    return .{ .mode = @intCast(st.mode), .size = @intCast(st.size), .dev = @intCast(st.dev), .ino = @intCast(st.ino), .mtime_ns = std.math.lossyCast(i128, t.nsec) + @as(i128, t.sec) * std.time.ns_per_s };
-}
-
 test "the key file: refused while others can read it, read at 0600, reread after an edit" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // refusal by mode bits; NTFS keeps access in ACLs
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -432,4 +418,31 @@ fn publicAsset(path: []const u8) bool {
         if (std.mem.startsWith(u8, path, "/slide/") and std.mem.eql(u8, path[7..], name)) return true;
     }
     return false;
+}
+
+test "security: every System One alias requires a key" {
+    for ([_][]const u8{ "/systemone", "/systemone/", "/systemone?x=1", "/alternative/systemone", "/v1/systemone" }) |path| {
+        try std.testing.expect(gated(path, false));
+        try std.testing.expect(gated(path, true));
+    }
+}
+
+test "security: key files cannot be written by another user" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "ops: sk-local\n" });
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/keys", .{tmp.sub_path}, 0);
+    defer a.free(path);
+    var problem: []const u8 = "";
+    for ([_]u32{ 0o620, 0o602, 0o622 }) |mode| {
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(posix.AT.FDCWD, path, @intCast(mode), 0));
+        if (Store.init(a, &.{}, "", path, false, &problem)) |value| {
+            var store = value;
+            store.deinit();
+            return error.UnsafeKeyFileAccepted;
+        } else |err| try std.testing.expectEqual(error.KeyFile, err);
+    }
 }

@@ -2,6 +2,7 @@
 const fz = @import("replay.zig");
 const std = @import("std");
 const platform = @import("sys");
+const safetensors = @import("../../core/safetensors.zig");
 const mtl = @import("metal");
 const split = fz.split;
 const dense = fz.dense;
@@ -36,10 +37,19 @@ pub const Run = struct {
     fused_xsum: bool = false,
     serial: bool = false,
     enc: mtl.ComputeEncoder = undefined,
+    fsr: ?*@import("fsr_runtime.zig").Runtime = null,
+    rotary_pipe: ?mtl.Pipeline = null,
+    rotary_enabled: bool = false,
+    rotary_buffer: ?mtl.Buffer = null,
     kv_pipe: mtl.Pipeline = undefined,
     argmax_pipe: mtl.Pipeline = undefined,
     add_pipe: mtl.Pipeline = undefined,
     argids_pipe: mtl.Pipeline = undefined,
+    argpart_pipe: mtl.Pipeline = undefined, // the round's argmaxes in two launches (fz_argmax_part, fz_argmax_join)
+    argjoin_pipe: mtl.Pipeline = undefined,
+    arg_parts: Buf = undefined, // their winners: rows x parts x (value bits, index)
+    attn2: ?*Variant = null, // attention parts at two heads a threadgroup (attn2.zig), main layers and the head
+    attn2_mtp: ?*Variant = null,
     pleids_pipe: mtl.Pipeline = undefined,
     copy_pipe: mtl.Pipeline = undefined,
     accept_pipe: mtl.Pipeline = undefined,
@@ -47,7 +57,7 @@ pub const Run = struct {
     force_pipe: mtl.Pipeline = undefined,
     span_pipe: mtl.Pipeline = undefined,
     positions_pipe: mtl.Pipeline = undefined,
-    draw_pipe: mtl.Pipeline = undefined, // tf_sample_full: a sampled reply's draws (sample.zig)
+    draws: @import("sample.zig").Draws = undefined, // a sampled reply's draws, and a sampled stream's drafts over the head's ids
     take_pipe: mtl.Pipeline = undefined,
     gpu_round: bool = false,
     ar: Buf = undefined,
@@ -65,7 +75,7 @@ pub const Run = struct {
     split: bool = false,
     gdn_step: bool = false,
     hc_mma: bool = false,
-    event: mtl.SharedEvent = undefined,
+    event: mtl.Event = undefined, // GPU-side rounds: each waits for the one before (a shared event's wait goes through the OS)
     event_value: u64 = 0,
     dense8_pipe: mtl.Pipeline = undefined,
     grouped: bool = false,
@@ -99,6 +109,11 @@ pub const Run = struct {
     lane_shape: std.AutoHashMapUnmanaged(*Variant, [3]usize) = .empty, // recorded lane kernels' N, K, SK
     gdn_pipe: ?mtl.Pipeline = null, // the DeltaNet window step on fz_gdn (gdn.zig) when set
     gdn_kept: ?mtl.Pipeline = null, // GPU-side rounds: fz_gdn keeping one state a layer, kept rows replayed (gdn.zig)
+    tree: ?*@import("tree.zig").Tree = null, // the tree window decode is running, if any (tree.zig)
+    limit: ?Buf = null, // a GPU-gated window's or head step's row count for the 4-bit row kernels (gate.zig)
+    head_md1: ?Buf = null, // a gated head step's one-row dims, in place of the head's own
+    head_draw: ?@import("sample.zig").HeadDraw = null, // a sampled reply's head step drafts by its keyed rule
+    gx: ?*@import("gx.zig").Gx = null, // FZ_GX=rows: windows from that many rows on the grouped experts (gx.zig)
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)
@@ -106,11 +121,68 @@ pub const Run = struct {
     gsel: ?GSelect = null, // the same in GPU-side rounds
     sel_meta_pipe: mtl.Pipeline = undefined,
     pool_abs_pipe: mtl.Pipeline = undefined,
+    pool_pos_pipe: mtl.Pipeline = undefined, // fz_idx_pool_pos: an image stream's blocks at their three positions (the standard frame)
     ngram: []const u8 = "shard_", // how the checkpoint spells its n-gram table shards (index.ngramSpelling)
+
+    load_limit: u64 = 0,
+    objects: @import("owned.zig").Owner(mtl) = .{},
+    files: std.ArrayList(c_int) = .empty,
+    maps: std.ArrayList(mtl.MappedFile) = .empty,
+    rows_cleanup: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
+    closed: bool = false,
+
+    pub fn begin(r: *Run, cb: mtl.CommandBuffer, mode: mtl.DispatchType) void {
+        r.enc = if (r.fsr) |s| s.commands.begin(cb, mode) else cb.compute(mode);
+    }
+
+    pub fn finishEncoding(r: *Run, cb: mtl.CommandBuffer) !mtl.CommandBuffer {
+        if (r.fsr) |s| return s.commands.end(r.enc);
+        r.enc.end();
+        return cb;
+    }
+
+    pub fn abort(r: *Run) void {
+        if (r.fsr) |s| {
+            s.commands.abort(r.enc);
+            const drain = r.queue.commandBuffer();
+            drain.commit();
+            drain.wait();
+        } else r.enc.end();
+    }
+
+    pub const deinit = @import("run_cleanup.zig").drop;
+
+    pub fn ownResource(r: *Run, value: anytype) !@TypeOf(value) {
+        return r.objects.keep(r.arena, value);
+    }
+
+    pub fn mapFile(r: *Run, path: [:0]const u8) !mtl.MappedFile {
+        const file = try mtl.MappedFile.open(path);
+        errdefer file.deinit();
+        try r.maps.append(r.arena, file);
+        return file;
+    }
+
+    pub fn allocate(r: *Run, n: usize) !mtl.Buffer {
+        return r.allocateOptions(n, opts);
+    }
+
+    pub fn checkGrowth(r: *const Run, n: usize) !void {
+        if (r.load_limit != 0 and !@import("flashnext_memory").growingFits(r.device.allocated(), n, r.load_limit)) {
+            std.log.warn("flash next: {d} more buffer bytes would cross the load ceiling and runtime reserve", .{n});
+            return error.FlashNextMemoryShortfall;
+        }
+    }
+
+    pub fn allocateOptions(r: *Run, n: usize, options: usize) !mtl.Buffer {
+        try r.checkGrowth(n);
+        return r.device.buffer(n, options);
+    }
 
     pub fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
-        const b = try r.device.buffer(n, opts);
+        const b = try r.allocate(n);
+        errdefer b.deinit();
         @memset(b.contents()[0..n], 0);
         try r.keep(b);
         return b;
@@ -136,19 +208,22 @@ pub const Run = struct {
     pub fn indexFile(r: *Run, path: [:0]const u8) !void {
         const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) return error.OpenFailed;
+        r.files.append(r.arena, fd) catch |err| {
+            _ = platform.c.close(fd);
+            return err;
+        };
         var head: [8]u8 = undefined;
         try readAll(fd, &head, 0);
-        const n = std.mem.readInt(u64, &head, .little);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
+        if (end < 8) return error.BadSafetensors;
+        const size = std.math.cast(usize, end) orelse return error.BadSafetensors;
+        const n = try safetensors.headerSize(std.mem.readInt(u64, &head, .little), size);
         const text = try r.arena.alloc(u8, n);
         try readAll(fd, text, 8);
-        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, r.arena, text, .{});
-        var it = parsed.object.iterator();
-        while (it.next()) |kv| {
-            if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
-            const offs = kv.value_ptr.object.get("data_offsets").?.array.items;
-            const lo: usize = @intCast(offs[0].integer);
-            const hi: usize = @intCast(offs[1].integer);
-            try r.index.put(r.arena, kv.key_ptr.*, .{ .fd = fd, .at = 8 + n + lo, .len = hi - lo });
+        const entries = try safetensors.parseHeader(r.arena, text, size - 8 - n);
+        try r.index.ensureUnusedCapacity(r.arena, @intCast(entries.count()));
+        for (entries.keys(), entries.values()) |name, tensor| {
+            r.index.putAssumeCapacity(name, .{ .fd = fd, .at = 8 + n + tensor.begin, .len = tensor.end - tensor.begin });
         }
     }
 
@@ -161,7 +236,7 @@ pub const Run = struct {
 
     pub fn load(r: *Run, name: []const u8) !Buf {
         const e = try r.entry(name);
-        const b = try r.device.buffer(@max(e.len, 64), opts);
+        const b = try r.allocate(@max(e.len, 64));
         errdefer b.deinit();
         try readAll(e.fd, b.contents()[0..e.len], e.at);
         r.loaded += e.len;
@@ -180,7 +255,7 @@ pub const Run = struct {
         var name: [160]u8 = undefined;
         const fmt = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.{s}{d}.{s}";
         for (first..first + count) |s| total += (try r.entry(try std.fmt.bufPrint(&name, fmt, .{ r.ngram, s, suffix }))).len;
-        const b = try r.device.buffer(total, opts);
+        const b = try r.allocate(total);
         errdefer b.deinit();
         var at: usize = 0;
         for (first..first + count) |s| {
@@ -230,6 +305,31 @@ pub const Run = struct {
         r.enc.setBuffer(r.sink.b, 0, 1);
         r.enc.setBytes(std.mem.asBytes(&n), 2);
         r.enc.dispatchThreads(mtl.Size.of(256 * 64, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+
+    /// The attention parts launch: two heads a threadgroup when its load check passed (`two`), else as recorded.
+    pub fn attnParts(r: *Run, role: []const u8, two: ?*Variant, ins: []const Buf, outs: []const Buf) !void {
+        if (two) |v| return @import("attn2.zig").call(r, role, v, ins, outs);
+        return r.call(role, ins, outs);
+    }
+
+    /// Each of `rows` rows' first largest of `n` logits into `out[row]` (ids[pick] with `ids`): fz_argmax's pick.
+    pub fn argmax(r: *Run, logits: Buf, n: Buf, out: Buf, ids: ?Buf, rows: usize) void {
+        const parts: u32 = 64;
+        r.enc.setPipeline(r.argpart_pipe);
+        for ([_]Buf{ logits, r.arg_parts, n }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
+        r.enc.dispatchGroups(mtl.Size.of(parts, rows, 1), mtl.Size.of(256, 1, 1));
+        if (!r.serial) r.enc.barrier();
+        r.enc.setPipeline(r.argjoin_pipe);
+        r.enc.setBuffer(r.arg_parts.b, r.arg_parts.off, 0);
+        r.enc.setBuffer(out.b, out.off, 1);
+        r.enc.setBytes(std.mem.asBytes(&parts), 2);
+        const map: u32 = @intFromBool(ids != null);
+        const id = ids orelse out;
+        r.enc.setBuffer(id.b, id.off, 3);
+        r.enc.setBytes(std.mem.asBytes(&map), 4);
+        r.enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
+        if (!r.serial) r.enc.barrier();
     }
 
     /// fz_copy_kept: `layers` copies of `n` words from row (keep + base) of src (row and layer strides in words).
@@ -332,12 +432,14 @@ pub const Run = struct {
         const pairs = (rows_own[1] - rows_own[0]) * 11;
         if (r.tp != null and r.tp_layer and r.xsx) return error.TpNeedsPlainExperts;
         r.enc.setPipeline(if (r.xsx) r.xgu_sx_pipe else r.xgu_pipe);
+        if (r.fsr) |stream| if (stream.pool != null) stream.bind(r, 18, 19, 0);
         const gu = [_]Buf{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], act, pick, wts };
         for (gu, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.setBytes(std.mem.asBytes(&own), 17);
         r.enc.dispatchThreads(mtl.Size.of(128, 80, pairs), mtl.Size.of(128, 1, 1));
         if (!r.serial) r.enc.barrier();
         r.enc.setPipeline(if (r.xsx) r.xdown_sx_pipe else r.xdown_pipe);
+        if (r.fsr) |stream| if (stream.pool != null) stream.bind(r, 11, 12, 0);
         const dn = [_]Buf{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf, y };
         for (dn, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.setBytes(std.mem.asBytes(&own), 10);
