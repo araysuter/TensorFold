@@ -9,8 +9,30 @@ occupy 2.48 GB. Target weights and BF16 context caches retain their precision.
 The first four matched public prose/code cases, with greedy and seeded
 temperature-0.7 sampling, produced identical target tokens. Steady generation
 was 16.1–22.3 tokens/sec, versus 12.2–12.3 without drafting on the 64 GiB M5 Max.
-These are short-prompt speed tests, not quality benchmark scores. Longer
-context, prompt-processing and API deployment receipts are collected separately.
+These are short-prompt speed tests, not quality benchmark scores.
+
+| Selected configuration | Measured result |
+| --- | --- |
+| Cold 8K / 32K prompt processing | 315.5 / 304.3 tokens/sec |
+| Cold 130,944-token prompt processing | 255.1 tokens/sec |
+| Generation at that full-window prompt | 12.4 tokens/sec |
+| Peak MLX allocation | 49.10 GiB on the 64 GiB machine |
+| Follow-up after a switch through Swift | 131,007 cached tokens restored; 16 new prompt tokens |
+
+The full-window cold and restored output hashes match the earlier plain
+profile's results. That earlier capacity receipt measured 9.55 tokens/sec
+generation and 255.4 tokens/sec prompt processing. These separate capacity runs
+show faster generation and essentially unchanged prompt speed; they are not an
+interleaved performance study. The cold full-window request took about 8.6
+minutes, mostly prompt processing. SSD restoration avoids repeating that work.
+The synthetic full-window probe passed all 23 API checks and observed at most
+one resident target process. It does not establish long-context task accuracy.
+
+Larger prompt chunks and allocator-cache changes did not produce a material
+gain. The 2,048-row setting also failed an output comparison at 32K. Serving
+therefore retains 512-token prompt chunks and the 128 MiB allocator-cache limit.
+The [comparison and raw receipts](../../benchmarks/ripple-dflash2-2026-11-04/)
+retain successful and failed attempts.
 
 ## Build the matching runtime
 
@@ -38,7 +60,7 @@ python3 tools/ripple/build_mlx.py --source "$HOME/ai/mlx-verify-source" \
   --root "$HOME/ai/mlx-verify-build" --jobs 8
 ```
 
-The source is Apple's Apache-2.0 [MLX 0.32.4](https://github.com/ml-explore/mlx/tree/v0.32.4),
+The source is Apple's MIT-licensed [MLX 0.32.4](https://github.com/ml-explore/mlx/tree/v0.32.4),
 commit `36969c094354086e15d2a327a9c50feb20b9cf11`. Preserve its included licenses.
 The worker verifies its loaded extension and library hashes against the build
 receipt and included patch. A build receipt establishes artifact identity;

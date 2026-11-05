@@ -1,0 +1,54 @@
+{
+  "schema": "ripple-dflash-raw-index-v1",
+  "archive_sha256": "b97a42c6dd205b275407c36dd4045993dafda0b51761eaeca0eed9074f1fddf6",
+  "members": {
+    "failed_stock_width16": {
+      "member": "raw/failed_stock_width16.json",
+      "sha256": "880efd85c5cd90d5d1f301752b2ad69dc7fdb2b75629a7037c3daf3f17c392ae",
+      "bytes": 18077,
+      "status": "failed"
+    },
+    "failed_stock_width4": {
+      "member": "raw/failed_stock_width4.json",
+      "sha256": "c5b8e933cf1511e0bd6b7874cfe769fd5b2eca8ab2784d7c85c852a3324c7447",
+      "bytes": 18125,
+      "status": "failed"
+    },
+    "selected_fixed4": {
+      "member": "raw/selected_fixed4.json",
+      "sha256": "cc31c26e82001f641db2de5eeeebaf49cf92f22baaf2226e2f1a083e9d151f5f",
+      "bytes": 56137,
+      "status": "complete"
+    },
+    "fixed8_16_adaptive": {
+      "member": "raw/fixed8_16_adaptive.json",
+      "sha256": "7efbed1285771e67486185b4b8b4105c40a6fb887a71b04beb682ccfd97db4f7",
+      "bytes": 60307,
+      "status": "complete"
+    },
+    "drafter8": {
+      "member": "raw/drafter8.json",
+      "sha256": "c4b821cb77df90c037d296422aa5706b77742b0bae9bb1a366a85a5d2ea2dba4",
+      "bytes": 31756,
+      "status": "complete"
+    },
+    "prefill_chunks": {
+      "member": "raw/prefill_chunks.json",
+      "sha256": "0408fc703757de7790f415ab6205fd23be6f1c3e2a8cde8780e45f4a43b929fa",
+      "bytes": 524238,
+      "status": "failed"
+    },
+    "prefill_allocator": {
+      "member": "raw/prefill_allocator.json",
+      "sha256": "9f33205589d5d6b2111e115ce30ee6fecd9ee61dea7e0047ca8799f0b352cb5a",
+      "bytes": 115230,
+      "status": "complete"
+    },
+    "api_capacity": {
+      "member": "raw/api_capacity.json",
+      "sha256": "c6625b7eb6017d2d777cb5aa83d9a9c6ba2dd148f05713942947183060ed8766",
+      "bytes": 5654,
+      "status": "complete"
+    }
+  }
+}
