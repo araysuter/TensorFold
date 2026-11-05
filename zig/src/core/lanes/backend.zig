@@ -62,21 +62,40 @@ pub const DraftRequest = struct {
     depth: u32, // drafts to hold (0: absorb only)
     early: bool = false, // settle the drafts the verify began (speculate_early) instead of drafting late
     lanes: ?*const Shape = null, // a tree of drafts to hold, each lane its parent's rank-r head token (depth unused)
+    plan: ?*const @import("proposal_head.zig").Plan = null,
     ranks: bool = false, // also keep each chained level's best tokens (alternatives(), for grafts)
+    pub fn heldDepth(r: DraftRequest, b: Backend) u32 {
+        return if (b.proposals()) r.stream.proposal_depth orelse r.depth else r.depth;
+    }
 };
 
 pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
+pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
 
 pub const Backend = struct {
+    proposal_head: ?*const @import("proposal_head.zig").Service = null,
+    round_observer: ?RoundObserver = null,
     first_before_draft: bool = false,
+    /// A single-slot target lets its asynchronous keep progress between host steps before drafting again.
+    defer_lone_draft: bool = false,
+    /// Every draw (first, queue and verify rows) takes `Stream.penalties` from the reply's tokens; wrappers copy it.
+    penalties: bool = false,
+    /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
+    chunk_invariant: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
+        /// After prompt work, synchronously write full-width vectors into the caller's host output before release.
+        embedding: ?*const fn (*anyopaque, *Stream, []f32) anyerror!void = null,
+        /// After a readout's prompt work, write its BF16 logits into the request's slice; its state goes at release.
+        readout_finish: ?*const fn (*anyopaque, *Stream, []u16) anyerror!void = null,
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
-        /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
-        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
+        /// One prompt-pass chunk of at most `max_rows` rows when capped (0: uncapped); null: the pass runs whole.
+        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool = null,
+        /// Keep a cancelled partial prompt before release, between prefill_step calls; no prompt work may run.
+        cancel_prefill: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
         /// Several prompts in one pass, each as after `prefill`; false or an error leaves none prefilled.
         prefill_many: ?*const fn (ptr: *anyopaque, ss: []const *Stream) anyerror!bool = null,
         /// Prompts of at most this many tokens prefill_many takes while prompts otherwise fill by chunks (0: none).
@@ -93,6 +112,9 @@ pub const Backend = struct {
         keep: *const fn (ptr: *anyopaque, windows: []const Window, paths: []const []const u32) anyerror!void,
         /// Absorb kept rows and hold drafts for the next round (one batch for a shared round).
         draft: *const fn (ptr: *anyopaque, requests: []const DraftRequest) anyerror!void,
+        draft_capacity: ?*const fn (*anyopaque, *Stream) u32 = null, // current per-stream proposal capacity
+        proposal_draft: ?*const fn (*anyopaque, []const DraftRequest) anyerror!void = null,
+        clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
         /// Undo an early speculation whose round was cut (the drafts come from a late request instead).
         unspeculate: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
         /// Each held draft's chance of landing, for heads that give them; false when it has none.
@@ -109,6 +131,10 @@ pub const Backend = struct {
         prefill_features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, sink: FeatureSink) anyerror!void = null,
         /// The first token's logprob row (the prompt's last row) for a stream with `logprobs`; null: not given.
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
+        /// One logit per label at the row after `prompt` and, when `mass`, the vocabulary's logsumexp (decisions).
+        score: ?*const fn (ptr: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 = null,
+        /// Each branch's label logits at trunk ++ branch's last row (Engine.decide); Refused names its `problem`.
+        decide: ?*const fn (ptr: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, problem: *[]const u8) anyerror!void = null,
         /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).
         first_masked: ?*const fn (ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 = null,
         /// The stream's held drafts as host tokens in window order, waiting for the draft (a grammar walks them).
@@ -159,8 +185,20 @@ pub const Backend = struct {
     pub fn keep(b: Backend, windows: []const Window, paths: []const []const u32) !void {
         return b.vtable.keep(b.ptr, windows, paths);
     }
+    pub fn observed(b: Backend, paths: []const []const u32) void {
+        if (b.round_observer) |observer| observer.done(observer.ptr, paths);
+    }
+    pub fn proposals(b: Backend) bool {
+        return if (b.proposal_head) |service| service.mode != .legacy else false;
+    }
     pub fn draft(b: Backend, requests: []const DraftRequest) !void {
+        if (b.proposals()) return error.ProposalWorkspaceRequired;
         return b.vtable.draft(b.ptr, requests);
+    }
+    /// Opt-in routing borrows round storage; the legacy callback receives the original requests unchanged.
+    pub fn draftIn(b: Backend, arena: std.mem.Allocator, requests: []const DraftRequest) !void {
+        if (!b.proposals()) return b.draft(requests);
+        return @import("proposal_head.zig").draft(b.proposal_head.?, b, arena, requests);
     }
     pub fn features(b: Backend, s: *Stream, taps: []const u32, start: u64, count: u32) !Features {
         const f = b.vtable.features orelse return error.NoFeatures;
@@ -194,6 +232,9 @@ pub const Clock = struct {
     pub const VTable = struct {
         start: *const fn (ptr: *anyopaque) void,
         elapsed_ms: *const fn (ptr: *anyopaque, mark: Mark) f64,
+        host_ns: ?*const fn (ptr: *anyopaque) i128 = null,
+        /// The optional host reader can be called by independent grammar workers.
+        parallel_host_ns: bool = false,
     };
 
     pub fn start(c: Clock) void {
@@ -210,7 +251,12 @@ pub const WallClock = struct {
     started: std.Io.Timestamp = .zero,
 
     pub fn clock(w: *WallClock) Clock {
-        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn } };
+        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn, .host_ns = hostNs, .parallel_host_ns = true } };
+    }
+
+    pub fn hostNs(ptr: *anyopaque) i128 {
+        const w: *WallClock = @ptrCast(@alignCast(ptr));
+        return std.Io.Clock.awake.now(w.io).toNanoseconds();
     }
 
     fn startFn(ptr: *anyopaque) void {

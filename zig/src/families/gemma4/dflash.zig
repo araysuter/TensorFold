@@ -50,6 +50,7 @@ pub const Drafter = struct {
     attention: attention.Attention,
     picks: round.Ops,
     projections: weights.Projections,
+    follow: ?mtl.ResidencySet.Follow = null,
     lanes: std.AutoHashMapUnmanaged(*Stream, *Lane) = .empty,
     step_ms: f64 = 0,
     block_ms: [2]f64 = .{ 0, 0 }, // a 1-draft and a 15-draft block's wall time at load
@@ -84,6 +85,8 @@ pub const Drafter = struct {
     knr: mtl.Buffer,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, target: *Model, dir: []const u8, options: Options) !*Drafter {
+        // the draft's own weights are the lane layout: M5 only. The target's row path does not serve them.
+        if (!target.device.tensorUnits()) return error.GemmaDraftNeedsTensorUnits;
         const d = try gpa.create(Drafter);
         errdefer gpa.destroy(d);
         d.* = undefined;
@@ -96,6 +99,7 @@ pub const Drafter = struct {
         d.step_ms = 0;
         d.block_ms = .{ 0, 0 };
         d.pending = null;
+        d.follow = null;
         d.trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null;
         errdefer d.projections.deinit(gpa); // warm's blocks fill it
         d.config = try dw.Config.read(gpa, io, dir, target.config.geo);
@@ -127,6 +131,7 @@ pub const Drafter = struct {
 
     pub fn deinit(d: *Drafter) void {
         d.settle() catch {};
+        d.setResident(null);
         var it = d.lanes.valueIterator();
         while (it.next()) |l| d.dropLane(l.*);
         d.lanes.deinit(d.gpa);
@@ -139,6 +144,10 @@ pub const Drafter = struct {
         d.gpa.destroy(d);
     }
 
+    pub fn setResident(d: *Drafter, hook: ?mtl.ResidencySet.Follow) void {
+        @import("draft_residency.zig").set(d, hook);
+    }
+
     /// Releases the first `made` buffers in init's order, so a failed init frees what it made.
     fn release(d: *Drafter, made: usize) void {
         var i: usize = 0;
@@ -149,7 +158,7 @@ pub const Drafter = struct {
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {
-        return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
+        return .{ .kind = "DFlash", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Drafter {
@@ -167,7 +176,7 @@ pub const Drafter = struct {
     /// Chains of up to 15, always drafted, no plain guard: a block costs the same at any depth, a guard bills per row.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .depth = block_rows - 1, .step_ms = d.step_ms, .prior = &prior, .plain_guard = false, .batched = true, .stream_bytes = d.laneBytes(d.options.capacity) };
+        return .{ .limit_shared_drafts = true, .depth = block_rows - 1, .step_ms = d.step_ms, .prior = &prior, .plain_guard = false, .batched = true, .stream_bytes = d.laneBytes(d.options.capacity) };
     }
 
     fn laneBytes(d: *const Drafter, capacity: usize) usize {
@@ -186,7 +195,7 @@ pub const Drafter = struct {
         try d.lanes.put(d.gpa, s, l);
     }
 
-    fn newLane(d: *Drafter, capacity: usize) !*Lane {
+    pub fn newLane(d: *Drafter, capacity: usize) !*Lane {
         const c = &d.config;
         const l = try d.gpa.create(Lane);
         errdefer d.gpa.destroy(l);
@@ -205,10 +214,12 @@ pub const Drafter = struct {
             };
             made += 1;
         }
+        if (d.follow) |f| @import("draft_residency.zig").lane(d, l, f, true);
         return l;
     }
 
-    fn dropLane(d: *Drafter, l: *Lane) void {
+    pub fn dropLane(d: *Drafter, l: *Lane) void {
+        if (d.follow) |f| @import("draft_residency.zig").lane(d, l, f, false);
         for (0..d.config.layers) |i| {
             l.k[i].deinit();
             l.v[i].deinit();
@@ -267,7 +278,7 @@ pub const Drafter = struct {
         const buf = try d.target.device.buffer(@intCast(d.keptBytes(snap.at)), private);
         errdefer buf.deinit();
         try d.copyLane(l, snap.at, buf, true);
-        snap.draft = buf;
+        snap.setDraft(buf);
     }
 
     /// The lane takes the context kept with the state its stream's prompt pass resumed at `start`.

@@ -105,7 +105,7 @@ const Text = struct {
         return &.{};
     }
 
-    fn render(_: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(_: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
         var buf: std.ArrayList(u8) = .empty;
         if (messages == .array) for (messages.array) |m| {
             const role = m.get("role") orelse Value{ .string = "" };
@@ -116,7 +116,7 @@ const Text = struct {
             try buf.append(a, '\n');
         };
         if (options.add_generation_prompt) try buf.append(a, '>');
-        return buf.items;
+        return .{ .text = (buf.items) };
     }
 
     fn templateSource(_: *anyopaque) []const u8 {
@@ -185,6 +185,22 @@ fn userMsg(a: Allocator, content: []const u8) !Value {
     const o = try json.newObject(a);
     try o.put(a, "role", .{ .string = "user" });
     try o.put(a, "content", .{ .string = content });
+    return .{ .object = o };
+}
+
+fn textPart(a: Allocator, text: []const u8) !Value {
+    const p = try json.newObject(a);
+    try p.put(a, "type", .{ .string = "text" });
+    try p.put(a, "text", .{ .string = text });
+    return .{ .object = p };
+}
+
+fn userContent(a: Allocator, parts: []const Value) !Value {
+    const o = try json.newObject(a);
+    try o.put(a, "role", .{ .string = "user" });
+    const owned = try a.alloc(Value, parts.len);
+    @memcpy(owned, parts);
+    try o.put(a, "content", .{ .array = owned });
     return .{ .object = o };
 }
 
@@ -508,4 +524,54 @@ test "a stream compacts and admits its final request before it opens" {
     try std.testing.expect(watch.admitted_at_open >= 2); // compaction and the final reply both admitted
     try std.testing.expectEqual(watch.admitted_at_open, eng.early);
     try std.testing.expectEqual(@as(usize, 0), eng.late);
+}
+
+test "a content-part turn counts its joined text toward the kept span" {
+    var eng: Eng = .{ .window = 200 };
+    var text: Text = .{};
+    const srv = try start(&eng, &text, .{ .fraction = 0.5 }, null, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const recent = try userContent(a, &.{
+        try textPart(a, "KEEP-"),
+        try textPart(a, "THIS-TEXT-IS-LONG"),
+    });
+    const msgs = [_]Value{ try userMsg(a, "old"), recent };
+    try std.testing.expectEqual(@as(usize, 1), try compact.keptStart(srv, a, &msgs, 20, null));
+}
+
+test "an image part does not count toward the kept span" {
+    var eng: Eng = .{ .window = 200 };
+    var text: Text = .{};
+    const srv = try start(&eng, &text, .{ .fraction = 0.5 }, null, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const image_url = try json.newObject(a);
+    try image_url.put(a, "url", .{ .string = "https://images.example/pic.png" });
+    const image = try json.newObject(a);
+    try image.put(a, "type", .{ .string = "image_url" });
+    try image.put(a, "image_url", .{ .object = image_url });
+    const recent = try userContent(a, &.{ .{ .object = image }, try textPart(a, "Z") });
+    const msgs = [_]Value{ try userMsg(a, "old-text-here"), recent };
+    try std.testing.expectEqual(@as(usize, 0), try compact.keptStart(srv, a, &msgs, 20, null));
+}
+
+test "compaction's note prompt includes joined text parts" {
+    var eng: Eng = .{ .window = 2000 };
+    var text: Text = .{};
+    defer freePrompts(&eng);
+    const srv = try start(&eng, &text, .{ .fraction = 0.5 }, 8, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parts = try userContent(a, &.{ try textPart(a, "PART-ONE-"), try textPart(a, "PART-TWO-") });
+    const msgs = [_]Value{ try userMsg(a, try pads(a, "STRING-", 1200)), parts, try userMsg(a, "TAIL") };
+    var cx: errors.Cx = .{ .a = a };
+    _ = try go(srv, a, &msgs, 32, &cx);
+    try std.testing.expect(seenFrom(&eng, 0, "PART-ONE-PART-TWO-"));
 }

@@ -28,8 +28,28 @@ pub const Geometry = struct {
     shared_prefix: bool = true,
     /// Chains of rows take the prefix kernel to their last key; a test turns this off to compare with the tail kernel.
     fuse_chain: bool = true,
+    /// Read the target's attention geometry; the current kernel qualification still applies.
+    pub fn fromConfig(c: @import("config.zig").Config, shared_prefix: bool) !Geometry {
+        const g = Geometry{
+            .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape,
+            .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape,
+            .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape,
+            .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape,
+            .shared_prefix = shared_prefix,
+        };
+        try g.check();
+        return g;
+    }
+
+    pub fn sameShape(g: Geometry, other: Geometry) bool {
+        return g.heads == other.heads and g.kv_heads == other.kv_heads and g.dim == other.dim and g.rotary == other.rotary;
+    }
+
     pub fn check(g: Geometry) !void {
-        if (g.heads != 24 or g.kv_heads != 4 or g.dim != 256 or g.rotary != 64) return error.TargetAttentionShape;
+        // The GQA group is a shader constant: 6 (24/4, 12/2 on a rank), or on one Mac 16 (32/2) or the 9B's 4 (16/4).
+        if (g.dim != 256 or g.rotary != 64 or g.heads == 0 or g.kv_heads == 0 or g.heads % g.kv_heads != 0) return error.TargetAttentionShape;
+        const one_mac = (g.heads == 32 and g.kv_heads == 2) or (g.heads == 16 and g.kv_heads == 4);
+        if (g.heads / g.kv_heads != 6 and !one_mac) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
         return @min(requested, @as(u32, if (g.shared_prefix and g.fuse_chain) chain_rows else max_rows));
@@ -406,4 +426,45 @@ test "a window that starts below 8192 keeps its partials within the scratch's ch
             try std.testing.expect(p.tail_chunks <= 3);
         }
     };
+}
+
+test "target attention reads every config dimension without widening kernel qualification" {
+    // fromConfig reads only these four fields; no other config field is consumed here.
+    var c: @import("config.zig").Config = undefined;
+    c.heads = 24;
+    c.kv_heads = 4;
+    c.head_dim = 256;
+    c.rope_dims = 64;
+    const g = try Geometry.fromConfig(c, false);
+    try std.testing.expect(g.sameShape(.{}));
+    try std.testing.expect(!g.shared_prefix);
+    c.heads = 12; // a rank of a two-way split: the same GQA6 over half the heads
+    c.kv_heads = 2;
+    const half = try Geometry.fromConfig(c, true);
+    try std.testing.expectEqual(@as(u32, 12), half.heads);
+    try std.testing.expectEqual(@as(u32, 6), half.group());
+    c.heads = 16; // the 9B: GQA4 over 4 KV heads, one Mac only
+    c.kv_heads = 4;
+    try std.testing.expectEqual(@as(u32, 4), (try Geometry.fromConfig(c, true)).group());
+    c.heads = 8; // its rank of a two-way split is not qualified
+    c.kv_heads = 2;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.heads = 20; // GQA5: no shader build takes it
+    c.kv_heads = 4;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.heads = 32; // Ornith-1.5-122B: GQA16, one Mac only
+    c.kv_heads = 2;
+    try std.testing.expectEqual(@as(u32, 16), (try Geometry.fromConfig(c, true)).group());
+    c.heads = 16; // its rank of a two-way split is not qualified
+    c.kv_heads = 1;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.heads = 24;
+    c.kv_heads = 2;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.kv_heads = 4;
+    c.head_dim = 128;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.head_dim = 256;
+    c.rope_dims = 32;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
 }

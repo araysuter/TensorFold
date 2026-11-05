@@ -101,7 +101,8 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
         const ss = try a.alloc(*sm.Stream, streams.len);
         for (streams, ss) |*s, *p| p.* = s;
         const errs = try a.alloc(?anyerror, streams.len);
-        engine.addStreams(ss, errs);
+        const done = try a.alloc(bool, streams.len);
+        engine.addStreams(ss, errs, done);
         for (errs) |err| if (err) |e| return e;
         try std.testing.expectEqual(@as(usize, if (mode.memory_lanes == null) 1 else 0), target.many_passes);
     } else for (streams) |*s| if (mode.chunks > 0) {
@@ -269,7 +270,7 @@ test "a target that gives no rows cannot be recorded" {
     try std.testing.expectError(error.NoFeatures, rec.Recorded.init(.{ .ptr = &target, .vtable = &table }, &recorder));
 }
 
-test "recorded backend preserves both values of first_before_draft" {
+test "recorded backend preserves both values of first_before_draft, penalties and chunk invariance" {
     var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -280,7 +281,58 @@ test "recorded backend preserves both values of first_before_draft" {
     for ([_]bool{ false, true }) |enabled| {
         var inner = target.backend();
         inner.first_before_draft = enabled;
+        inner.penalties = enabled;
+        inner.chunk_invariant = enabled;
         var recorded = try rec.Recorded.init(inner, &recorder);
         try std.testing.expectEqual(enabled, recorded.backend().first_before_draft);
+        try std.testing.expectEqual(enabled, recorded.backend().penalties);
+        try std.testing.expectEqual(enabled, recorded.backend().chunk_invariant);
+    }
+}
+
+test "recorded backend forwards optional prefill cancellation and its failure once" {
+    const Cancel = struct {
+        fn call(p: *anyopaque, _: *sm.Stream) anyerror!void {
+            const target: *fake.Fake = @ptrCast(@alignCast(p));
+            target.prefill_count += 1;
+            return error.SnapshotPeerFailed;
+        }
+    };
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [64]u8 = undefined;
+    var recorder = try rec.Recorder.init(gpa, io, try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0), &.{1});
+    defer recorder.deinit();
+    var s: sm.Stream = undefined;
+    for ([_]bool{ false, true }) |enabled| {
+        var table = target.stepped().vtable.*;
+        table.cancel_prefill = if (enabled) Cancel.call else null;
+        var recorded = try rec.Recorded.init(.{ .ptr = &target, .vtable = &table }, &recorder);
+        const backend = recorded.backend();
+        try std.testing.expectEqual(enabled, backend.vtable.cancel_prefill != null);
+        if (enabled) try std.testing.expectError(error.SnapshotPeerFailed, backend.vtable.cancel_prefill.?(backend.ptr, &s));
+    }
+    try std.testing.expectEqual(@as(usize, 1), target.prefill_count);
+}
+
+test "recorder: draft capacity keeps the inner context and optional capability" {
+    const Capacity = struct {
+        fn call(ptr: *anyopaque, _: *sm.Stream) u32 {
+            const f: *fake.Fake = @ptrCast(@alignCast(ptr));
+            return @intCast(f.probe_prompt);
+        }
+    };
+    var target: fake.Fake = .{ .gpa = gpa, .probe_prompt = 15 };
+    defer target.deinit();
+    var stream: sm.Stream = undefined;
+    for ([_]bool{ false, true }) |enabled| {
+        var table = target.backend().vtable.*;
+        table.draft_capacity = if (enabled) Capacity.call else null;
+        var recorded: rec.Recorded = .{ .inner = .{ .ptr = &target, .vtable = &table }, .recorder = undefined };
+        const backend = recorded.backend();
+        try std.testing.expectEqual(enabled, backend.vtable.draft_capacity != null);
+        if (enabled) try std.testing.expectEqual(@as(u32, 15), backend.vtable.draft_capacity.?(backend.ptr, &stream));
     }
 }

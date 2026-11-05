@@ -155,6 +155,28 @@ pub const Marks = struct {
     thumbnail: u32,
     tiles: [max_grid][max_grid]u32, // <|img_row_{r+1}_col_{c+1}|>
 
+    /// Every picture marker must be excluded from matching in request text.
+    pub fn firstNonAdded(m: *const Marks, t: *const Tokenizer) ?u32 {
+        for ([_]u32{ m.image, m.start, m.end, m.thumbnail }) |id| if (!t.isAdded(id)) return id;
+        for (m.tiles) |row| for (row) |id| {
+            if (!t.isAdded(id)) return id;
+        };
+        return null;
+    }
+
+    /// Automatic pictures are disabled with a warning when their markers are unsafe.
+    pub fn forPictures(t: *const Tokenizer, warning: *[]const u8) ?Marks {
+        const marks = resolve(t) orelse {
+            warning.* = "LFM2 image input disabled: the tokenizer is missing required picture markers; text serving continues";
+            return null;
+        };
+        if (marks.firstNonAdded(t) != null) {
+            warning.* = "LFM2 image input disabled: a picture marker is not an added token; text serving continues";
+            return null;
+        }
+        return marks;
+    }
+
     /// The marks from the tokenizer's special tokens, or null when one is missing.
     pub fn resolve(t: *const Tokenizer) ?Marks {
         var m: Marks = undefined;
@@ -220,21 +242,9 @@ fn roundBy(x: usize, factor: usize) usize {
 /// smart_resize: (width, height), multiples of 32 holding 64 to 256 image tokens, near the picture's aspect.
 fn smartSize(w: usize, h: usize) [2]usize {
     const f = patch * downsample;
-    const fw: f64, const fh: f64 = .{ @floatFromInt(w), @floatFromInt(h) };
-    var hb = @max(f, roundBy(h, f));
-    var wb = @max(f, roundBy(w, f));
-    const most = max_tokens * patch * patch * downsample * downsample;
-    const least = min_tokens * patch * patch * downsample * downsample;
-    if (hb * wb > most) {
-        const beta = @sqrt(fh * fw / most);
-        hb = @max(f, @as(usize, @intFromFloat(@floor(fh / beta / f))) * f);
-        wb = @max(f, @as(usize, @intFromFloat(@floor(fw / beta / f))) * f);
-    } else if (hb * wb < least) {
-        const beta = @sqrt(@as(f64, least) / (fh * fw));
-        hb = @as(usize, @intFromFloat(@ceil(fh * beta / f))) * f;
-        wb = @as(usize, @intFromFloat(@ceil(fw * beta / f))) * f;
-    }
-    return .{ wb, hb };
+    const v: picture.patches.Variant = .{ .at_least_factor = true, .max_aspect = null };
+    const s = picture.patches.smartResizeWith(@intCast(h), @intCast(w), f, min_tokens * f * f, max_tokens * f * f, v) catch unreachable;
+    return .{ s.w, s.h };
 }
 
 /// _is_image_too_large: past the single-tile pixel budget times the tolerance.
@@ -263,11 +273,8 @@ fn closestGrid(w: usize, h: usize) [2]usize {
 
 /// The (x0, y0, tw, th) region of an RGB image of width `w` as normalized patches at `patches[at..]`; the next `at`.
 fn cut(patches: []f32, at: usize, rgb: []const u8, w: usize, x0: usize, y0: usize, tw: usize, th: usize) usize {
-    const normalized = comptime blk: {
-        var t: [256]f32 = undefined;
-        for (&t, 0..) |*v, i| v.* = (@as(f32, @floatFromInt(i)) - 127.5) / 127.5;
-        break :blk t;
-    };
+    // (x - 127.5) / 127.5 on every channel: torchvision's fused rescale and normalize
+    const normalized = comptime picture.normalize.table(.fused, 1.0 / 255.0, @splat(0.5), @splat(0.5))[0];
     var out = at;
     for (0..th / patch) |py| for (0..tw / patch) |px| {
         for (0..patch) |r| {
@@ -281,4 +288,69 @@ fn cut(patches: []f32, at: usize, rgb: []const u8, w: usize, x0: usize, y0: usiz
 
 test {
     _ = @import("image_test.zig");
+}
+
+test "vision markers: every LFM2 picture and tile marker must be added" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var added: [104]core.tokenizer.AddedToken = undefined;
+    for (&added, 0..) |*token, i| token.* = .{ .id = @intCast(i + 300), .content = "fixture", .special = false };
+    var tok = try core.tokenizer.parse(a, "{\"model\":{\"type\":\"WordLevel\",\"unk_token\":\"?\",\"vocab\":{\"?\":0}}}");
+    defer tok.deinit();
+    tok.added = &added;
+    var marks: Marks = .{ .image = 300, .start = 301, .end = 302, .thumbnail = 303, .tiles = undefined };
+    var id: u32 = 304;
+    for (&marks.tiles) |*row| for (row) |*slot| {
+        slot.* = id;
+        id += 1;
+    };
+    try std.testing.expectEqual(@as(?u32, null), marks.firstNonAdded(&tok));
+    for (0..added.len) |i| {
+        added[i].id += 1000;
+        try std.testing.expectEqual(@as(?u32, @intCast(i + 300)), marks.firstNonAdded(&tok));
+        added[i].id -= 1000;
+    }
+}
+
+test "automatic LFM2 pictures warn and turn off for missing or non-added markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var names: [104][]const u8 = undefined;
+    @memcpy(names[0..4], &[_][]const u8{ "<image>", "<|image_start|>", "<|image_end|>", "<|img_thumbnail|>" });
+    for (names[4..], 0..) |*name, i| name.* = try std.fmt.allocPrint(a, "<|img_row_{d}_col_{d}|>", .{ i / max_grid + 1, i % max_grid + 1 });
+    for (0..3) |mode| {
+        var vocab: std.json.ObjectMap = .empty;
+        try vocab.put(a, "?", .{ .integer = 0 });
+        var added = std.json.Array.init(a);
+        for (names, 0..) |name, i| {
+            if (mode != 1 or i != 3) try vocab.put(a, name, .{ .integer = @intCast(i + 1) });
+            if (mode != 0 and i == 3) continue;
+            var token: std.json.ObjectMap = .empty;
+            try token.put(a, "content", .{ .string = name });
+            try token.put(a, "special", .{ .bool = true });
+            try token.put(a, "normalized", .{ .bool = false });
+            try added.append(.{ .object = token });
+        }
+        var model: std.json.ObjectMap = .empty;
+        try model.put(a, "type", .{ .string = "WordLevel" });
+        try model.put(a, "unk_token", .{ .string = "?" });
+        try model.put(a, "vocab", .{ .object = vocab });
+        var table: std.json.ObjectMap = .empty;
+        try table.put(a, "model", .{ .object = model });
+        try table.put(a, "added_tokens", .{ .array = added });
+        var tok = try core.tokenizer.parse(a, try std.json.Stringify.valueAlloc(a, std.json.Value{ .object = table }, .{}));
+        defer tok.deinit();
+        var warning: []const u8 = "";
+        const marks = Marks.forPictures(&tok, &warning);
+        try std.testing.expectEqual(mode == 0, marks != null);
+        if (mode == 0) {
+            try std.testing.expectEqualStrings("", warning);
+        } else {
+            try std.testing.expect(std.mem.indexOf(u8, warning, "image input disabled") != null);
+            try std.testing.expect(std.mem.indexOf(u8, warning, "text serving continues") != null);
+            try std.testing.expect(std.mem.indexOf(u8, warning, if (mode == 1) "missing" else "not an added token") != null);
+        }
+    }
 }

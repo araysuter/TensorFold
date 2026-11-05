@@ -17,6 +17,12 @@ const sample = @import("batch_sample.zig");
 const think = @import("think.zig");
 const batch_costs = @import("batch_costs.zig");
 const grammar = @import("grammar.zig");
+const fill = @import("prefill.zig");
+pub const decodeShare = fill.shareOf;
+const prompt_gpu = @import("prefill_metal.zig");
+const RoundTimes = @import("round_times.zig").RoundTimes;
+const batch_settle = @import("batch_settle.zig");
+const batch_draft = @import("batch_draft.zig");
 
 /// A stream's images through the host's tower: its prompt pass's rows and frame (in `a`), then their release.
 pub const Images = struct { ctx: *anyopaque, build: *const fn (ctx: *anyopaque, a: std.mem.Allocator, images: []const lanes.stream.Image, prompt_len: usize, from: usize) anyerror!*fz.vis_prompt.VisPrompt, release: *const fn (ctx: *anyopaque, p: *fz.vis_prompt.VisPrompt) void };
@@ -27,6 +33,8 @@ pub const Backend = struct {
     primary: *fz.Model,
     sessions: []Session,
     by: std.AutoHashMapUnmanaged(*Stream, usize) = .empty,
+    filling: std.AutoHashMapUnmanaged(*Stream, fill.State) = .empty,
+    fill_grows: bool = false, // a prompt's steps beside decoders grow once it has waited (fill.besideRows)
     hidden: Buf,
     window_count: u64 = 0,
     shared_count: u64 = 0,
@@ -40,9 +48,13 @@ pub const Backend = struct {
     paused: std.ArrayList(*Stream) = .empty, // streams that outgrew their session and wait for a larger one to free
     moves: u64 = 0,
     serial_drafts: bool = false, // FZ_BATCH_MTP_SERIAL=1: each stream's drafts in their own command buffers
+    overlap: bool = true, // FZ_VERIFY_OVERLAP=0: verify on a serial encoder; else a concurrent one, the streams' recurrences without barriers between them
     costs: ?batch_costs.Costs = null, // timeCosts: the lane allocator's prices
     images: ?Images = null, // --vision: the tower's rows for a stream's images; null: an image stream fails
     grammar: grammar.Masks, // structured output: the rounds' mask rows and first rows
+    times: RoundTimes = .{}, // FZ_ROUND_TIMES=1: a shared round's phases
+    fence: ?mtl.counters.Fence = null, // orders a round's state copies before its forward in one command buffer
+    packed_drafts: batch_draft.State = .{}, // every stream's draft steps packed into one pass a step (FZ_BATCH_MTP_ROWS=0: off)
 
     /// Sessions of the given capacities (the first, the engine's own, holds its whole window whatever is given).
     pub fn init(gpa: std.mem.Allocator, e: *Engine, capacities: []const usize) !Backend {
@@ -63,7 +75,7 @@ pub const Backend = struct {
                 return if (std.c.getenv(name)) |v| v[0] == '1' else false;
             }
         };
-        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL") };
+        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL"), .overlap = if (std.c.getenv("FZ_VERIFY_OVERLAP")) |v| v[0] != '0' else true, .times = RoundTimes.init(), .fence = if (std.c.getenv("FZ_SETTLE_SYNC") == null) mtl.counters.Fence.init(e.r.device) catch null else null };
     }
 
     /// Times shared-round costs on the last free session, or leaves them unpriced when it cannot fit.
@@ -72,6 +84,12 @@ pub const Backend = struct {
     }
 
     pub fn deinit(b: *Backend) void {
+        if (b.fence) |f| f.deinit();
+        while (b.filling.count() > 0) {
+            var it = b.filling.keyIterator();
+            b.abortPrompt(it.next().?.*);
+        }
+        b.filling.deinit(b.gpa);
         b.e.m = b.primary;
         b.paused.deinit(b.gpa);
         b.by.deinit(b.gpa);
@@ -82,38 +100,19 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held } };
     }
 
     pub const facts = batch_costs.facts;
 
-    fn self(ptr: *anyopaque) *Backend {
+    pub fn self(ptr: *anyopaque) *Backend {
         return @ptrCast(@alignCast(ptr));
     }
     fn session(b: *Backend, s: *Stream) !*Session {
         return &b.sessions[b.by.get(s) orelse return error.UnknownStream];
     }
-    fn settle(b: *Backend) !void {
-        var needed = false;
-        for (b.sessions) |*s| if (s.used) {
-            if (s.round.pending) try s.keep(s.round.rows);
-            needed = needed or s.m.state != 0 or s.m.state_row != 0;
-        };
-        if (!needed) return;
-        const cb = b.e.r.queue.commandBuffer();
-        const blit = cb.blit();
-        for (b.sessions) |*s| if (s.used) s.normalizeGpu(blit);
-        blit.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |message| {
-            std.log.err("session state copy failed: {s}", .{message});
-            return error.GpuFailed;
-        }
-        for (b.sessions) |*s| if (s.used) {
-            s.m.state = 0;
-            s.m.state_row = 0;
-        };
+    pub fn settle(b: *Backend) !void {
+        return batch_settle.now(b);
     }
 
     const Binding = @import("session_binding.zig").Binding;
@@ -123,7 +122,7 @@ pub const Backend = struct {
     }
 
     /// Chooses a slot; LaneMemory means wait, ContextFull means no session can hold the reply.
-    fn slotFor(b: *Backend, prompt: usize, max_new: usize) !usize {
+    pub fn slotFor(b: *Backend, prompt: usize, max_new: usize) !usize {
         var caps: [fz.MAXR]usize = undefined;
         var used: [fz.MAXR]bool = undefined;
         var most: usize = 0;
@@ -213,84 +212,40 @@ pub const Backend = struct {
         return true;
     }
 
-    fn prefill(ptr: *anyopaque, stream: *Stream) anyerror!void {
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        try self(ptr).fill(stream, null);
+    pub fn promptPool(_: *Backend) @TypeOf(mtl.objc.Pool.push()) {
+        return mtl.objc.Pool.push();
     }
-
-    /// A stream's whole prompt pass, in session `slot` when given (free), else the first free one.
-    fn fill(b: *Backend, stream: *Stream, slot: ?usize) !void {
-        const prompt = stream.prompt();
-        if (prompt.len == 0) return error.EmptyPrompt;
+    pub fn beginPrompt(b: *Backend, stream: *Stream, slot: ?usize) !fill.State {
+        return prompt_gpu.begin(b, stream, slot);
+    }
+    pub fn settlePrompt(b: *Backend, _: *Stream) !void {
         try b.settle();
-        const i = slot orelse try b.slotFor(prompt.len, stream.max_new);
-        if (b.sessions[i].used) return error.NoFreeSlot;
-        if (slot != null and prompt.len + stream.max_new + slots.WINDOW > b.sessions[i].m.cap) return error.ContextFull;
-        const s = &b.sessions[i];
-        try b.by.put(b.gpa, stream, i);
-        errdefer {
-            _ = b.by.remove(stream);
-            s.used = false;
+    }
+    pub fn finishChunk(b: *Backend, _: *Stream) !void {
+        try b.settle();
+    }
+    pub fn promptRows(b: *Backend, at: u32, end: u32) u32 {
+        return prompt_gpu.rows(b, at, end);
+    }
+    pub fn chunkPrompt(b: *Backend, stream: *Stream, slot: usize, at: u32, rows: u32) !void {
+        try prompt_gpu.chunk(b, stream, slot, at, rows);
+    }
+    pub fn markPrompt(b: *Backend, stream: *Stream, at: u32) !void {
+        try prompt_gpu.mark(b, stream, at);
+    }
+    pub fn finishPrompt(b: *Backend, stream: *Stream) !void {
+        try prompt_gpu.finish(b, stream);
+    }
+    pub fn abortPrompt(b: *Backend, stream: *Stream) void {
+        release(b, stream);
+    }
+    pub fn decoding(b: *const Backend) bool {
+        var it = b.by.keyIterator();
+        while (it.next()) |key| {
+            const s = key.*;
+            if (!b.filling.contains(s) and !s.paused and !s.finished) return true;
         }
-        s.used = true;
-        s.held_n = 0;
-        s.round = .{};
-        s.row0 = 0;
-        outputs(b, s, 0);
-        const old = try b.bind(s);
-        defer old.restore(b.e);
-        s.m.reset();
-        stream.cached = 0;
-        if (stream.reuse.saved) |saved| {
-            const state: *snap.State = @ptrCast(@alignCast(saved));
-            if (state.at < prompt.len and state.at < s.m.cap) {
-                try snap.restore(b.e, state);
-                stream.cached = @intCast(state.at);
-            } else stream.reuse_failed = true;
-        }
-        var arena: std.heap.ArenaAllocator = .init(b.gpa);
-        defer arena.deinit();
-        const vis: ?*fz.vis_prompt.VisPrompt = if (stream.images.len > 0) try (b.images orelse return error.NoImageTower).build(b.images.?.ctx, arena.allocator(), stream.images, prompt.len, s.m.pos) else null;
-        s.m.vis = vis;
-        defer s.m.vis = null;
-        defer if (vis) |p| b.images.?.release(b.images.?.ctx, p);
-        var at: usize = s.m.pos;
-        while (at < prompt.len) {
-            if (stream.isCancelled()) return error.Cancelled;
-            var end = prompt.len;
-            for (stream.chunks) |mark| if (mark > at) {
-                end = @min(end, mark);
-                break;
-            };
-            for (stream.reuse.marks) |mark| if (mark > at) {
-                end = @min(end, mark);
-                break;
-            };
-            const step = fz.chunkRows(at, b.e.pr.step); // past the trained window a chunk scores more blocks a row
-            const call = if (b.e.segments) segments.next(end - at, step, @import("engine.zig").SEG_MIN) else segments.Call{ .rows = @min(end - at, step), .parts = 1 };
-            end = at + call.rows;
-            const ps = [2]*fz.Prompt{ b.e.pr, b.e.pr2 };
-            s.first = try fz.Prompt.chunkN(ps[0..call.parts], &s.m, b.gpa, prompt[at..end]);
-            if (end == prompt.len and stream.grammar != null) try b.grammar.keepFirst(b.gpa, i, b.sessions.len, s.m.t.logits);
-            // Sample before the next forward replaces the last prompt row's logits.
-            if (end == prompt.len) if (sample.active(stream.sampling)) |p| {
-                s.first = try sample.first(b.e, &s.m, p, @intCast(prompt.len));
-            };
-            for (ps[0..call.parts], 0..) |p, k| {
-                const start = at + segments.start(call.rows, call.parts, k);
-                const rows = segments.rows(call.rows, call.parts, k);
-                const count = if (start + rows < prompt.len) rows else rows - 1;
-                try p.mtpKeys(&s.m, start, prompt[start + 1 .. start + 1 + count], p.last);
-                if (start + rows == prompt.len) Session.copy(p.last.at((rows - 1) * fz.WIDE * 2), s.last, fz.WIDE * 2);
-            }
-            s.normalize();
-            at = end;
-            if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(at)) != null)
-                if (stream.reuse.hook) |hook| hook.at(hook.ptr, stream, @intCast(at));
-        }
-        s.m.mtp.pos = prompt.len - 1;
-        s.m.mtp.drafted = 0;
+        return false;
     }
 
     /// Runs a lone request in session 0 until it finishes or hands over to shared rounds.
@@ -302,7 +257,10 @@ pub const Backend = struct {
         if (stream.prompt().len + stream.max_new + @import("engine.zig").MARGIN > s.m.cap) return error.ContextFull;
         var handed = false;
         defer if (!handed) release(b, stream);
-        try b.fill(stream, 0);
+        if (!try fill.lone(b, stream, hooks)) {
+            handed = true;
+            return true;
+        }
         const prompt = try @import("lone_stream.zig").commitFirst(b.gpa, stream, s.first); // decode copies it to the rounds' history before any round commits
         hooks.committed(hooks.ctx);
         if (stream.finished) return false;
@@ -373,6 +331,7 @@ pub const Backend = struct {
     }
 
     fn first(ptr: *anyopaque, stream: *Stream, position: u64) anyerror!u64 {
+        if (self(ptr).filling.contains(stream)) return error.PromptIncomplete;
         const s = try self(ptr).session(stream);
         if (position != s.m.pos) return error.PositionMismatch;
         return s.first;
@@ -397,7 +356,12 @@ pub const Backend = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const b = self(ptr);
-        try b.settle();
+        b.times.begin(false);
+        const fold = if (b.fence != null and !b.sized) try batch_settle.keep(b) else blk: {
+            try b.settle();
+            break :blk false;
+        };
+        b.times.settled();
         if (windows.len == 0 or windows.len > fz.MAXR or out.len != windows.len) return error.BadBatch;
         for (windows) |w| try b.makeRoom(w.stream, w.rows());
         var desc: [fz.MAXR]meta.Window = undefined;
@@ -425,22 +389,41 @@ pub const Backend = struct {
             s.m.pleIds(s.tokens[0..s.round.rows]);
             @memcpy(t.ids8.b.slice(u32, fz.MAXR)[row..][0..s.round.rows], s.tokens[0..s.round.rows]);
             @memcpy(t.ple_ids.b.slice(u32, fz.MAXR * 16)[row * 16 ..][0 .. s.round.rows * 16], s.m.t.ple_ids.b.slice(u32, s.round.rows * 16));
-            outputs(b, s, row);
             segs[i] = .{ .s = s, .row0 = row, .rows = s.round.rows };
             @memcpy(o.drafts, s.tokens[1..s.round.rows]);
         }
         t.rows.b.slice(i32, 1)[0] = @intCast(plan.total);
         t.mdims.b.slice(i32, 2)[0] = @intCast(plan.total);
-        @memcpy(t.pos8.b.slice(u32, fz.MAXR)[0..plan.total], plan.positions[0..plan.total]);
+        const pos8 = t.pos8.b.slice(u32, fz.MAXR);
+        @memcpy(pos8[0..plan.total], plan.positions[0..plan.total]);
+        for (windows, 0..) |w, i| { // an image stream's rows past its last image rotate at their slot plus its delta
+            const d = (try b.session(w.stream)).m.delta;
+            fz.vis_prompt.decodePositions(pos8[plan.starts[i]..][0..w.rows()], d);
+        }
         const cb = b.e.r.queue.commandBuffer();
-        b.e.r.enc = cb.compute(.serial);
+        // The copies read the kept round's rows: encode them before outputs() repoints cs[1] at this round's.
+        if (fold) batch_settle.encode(b, cb, b.fence.?);
+        for (segs[0..windows.len], 0..) |g, i| outputs(b, g.s, plan.starts[i]);
+        b.e.r.begin(cb, if (b.overlap) .concurrent else .serial);
+        errdefer if (b.e.r.fsr != null) b.e.r.abort();
+        if (fold) b.fence.?.waitCompute(b.e.r.enc);
         const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);
-        try forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8, if (masked) &b.grammar else null);
+        const was = b.e.r.serial;
+        if (b.overlap) b.e.r.serial = false; // every launch then ends in a barrier, as the drafts' encoders do
+        const encoded = forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8, if (masked) &b.grammar else null);
+        b.e.r.serial = was;
+        try encoded;
         @memcpy(b.e.draw_at.b.slice(u32, fz.MAXR)[0..plan.total], plan.keys[0..plan.total]);
-        for (windows, 0..) |w, i| if (sample.active(w.stream.sampling)) |p| {
-            sample.encode(b.e.r.enc, b.e.r.draw_pipe, t.logits, b.e.draw_at, t.picks, plan.starts[i], w.rows(), p);
-        };
+        var widths: [fz.MAXR]usize = undefined;
+        var ps: [fz.MAXR]?lanes.Sampling = undefined;
+        for (windows, 0..) |w, i| {
+            widths[i] = w.rows();
+            ps[i] = w.stream.sampling;
+        }
+        sample.encodeAll(b.e.r.enc, &b.e.r.draws, t.logits, b.e.draw_at, t.picks, plan.starts[0..windows.len], widths[0..windows.len], ps[0..windows.len]);
+        b.times.commit();
         try b.primary.finish(cb);
+        b.times.end(cb, false, plan.total, windows.len);
         Session.copy(b.primary.last, b.hidden, plan.total * fz.WIDE * 2);
         for (out, 0..) |o, i| @memcpy(o.sampled, t.picks.b.slice(u32, plan.total)[plan.starts[i]..][0..o.sampled.len]);
         b.window_count += 1;
@@ -503,13 +486,19 @@ pub const Backend = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const start = mtl.clock.seconds();
+        b.times.begin(true);
         var follows: [fz.MAXR][]const u32 = undefined;
         var hiddens: [fz.MAXR]Buf = undefined;
         var ones: [fz.MAXR][1]u32 = undefined;
+        var ss: [fz.MAXR]*Session = undefined;
+        var depths: [fz.MAXR]usize = undefined;
+        var draws: [fz.MAXR]?lanes.Sampling = undefined;
+        var lands: [fz.MAXR]u64 = undefined;
         if (requests.len > fz.MAXR) return error.DraftOutOfStep;
         for (requests, 0..) |r, k| {
             if (r.early or r.lanes != null or r.ranks or r.depth >= fz.MAXR) return error.DraftOutOfStep;
             const s = try b.session(r.stream);
+            ss[k], depths[k], draws[k], lands[k] = .{ s, r.depth, r.stream.sampling, r.position };
             follows[k] = if (r.first) |f| blk: {
                 ones[k][0] = switch (f) {
                     .value => |v| v,
@@ -533,17 +522,26 @@ pub const Backend = struct {
             }
         }
         const cb = b.e.r.queue.commandBuffer();
-        b.e.r.enc = cb.compute(if (b.e.r.serial) .serial else .concurrent);
-        for (requests, 0..) |r, k| {
+        b.e.r.begin(cb, if (b.e.r.serial) .serial else .concurrent);
+        errdefer if (b.e.r.fsr != null) b.e.r.abort();
+        const n = requests.len;
+        const packed_ = batch_draft.encode(b, ss[0..n], follows[0..n], hiddens[0..n], depths[0..n], draws[0..n], lands[0..n]) catch |err| {
+            if (b.e.r.fsr == null) b.e.r.enc.end();
+            return err;
+        };
+        if (!packed_) for (requests, 0..) |r, k| {
             const s = try b.session(r.stream);
             const old = try b.bind(s);
             defer old.restore(b.e);
             s.encodeDrafts(follows[k], hiddens[k], r.depth) catch |err| {
-                b.e.r.enc.end();
+                if (b.e.r.fsr == null) b.e.r.enc.end();
                 return err;
             };
-        }
+        };
+        b.times.commit();
         try b.primary.finish(cb);
+        b.times.end(cb, true, 0, requests.len);
+        if (packed_) batch_draft.read(&b.packed_drafts);
         for (requests) |r| (try b.session(r.stream)).heldDrafts(r.depth);
         b.draft_waits += 1;
         b.draft_calls += requests.len;
@@ -552,6 +550,7 @@ pub const Backend = struct {
 
     fn release(ptr: *anyopaque, stream: *Stream) void {
         const b = self(ptr);
+        prompt_gpu.clear(b, stream);
         if (std.mem.indexOfScalar(*Stream, b.paused.items, stream)) |k| _ = b.paused.orderedRemove(k);
         const kv = b.by.fetchRemove(stream) orelse return;
         b.sessions[kv.value].used = false;

@@ -8,6 +8,7 @@ const Allocator = @import("std").mem.Allocator;
 
 /// What the round loop's depth rule needs from the drafter itself (not from the target, whose own head may not exist).
 pub const Facts = struct {
+    limit_shared_drafts: bool = false, // retain the depth rule's head-step price before reserving shared rows
     depth: u32, // drafts a round at most
     step_ms: f64, // one more draft's cost (timed at load); the rule prices a round as forward(rows) + step_ms x drafts
     prior: []const f64 = &.{}, // acceptance by depth until a stream has its own
@@ -17,7 +18,13 @@ pub const Facts = struct {
     trees: bool = false, // hold() takes a tree of lanes (Hold.lanes), each lane its parent's rank-r token
     window_costs: []const Cost = &.{}, // the target's window ms by rows (timed at load), for the depth rule
     lane_costs: []const Cost = &.{}, // the same for the lane planner (Model.lane_costs)
+    copy_match: i64 = 0, // matching tokens a copy needs beside this drafter's proposals (0: the target's copy_match)
     tree_nodes: u32 = 0, // hold() without lanes grows its own tree of up to `depth` nodes, at most this many (tree, chances)
+    chances: bool = false, // chances() gives each held chain draft's chance: verify rows go by them (Model.granted_depth)
+    confidence_floor: ?f64 = null, // with chances: every round drafts the deepest chain and verifies drafts this likely
+    slack: u32 = 0, // with chances: drafts a hold offers past the stream's last grant (0: the depth rule's own)
+    copy_first: bool = false, // a hold costs a pass of its own: none is asked for a stream with a copy ahead
+    hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // that pass's ms by blocks and depth (timed at load)
 };
 
 /// Target rows [start, start + features.rows) and the token after each; `rows`, when given, picks which to absorb.
@@ -27,13 +34,17 @@ pub const Absorb = struct {
     start: u64,
     follow: []const u32,
     rows: ?[]const u32 = null,
+    prompt: bool = true, // prompt ingestion keeps its historical arithmetic; accepted live rows set false
+    propose: bool = true, // false: retain committed context without computing unused proposal outputs
     offered: u32 = 0, // the drafter's grown tree's first nodes the verified window carried (0: none of its own)
 };
 
-/// `depth` drafts after `pending` at `position`; with `lanes` a tree, lane i the rank-r choice after its parent.
-pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, lanes: ?*const Shape = null };
+/// `depth` drafts after `pending` at `position`; `lanes`: a tree's ranks; `tokens`, `sampling`: the stream's, if given.
+pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, plan: ?*const @import("proposal_head.zig").Plan = null, lanes: ?*const Shape = null, tokens: []const u32 = &.{}, sampling: ?@import("sampling.zig").Sampling = null };
 
 pub const Drafter = struct {
+    kind: []const u8 = "draft model", // descriptive only; the loader identifies the implementation it attached
+    proposal_head: ?*const @import("proposal_head.zig").Service = null,
     ptr: *anyopaque,
     vtable: *const VTable,
 
@@ -45,6 +56,8 @@ pub const Drafter = struct {
         open: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         absorb: *const fn (ptr: *anyopaque, items: []const Absorb) anyerror!void,
         hold: *const fn (ptr: *anyopaque, items: []const Hold) anyerror!void,
+        hold_planned: ?*const fn (*anyopaque, []const Hold) anyerror!void = null,
+        clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
         /// Each stream's held drafts on the host: out[i] gets streams[i]'s first out[i].len (error if it holds fewer).
         held: *const fn (ptr: *anyopaque, streams: []const *Stream, out: []const []u32) anyerror!void,
         /// The stream left the rounds (only called for an opened stream).
@@ -68,6 +81,10 @@ pub const Drafter = struct {
         return d.vtable.absorb(d.ptr, items);
     }
     pub fn hold(d: Drafter, items: []const Hold) !void {
+        if (d.proposal_head) |service| if (service.mode != .legacy) {
+            const f = d.vtable.hold_planned orelse return error.ProposalServiceUnsupported;
+            return f(d.ptr, items);
+        };
         return d.vtable.hold(d.ptr, items);
     }
     pub fn held(d: Drafter, streams: []const *Stream, out: []const []u32) !void {

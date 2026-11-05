@@ -21,12 +21,21 @@ pub const Context = struct {
     }
 
     pub fn init(d: *const Driver, ordinal: c_int) Error!Context {
+        // a -Dgpu server's images run on that one SM: refuse another GPU here, before any engine loads an image
+        if (@import("kernels.zig").built_sm) |sm| {
+            var buf: [192]u8 = undefined;
+            if (@import("driver.zig").gpuRefusal(sm, try d.capability(ordinal), ordinal, &buf)) |why| {
+                std.log.err("{s}", .{why});
+                return error.WrongGpu;
+            }
+        }
         var dev: abi.Device = 0;
         try d.check(d.api.cuDeviceGet(&dev, ordinal), "cuDeviceGet");
         var ctx: abi.Context = null;
         try d.check(d.api.cuDevicePrimaryCtxRetain(&ctx, dev), "cuDevicePrimaryCtxRetain");
         errdefer _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
         try d.check(d.api.cuCtxSetCurrent(ctx), "cuCtxSetCurrent");
+        try @import("context_health.zig").retain(d, ctx);
         @import("copy_source.zig").setCurrent(ctx);
         return .{ .d = d, .device = dev, .handle = ctx };
     }
@@ -44,6 +53,10 @@ pub const Context = struct {
             _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
             return error.Invalid;
         }
+        @import("context_health.zig").retain(d, ctx) catch |err| {
+            _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
+            return err;
+        };
         @import("copy_source.zig").setCurrent(ctx); // the host made it current: copy sources are tagged with it
         return .{ .d = d, .device = dev, .handle = ctx };
     }
@@ -53,6 +66,7 @@ pub const Context = struct {
         self.d.synchronize() catch {};
         @import("copy_source.zig").dropSpares(self.d, self.handle); // their pinned bytes go with the context
         _ = self.d.api.cuDevicePrimaryCtxRelease_v2(self.device);
+        @import("context_health.zig").release(self.d, self.handle);
         self.* = undefined;
     }
 
@@ -60,6 +74,11 @@ pub const Context = struct {
     pub fn makeCurrent(self: *const Context) Error!void {
         try self.d.check(self.d.api.cuCtxSetCurrent(self.handle), "cuCtxSetCurrent");
         @import("copy_source.zig").setCurrent(self.handle);
+    }
+
+    /// Readiness can be read from HTTP threads without making the context current.
+    pub fn healthy(self: *const Context) bool {
+        return @import("context_health.zig").healthy(self.d, self.handle);
     }
 
     pub fn synchronize(self: *const Context) Error!void {
@@ -83,6 +102,12 @@ pub const Context = struct {
         if (buf.len < 2) return error.Invalid;
         try self.d.check(self.d.api.cuDeviceGetName(buf.ptr, @intCast(buf.len), self.device), "cuDeviceGetName");
         return std.mem.sliceTo(buf, 0);
+    }
+
+    pub fn uuid(self: *const Context) Error![16]u8 {
+        var id: [16]u8 = undefined;
+        try self.d.check(self.d.api.cuDeviceGetUuid_v2(&id, self.device), "cuDeviceGetUuid");
+        return id;
     }
 
     pub const MemInfo = struct { free: usize, total: usize };

@@ -12,9 +12,24 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug) }));
     run.has_side_effects = true;
+    b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
+    const precision = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/attention_precision.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    }) }));
+    b.step("test-attention-precision-host", "Shared attention precision mode, source and kept-state identity").dependOn(&precision.step);
+    step.dependOn(&precision.step);
     step.dependOn(family);
+    const rotary = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/rotary_cache_positions.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    }) }));
+    b.step("test-rotary-cache-positions-host", "Cache-check positions match the consumed pooled axes without shaders").dependOn(&rotary.step);
+    step.dependOn(&rotary.step);
     const zstd = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/core/contract/fatbin_zstd.zig"),
         .target = b.graph.host,
@@ -28,6 +43,25 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     }) }));
     b.step("test-delta-slots-contract-host", "FP64 DeltaNet and slot corruption controls without shaders").dependOn(&delta.step);
     step.dependOn(&delta.step);
+    const nvfp4_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/drama3_nvfp4_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "contract", .module = module(b, b.graph.host, .debug) }},
+    });
+    const nvfp4 = b.addRunArtifact(b.addTest(.{ .root_module = nvfp4_module }));
+    b.step("test-drama-nvfp4-reference-host", "NVFP4 scalar reference and reduced-accumulator discrimination").dependOn(&nvfp4.step);
+    step.dependOn(&nvfp4.step);
+    const nemotron = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/nemotron_experts_contract_host.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "contract", .module = module(b, b.graph.host, .debug) }},
+    }) }));
+    b.step("test-nemotron-experts-contract-host", "Nemotron routed-expert tables, float64 steps, stress and controls").dependOn(&nemotron.step);
+    step.dependOn(&nemotron.step);
+    const shared_gate = b.addRunArtifact(b.addTest(.{ .root_module = nvfp4_module, .filters = &.{"shared gate stress"} }));
+    b.step("test-drama-combine-stress-host", "Shared-gate stress remains discriminating after nonlinear output").dependOn(&shared_gate.step);
 }
 
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
@@ -44,12 +78,26 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "kernel_sources", .module = sources },
             .{ .name = "contract", .module = module(b, target, optimize) },
             .{ .name = "h3_kernels", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }) },
+            .{ .name = "ling_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") }) },
+            .{ .name = "ling_route", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/route.zig") }) },
         },
     }) });
     const install = b.addInstallArtifact(exe, .{});
     b.step("tf-kernel-contract", "Build the kernel contract's Metal gates and controls (no run)").dependOn(&install.step);
     const run = b.addRunArtifact(exe);
     b.step("kernel-contract", "Every registered kernel through the contract's gates on this GPU, each control red").dependOn(&run.step);
+    const ling_gpu = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/ling_route_gpu.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal_mod },
+            .{ .name = "route", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/route.zig") }) },
+            .{ .name = "ling_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") }) },
+        },
+    }) });
+    b.step("test-ling-route-gpu", "Ling grouped route on this GPU against the host formula").dependOn(&b.addRunArtifact(ling_gpu).step);
 }
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).
@@ -67,5 +115,14 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     const run = b.addRunArtifact(runner);
     run.addArg("kernel-contract");
     b.step("kernel-contract", "Every registered CUDA kernel through the contract's gates on this GPU, each control red").dependOn(&run.step);
+    const prefill_many = b.addRunArtifact(runner);
+    prefill_many.addArg("qmm-prefill-many-contract");
+    b.step("qmm-prefill-many-contract", "GB10 bit-exact multi-projection prompt launch against separate launches").dependOn(&prefill_many.step);
+    const prefill_tile22 = b.addRunArtifact(runner);
+    prefill_tile22.addArg("qmm-prefill-tile22-contract");
+    b.step("qmm-prefill-tile22-contract", "GB10 large-prompt 2x2 tile against the default tile").dependOn(&prefill_tile22.step);
+    const prefill_many_bench = b.addRunArtifact(runner);
+    prefill_many_bench.addArg("qmm-prefill-many-bench");
+    b.step("qmm-prefill-many-bench", "Same-process A-B-A screening for the GB10 prompt launch fusion").dependOn(&prefill_many_bench.step);
     return install;
 }

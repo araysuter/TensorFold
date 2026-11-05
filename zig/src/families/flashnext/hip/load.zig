@@ -16,6 +16,11 @@ const Allocator = std.mem.Allocator;
 /// The table core/quant reads projections through: the family's checkpoint tables, over core's checkpoint.
 pub const Tables = @import("checkpoint_tables.zig").Tables(core.checkpoint.Checkpoint, core.quant.mlx.Width);
 
+/// A tensor's name under a stem: the join every name the loader reads is built with.
+fn stemName(a: Allocator, stem: []const u8, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}.{s}", .{ stem, name });
+}
+
 /// The device copy of one rank's weights: every buffer it uploaded, freed together.
 pub const Weights = struct {
     gpa: Allocator,
@@ -38,6 +43,8 @@ const Loader = struct {
     rank: ?Rank,
     /// The checkpoint stores centred norms as gamma (true) or as gamma - 1 (false).
     around_one: bool,
+    /// Where the index keeps the MTP head: `language_model.mtp` (mlx-lm), else oMLX's top-level `mtp`.
+    mtp_root: []const u8,
 
     fn key(l: *const Loader, comptime fmt: []const u8, args: anytype) ![]const u8 {
         return std.fmt.allocPrint(l.a, fmt, args);
@@ -121,7 +128,7 @@ const Loader = struct {
 
     /// `name` under `stem`.
     fn named(l: *const Loader, stem: []const u8, name: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(l.a, "{s}.{s}", .{ stem, name });
+        return stemName(l.a, stem, name);
     }
 
     fn linear(l: *const Loader, base: []const u8, c: *const config.Config) !model.Linear {
@@ -182,6 +189,7 @@ const Loader = struct {
         const u = l.up.uploader();
         return .{
             .rows32 = (try u.tensor(r.rows32)).ptr,
+            .rows16 = (try u.tensor(r.router)).ptr,
             .top_k = r.top_k,
             .rows = r.router.shape[0],
             .remap = if (r.remap) |t| (try u.tensor(t)).ptr else 0,
@@ -192,6 +200,11 @@ const Loader = struct {
                 .count = r.experts.count,
                 .width = r.experts.width,
                 .dims = r.experts.dims,
+                // a shared expert of another width than the stack: its own projections, run beside the routed launch
+                .shared = if (r.experts.separate) |s| hip.moe.Shared{
+                    .gate_up = try quant.view(try quant.upload(u, .{ .mlx = s.gate_up }), false),
+                    .down = try quant.view(try quant.upload(u, .{ .mlx = s.down }), false),
+                } else null,
             },
         };
     }
@@ -277,26 +290,24 @@ fn aroundOne(a: Allocator, t: *const Tables, layers: usize) !bool {
 }
 
 /// The draft head's rows: the family's draft vocabulary (ascending ids) of the output head.
-pub const draft_ids = @embedFile("../draft_vocab_default.txt");
+pub const draft_ids = @import("../proposal_table.zig").text;
 
 fn draftSpans(a: Allocator) ![]Span {
+    const logical = try draftIds(a);
+    defer a.free(logical);
     var list: std.ArrayList(Span) = .empty;
-    var it = std.mem.tokenizeAny(u8, draft_ids, "\n\r ");
-    while (it.next()) |word| {
-        const id = try std.fmt.parseInt(usize, word, 10);
+    errdefer list.deinit(a);
+    for (logical) |id| {
         if (list.items.len > 0 and list.items[list.items.len - 1].to == id) {
             list.items[list.items.len - 1].to += 1;
         } else try list.append(a, .{ .from = id, .to = id + 1 });
     }
-    return list.items;
+    return list.toOwnedSlice(a);
 }
 
 /// The draft vocabulary as token ids.
 pub fn draftIds(a: Allocator) ![]u32 {
-    var list: std.ArrayList(u32) = .empty;
-    var it = std.mem.tokenizeAny(u8, draft_ids, "\n\r ");
-    while (it.next()) |word| try list.append(a, try std.fmt.parseInt(u32, word, 10));
-    return list.toOwnedSlice(a);
+    return core.proposal_vocab.legacy.ids(a, draft_ids, .{ .vocab = 248320 });
 }
 
 test "the draft ids are one allocation of the vocabulary's length" {
@@ -305,14 +316,89 @@ test "the draft ids are one allocation of the vocabulary's length" {
     try std.testing.expectEqual(@as(usize, 79591), ids.len);
 }
 
-/// One rank's weights (`rank` null: the whole model) from the mapped checkpoint `ck`; rank 0 also holds the MTP head.
-pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoint, c: *const config.Config, rank: ?Rank, act: model.Kind) !Weights {
+test "Flash Next proposal: HIP IDs and contiguous stored-row spans retain the original table" {
+    const a = std.testing.allocator;
+    const ids = try draftIds(a);
+    defer a.free(ids);
+    try std.testing.expectEqualStrings("998317c397023e24afeb9b6839ba54d8611bd3a4dddab4f7288344fd191b6ed8", &core.proposal_vocab.idsHash(ids));
+    const spans = try draftSpans(a);
+    defer a.free(spans);
+    var at: usize = 0;
+    for (spans) |span| for (span.from..span.to) |id| {
+        try std.testing.expectEqual(@as(u32, @intCast(id)), ids[at]);
+        at += 1;
+    };
+    try std.testing.expectEqual(ids.len, at);
+}
+
+/// The MTP head's six names as the loader reads them: each `tensors.mtp` suffix under the index's root.
+pub const MtpNames = struct {
+    norm_embedding: []const u8,
+    norm_hidden: []const u8,
+    fc_embedding: []const u8,
+    fc_hidden: []const u8,
+    layer0: []const u8,
+    mixer: []const u8,
+};
+
+/// The MTP head's names under `root` (`index.mtpRoot` of the checkpoint's weight map); the loader reads only these.
+pub fn mtpNames(a: Allocator, root: []const u8) !MtpNames {
+    const m = tensors.mtp;
+    return .{
+        .norm_embedding = try stemName(a, root, m.norm_embedding),
+        .norm_hidden = try stemName(a, root, m.norm_hidden),
+        .fc_embedding = try stemName(a, root, m.fc_embedding),
+        .fc_hidden = try stemName(a, root, m.fc_hidden),
+        .layer0 = try stemName(a, root, m.layer0),
+        .mixer = try stemName(a, root, m.mixer),
+    };
+}
+
+/// A tiny index over a weight map, so `index.mtpRoot` can be checked over each spelling of the head.
+fn mtpRootOf(a: Allocator, json: []const u8) ![]const u8 {
+    const map = try core.safetensors.index.weightMap(try std.json.parseFromSliceLeaky(std.json.Value, a, json, .{}));
+    return @import("../index.zig").mtpRoot(map);
+}
+
+test "the MTP head's HIP names follow the index's root, so oMLX's top-level mtp.* resolves" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // mlx-lm lists the head under language_model; oMLX keeps it at the top level
+    const mlx_json = "{\"metadata\":{\"total_size\":1},\"weight_map\":{" ++
+        "\"language_model.lm_head.weight\":\"m.safetensors\"," ++
+        "\"language_model.mtp.pre_fc_norm_hidden.weight\":\"m.safetensors\"}}";
+    const omlx_json = "{\"metadata\":{\"total_size\":1},\"weight_map\":{" ++
+        "\"language_model.lm_head.weight\":\"m.safetensors\"," ++
+        "\"mtp.pre_fc_norm_hidden.weight\":\"m.safetensors\"}}";
+    const mlx_lm = try mtpRootOf(a, mlx_json);
+    const omlx = try mtpRootOf(a, omlx_json);
+    try std.testing.expectEqualStrings("language_model.mtp", mlx_lm);
+    try std.testing.expectEqualStrings("mtp", omlx);
+    const lm = try mtpNames(a, mlx_lm);
+    try std.testing.expectEqualStrings("language_model.mtp.pre_fc_norm_embedding.weight", lm.norm_embedding);
+    try std.testing.expectEqualStrings("language_model.mtp.pre_fc_norm_hidden.weight", lm.norm_hidden);
+    try std.testing.expectEqualStrings("language_model.mtp.fc_embedding", lm.fc_embedding);
+    try std.testing.expectEqualStrings("language_model.mtp.fc_hidden", lm.fc_hidden);
+    try std.testing.expectEqualStrings("language_model.mtp.layers.0", lm.layer0);
+    try std.testing.expectEqualStrings("language_model.mtp.hyper_connection_mixer", lm.mixer);
+    const om = try mtpNames(a, omlx);
+    try std.testing.expectEqualStrings("mtp.pre_fc_norm_embedding.weight", om.norm_embedding);
+    try std.testing.expectEqualStrings("mtp.pre_fc_norm_hidden.weight", om.norm_hidden);
+    try std.testing.expectEqualStrings("mtp.fc_embedding", om.fc_embedding);
+    try std.testing.expectEqualStrings("mtp.fc_hidden", om.fc_hidden);
+    try std.testing.expectEqualStrings("mtp.layers.0", om.layer0);
+    try std.testing.expectEqualStrings("mtp.hyper_connection_mixer", om.mixer);
+}
+
+/// One rank's weights (`rank` null: the whole model) from `ck`; rank 0 also holds the MTP head under `mtp_root`.
+pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoint, c: *const config.Config, rank: ?Rank, act: model.Kind, mtp_root: []const u8) !Weights {
     var w: Weights = .{ .gpa = gpa };
     errdefer w.deinit();
     const tables: Tables = .{ .ck = ck, .cfg = c };
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const l: Loader = .{ .a = arena.allocator(), .t = &tables, .up = .{ .r = d, .buffers = &w.buffers, .gpa = gpa }, .rank = rank, .around_one = try aroundOne(arena.allocator(), &tables, c.layers) };
+    const l: Loader = .{ .a = arena.allocator(), .t = &tables, .up = .{ .r = d, .buffers = &w.buffers, .gpa = gpa }, .rank = rank, .around_one = try aroundOne(arena.allocator(), &tables, c.layers), .mtp_root = mtp_root };
     const world_n: usize = if (rank) |r| r.world else 1;
     const dims = try model.Dims.of(c, world_n);
     const head = try l.proj(tensors.lm_head);
@@ -338,13 +424,14 @@ pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoi
     if (drafts and c.mtp.layers > 0) {
         _ = arena.reset(.retain_capacity);
         const draft_rows = try quant.sliceRows(l.a, head, try draftSpans(l.a));
+        const nm = try mtpNames(l.a, l.mtp_root);
         w.model.mtp = .{
-            .e_norm = try l.scale(tensors.mtp.norm_embedding),
-            .h_norm = try l.scale(tensors.mtp.norm_hidden),
-            .fc_e = try l.put(try l.proj(tensors.mtp.fc_embedding), false),
-            .fc_h = try l.put(try l.proj(tensors.mtp.fc_hidden), false),
-            .layer = try l.layer(tensors.mtp.layer0, c, c.mtp.kinds[0], true),
-            .mix = try l.hc(tensors.mtp.mixer, false),
+            .e_norm = try l.scale(nm.norm_embedding),
+            .h_norm = try l.scale(nm.norm_hidden),
+            .fc_e = try l.put(try l.proj(nm.fc_embedding), false),
+            .fc_h = try l.put(try l.proj(nm.fc_hidden), false),
+            .layer = try l.layer(nm.layer0, c, c.mtp.kinds[0], true),
+            .mix = try l.hc(nm.mixer, false),
             .dims = try model.Dims.of(c, 1),
             .draft = try l.put(draft_rows, false),
         };

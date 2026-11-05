@@ -124,6 +124,7 @@ export interface Provider {
   discoveredModels?: string[]
   accounts?: ProviderAccountProfile[]
   defaultAccountId?: string | null
+  resolvedAccountId?: string | null // runtime account binding, populated by providerWithAccount
   spendBudget?: ModelSpendBudget | null
   secretRotations?: SecretRotationMetadata
 }
@@ -160,7 +161,8 @@ export interface OmlxDiscovery {
   message: string
 }
 
-export type ProviderDiscoveryKind = 'ollama' | 'lmstudio' | 'omlx'
+/** Probe target kinds. `custom` covers any OpenAI-compatible endpoint, including a remote TensorFold engine. */
+export type ProviderDiscoveryKind = 'ollama' | 'lmstudio' | 'omlx' | 'custom'
 
 export interface ProviderDiscovery {
   kind: ProviderDiscoveryKind

@@ -132,6 +132,38 @@ cold 8,192-token prompt in 4.41 s against `full`'s 7.96 s (1.81x; 1.82x at 2,048
 52.3 ms against 50.1 ms without drafts: decode reads the same weight bytes either way, and `checkpoint` adds the
 rows' quantization.
 
+## GLM-5.3-Flash's float32 tensors on CUDA
+
+The GLM CUDA loader keeps float32 where its kernels read float32: the hyper-connections' bases and scales, KDA's short
+convolutions, `A_log` and `dt_bias`, the router's correction bias, and the hidden-size norm weights that
+`nvidia/GLM-5.3-Flash-FP4-Local` stores in float32 (`post_attention_layernorm` of layers 0-44 and the final norm, which
+bf16 does not hold). Any other float32 tensor it uploads as bf16 loads only when bf16 holds every value, and a value bf16
+would round is refused with the tensor's name. 1.1.1 rounded such a value to the nearest bf16 instead, so a checkpoint
+whose other float32 tensors hold values bf16 does not now stops at load where it loaded rounded before. The rule
+refuses none of the NVFP4 and FP4-Local checkpoints' float32 tensors, and the EXL3/TR3 checkpoint's float32 tensors are
+all of the kinds kept float32. A stored MXFP8 tensor widened to bf16 (`kv_b` of FP4-Local's MTP layer, and `lm_head`
+for the draft head's quantizer) follows the same rule.
+
+## csf0_v1: NVFP4 at block 32 with a row base and 4-bit offsets
+
+A MIXED_PRECISION checkpoint may store a module's NVFP4 weights with an e4m3 scale every 32 inputs, written as one base
+a row and a 4-bit offset a group. Its `quantized_layers` entry is `{"quant_algo": "NVFP4", "group_size": 32,
+"weight_scale_encoding": "csf0_v1"}`, without `weight_block_size`. For a weight of n outputs from k inputs, k a
+multiple of 64, the module holds:
+
+- `weight`: u8 `[n, k/2]`, the e2m1 codes, input 2i in the low nibble of byte i.
+- `weight_scale.csf0_bases`: u8 `[n]`, each row's base as an e4m3 bit pattern.
+- `weight_scale.csf0_codes`: u8 `[n, k/64]`, the offsets: group g (inputs 32g to 32g + 31) in byte g/2 of its row, an
+  even group in the low nibble.
+- `weight_scale_2` (one f32) and `input_scale`, as ModelOpt's NVFP4 stores them, and no `weight_scale`.
+
+Group g's scale is the e4m3 value of the byte `base + offset`, the sum taken on the bit patterns, and a weight is
+`e2m1(code) × e4m3(base + offset) × weight_scale_2`. A row is valid while its base plus its largest offset is at most
+0x7E, e4m3's largest finite (448): past it a scale would be NaN or negative, and the loader refuses the row by name.
+GLM-5.3-Flash's CUDA engine reads csf0_v1 for its routed experts (`mlp.experts.N.gate_proj`, `up_proj` and
+`down_proj`), every expert of a layer in that form, and loads its block 32 kernels only for such a checkpoint
+(`Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4` is one).
+
 ## Native safetensors metadata
 
 The shared Zig safetensors index retains up to five dimensions, including temporal patch convolutions

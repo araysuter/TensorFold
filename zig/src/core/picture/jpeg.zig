@@ -125,8 +125,13 @@ fn versionOf(bytes: []const u8) ?[]const u8 {
 
 /// Whether the pinned library loads here (tests skip JPEG pixels without it).
 pub fn available(io: std.Io, a: Allocator) bool {
-    _ = load(io, a) catch return false;
+    check(io, a) catch return false;
     return true;
+}
+
+/// Check the decoder's symbols and exact version without creating a decoder or reading pixels.
+pub fn check(io: std.Io, a: Allocator) !void {
+    _ = try load(io, a);
 }
 
 /// What Pillow's open read from the markers before the first scan, and whether the data reaches its end marker.
@@ -141,10 +146,14 @@ const Markers = struct {
 };
 
 pub fn decode(io: std.Io, a: Allocator, data: []const u8) picture.Error!picture.Samples {
+    return decodeWithLimits(io, a, data, .{});
+}
+
+pub fn decodeWithLimits(io: std.Io, a: Allocator, data: []const u8, limits: picture.Limits) picture.Error!picture.Samples {
     var m: Markers = .{};
     defer m.exif.deinit(a);
     try walk(a, data, &m);
-    try picture.fits(m.width, m.height);
+    try limits.fits(m.width, m.height);
     if (m.components == 4) return error.CmykJpeg;
     if (!m.ended) return error.Invalid; // libjpeg would read past the end: Pillow's load refused the truncated bytes
     const f = try load(io, a);

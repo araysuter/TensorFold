@@ -1,5 +1,20 @@
 //! Recording device facade; recurrent arithmetic is deliberately a host sentinel, never a GPU receipt.
 const std = @import("std");
+pub const pass_metrics = @import("metal/pass_metrics.zig");
+const Facade = @This();
+pub const objc = struct {
+    pub const Id = usize;
+};
+pub const resident = struct {
+    pub const fields = @import("metal/resident_fields.zig").Fields(Facade);
+};
+pub const ResidencySet = struct {
+    pub const Follow = struct {
+        ctx: *anyopaque,
+        join: *const fn (ctx: *anyopaque, buffer: Buffer) void,
+        leave: *const fn (ctx: *anyopaque, buffer: Buffer) void,
+    };
+};
 pub const ResourceOptions = struct {
     pub const shared = 0;
     pub const untracked = 0;

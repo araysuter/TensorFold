@@ -58,6 +58,17 @@ const Tensor = core.safetensors.Tensor;
 
 const Held = struct { rel: []u8, file: Shard };
 
+/// MADV_WILLNEED over `bytes` one 128 KiB readahead window a call: one call over a whole tensor reads its first window.
+fn prefetch(bytes: []const u8) void {
+    if (@import("builtin").os.tag != .linux or bytes.len == 0) return;
+    const page = std.heap.pageSize();
+    const step = 128 << 10;
+    const lo = std.mem.alignBackward(usize, @intFromPtr(bytes.ptr), page);
+    const hi = std.mem.alignForward(usize, @intFromPtr(bytes.ptr) + bytes.len, page);
+    var at = lo;
+    while (at < hi) : (at += step) _ = std.os.linux.madvise(@ptrFromInt(at), @min(step, hi - at), std.os.linux.MADV.WILLNEED);
+}
+
 /// One mapped shard: core.safetensors.File.
 const Shard = struct {
     f: core.safetensors.File,
@@ -68,6 +79,8 @@ const Shard = struct {
     }
 
     fn close(self: *Shard) void {
+        // A shard may mix loaded tensors with the n-gram table still read at runtime.
+        if (!runtimePages(self.f.names.keys())) self.f.release(std.heap.page_allocator); // no keep list: scratch unused
         self.f.close(self.io);
     }
 
@@ -76,18 +89,28 @@ const Shard = struct {
     }
 };
 
+fn runtimePages(names: []const []const u8) bool {
+    for (names) |name| if (std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null) return true;
+    return false;
+}
+
+/// The final load-only sweep excludes the n-gram table's live mappings.
+pub fn dropPageCache(io: std.Io, dir: []const u8, keep: anytype) void {
+    core.checkpoint.cache.directory(io, dir, keep);
+}
+
 pub const Store = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     dir: []const u8,
     parsed: std.json.Parsed(std.json.Value),
-    path: []u8 = &.{},
     rel: []u8 = &.{},
     file: ?Shard = null,
-    held: [12]Held = undefined,
-    nheld: usize = 0,
-    released: [2]Held = undefined,
-    nreleased: usize = 0,
+    held: std.ArrayList(Held) = .empty, // as many shards as one layer's borrowed planes span (no fixed cap)
+    /// Pinned upload staging for this store's loaders, grown on demand; freed by dropStaging or deinit.
+    staging: ?cuda.HostBuffer = null,
+    /// Shards a load already opened, kept open until it ends (loaded or deinit): reopening one parses its header again.
+    released: std.ArrayList(Held) = .empty,
     norm_offset: f32 = 0,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Store {
@@ -95,7 +118,10 @@ pub const Store = struct {
         defer gpa.free(index);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, index, gpa, .limited(1 << 26));
         defer gpa.free(text);
-        return .{ .gpa = gpa, .io = io, .dir = dir, .parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{}) };
+        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+        errdefer parsed.deinit();
+        _ = try core.safetensors.index.weightMap(parsed.value);
+        return .{ .gpa = gpa, .io = io, .dir = dir, .parsed = parsed };
     }
 
     /// Infer one checkpoint-wide convention from every decoder HC norm, never from the final mixer's outlier.
@@ -128,59 +154,90 @@ pub const Store = struct {
     }
 
     pub fn deinit(self: *Store) void {
+        self.dropStaging();
         self.release();
+        self.held.deinit(self.gpa);
         self.closeReleased();
+        self.released.deinit(self.gpa);
         self.closeFile();
         self.parsed.deinit();
     }
 
-    /// Borrowers expire here; two indexed shards cover separate weight and calibration planes.
+    /// `len` bytes of the store's pinned staging, grown (reallocated) when a larger request comes.
+    pub fn pinned(self: *Store, d: *const cuda.Driver, len: usize) ![]align(16) u8 {
+        if (self.staging) |p| if (p.d == d and p.bytes.len >= len) return p.bytes[0..len];
+        self.dropStaging();
+        self.staging = try cuda.HostBuffer.alloc(d, len);
+        return self.staging.?.bytes[0..len];
+    }
+
+    /// Frees the pinned staging, if any (a loader calls it once its layers are on the device).
+    pub fn dropStaging(self: *Store) void {
+        if (self.staging) |*p| p.free();
+        self.staging = null;
+    }
+
+    /// A finished load: the pinned staging freed, borrowed planes released, every open shard closed.
+    pub fn loaded(self: *Store) void {
+        self.dropStaging();
+        self.release();
+        self.closeReleased();
+        self.closeFile();
+    }
+
+    /// Borrowers expire here; their shards stay open, pages dropped, until the load ends (or close if not kept).
     pub fn release(self: *Store) void {
-        for (self.held[0..self.nheld]) |h| {
-            if (self.nreleased == self.released.len) {
-                self.released[0].file.close();
-                self.gpa.free(self.released[0].rel);
-                self.released[0] = self.released[1];
-                self.nreleased -= 1;
-            }
-            self.released[self.nreleased] = h;
-            self.nreleased += 1;
+        for (self.held.items) |h| {
+            // the borrowers' pages leave this process (their bytes are copied), except the n-gram table's (Shard.close)
+            if (!runtimePages(h.file.f.names.keys())) h.file.f.release(self.gpa);
+            self.released.append(self.gpa, h) catch {
+                var kept = h.file;
+                kept.close();
+                self.gpa.free(h.rel);
+            };
         }
-        self.nheld = 0;
+        self.held.clearRetainingCapacity();
     }
 
     fn closeReleased(self: *Store) void {
-        for (self.released[0..self.nreleased]) |*h| {
+        for (self.released.items) |*h| {
             h.file.close();
             self.gpa.free(h.rel);
         }
-        self.nreleased = 0;
+        self.released.clearRetainingCapacity();
+    }
+
+    /// The held shards as core.direct_gather reads them: each one's path and mapping.
+    pub fn sources(self: *const Store, out: []core.direct_gather.Source) ![]core.direct_gather.Source {
+        if (self.held.items.len > out.len) return error.TooManySources;
+        for (self.held.items, out[0..self.held.items.len]) |h, *o| o.* = .{ .path = h.file.f.path, .memory = h.file.f.map.memory };
+        return out[0..self.held.items.len];
+    }
+
+    /// hold, the tensor's pages read ahead: only for a reader that copies all of it (the one-GPU threaded loader).
+    pub fn holdAhead(self: *Store, requested: []const u8) !Tensor {
+        const t = try self.hold(requested);
+        prefetch(t.bytes);
+        return t;
     }
 
     pub fn hold(self: *Store, requested: []const u8) !Tensor {
         var mapped: [512]u8 = undefined;
         const key = try self.resolveKey(requested, &mapped);
         const file = try self.shard(key);
-        for (self.held[0..self.nheld]) |*h| {
+        for (self.held.items) |*h| {
             if (std.mem.eql(u8, h.rel, file)) return h.file.get(key) orelse return error.MissingTensor;
         }
-        if (self.nheld == self.held.len) return error.UnexpectedTensor;
-        for (self.released[0..self.nreleased], 0..) |cached, i| {
+        try self.held.ensureUnusedCapacity(self.gpa, 1);
+        for (self.released.items, 0..) |cached, i| {
             if (std.mem.eql(u8, cached.rel, file)) {
-                self.held[self.nheld] = cached;
-                self.nreleased -= 1;
-                if (i < self.nreleased) self.released[i] = self.released[self.nreleased];
-                self.nheld += 1;
-                return self.held[self.nheld - 1].file.get(key) orelse return error.MissingTensor;
+                self.held.appendAssumeCapacity(cached);
+                _ = self.released.swapRemove(i);
+                return self.held.items[self.held.items.len - 1].file.get(key) orelse return error.MissingTensor;
             }
         }
-        const rel = try self.gpa.dupe(u8, file);
-        errdefer self.gpa.free(rel);
-        const path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
-        defer self.gpa.free(path);
-        self.held[self.nheld] = .{ .rel = rel, .file = try Shard.load(self.gpa, self.io, path) };
-        self.nheld += 1;
-        return self.held[self.nheld - 1].file.get(key) orelse {
+        self.held.appendAssumeCapacity(try self.openShard(file));
+        return self.held.items[self.held.items.len - 1].file.get(key) orelse {
             std.debug.print("absent {s}\n", .{key});
             return error.MissingTensor;
         };
@@ -189,8 +246,6 @@ pub const Store = struct {
     pub fn closeFile(self: *Store) void {
         if (self.file) |*f| f.close();
         self.file = null;
-        if (self.path.len != 0) self.gpa.free(self.path);
-        self.path = &.{};
         if (self.rel.len != 0) self.gpa.free(self.rel);
         self.rel = &.{};
     }
@@ -221,13 +276,30 @@ pub const Store = struct {
         return v.string;
     }
 
+    /// `file` (relative to the checkpoint) opened, its header parsed, with its own copy of the name.
+    fn openShard(self: *Store, file: []const u8) !Held {
+        const rel = try self.gpa.dupe(u8, file);
+        errdefer self.gpa.free(rel);
+        const path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
+        defer self.gpa.free(path);
+        return .{ .rel = rel, .file = try Shard.load(self.gpa, self.io, path) };
+    }
+
+    /// Switches shards through `released`: the next one taken from there or opened, the current one parked there.
     fn use(self: *Store, key: []const u8) !void {
         const file = try self.shard(key);
         if (self.file != null and std.mem.eql(u8, file, self.rel)) return;
-        self.closeFile();
-        self.rel = try self.gpa.dupe(u8, file);
-        self.path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
-        self.file = try Shard.load(self.gpa, self.io, self.path);
+        try self.released.ensureUnusedCapacity(self.gpa, 1);
+        const next: Held = for (self.released.items, 0..) |cached, i| {
+            if (std.mem.eql(u8, cached.rel, file)) break self.released.swapRemove(i);
+        } else try self.openShard(file);
+        if (self.file) |*f| {
+            // its pages dropped as close drops them: the n-gram table's stay
+            if (!runtimePages(f.f.names.keys())) f.f.release(self.gpa);
+            self.released.appendAssumeCapacity(.{ .rel = self.rel, .file = f.* });
+        }
+        self.rel = next.rel;
+        self.file = next.file;
     }
 
     pub fn tensor(self: *Store, requested: []const u8) !Tensor {
@@ -297,11 +369,7 @@ pub fn attnIndex(layer: usize) usize {
     return layer / 4;
 }
 
-pub fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+pub const toBf16 = core.bf16_round.bits;
 
 pub fn promote(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
@@ -506,94 +574,11 @@ pub fn stitch(gpa: std.mem.Allocator, store: *Store, prefix: []const u8, names: 
     return .{ .w = try cat(gpa, ws[0..n]), .s = try cat(gpa, ss[0..n]), .b = try cat(gpa, bs[0..n]), .n = n };
 }
 
-test "the n-gram tables, the draft head and the vision tower stay off the device" {
-    try std.testing.expect(hostOnly("language_model.model.layers.2.ple.ple_embedding.ngram_embedding.shards.7.weight"));
-    try std.testing.expect(hostOnly("language_model.mtp.layers.0.mlp.switch_mlp.up_proj.weight"));
-    try std.testing.expect(hostOnly("vision_tower.blocks.0.attn.qkv.weight"));
-    try std.testing.expect(!hostOnly("language_model.model.layers.2.ple.ple_embedding.ngram_heads_offsets"));
-    try std.testing.expect(!hostOnly("language_model.model.layers.0.mlp.switch_mlp.up_proj.weight"));
-    try std.testing.expect(!hostOnly("language_model.lm_head.weight"));
+test {
+    _ = @import("cuda_prompt_wt_test.zig");
 }
 
-test "canonical checkpoint aliases preserve exact stored namespace and prefer a direct key" {
-    const a = std.testing.allocator;
-    const parsed = try std.json.parseFromSlice(std.json.Value, a,
-        \\{"weight_map":{"model.language_model.layers.0.x.weight":"a","lm_head.weight":"b","mtp.x":"c","language_model.model.direct":"d","model.language_model.direct":"e"}}
-    , .{});
-    var store: Store = .{ .gpa = a, .io = std.testing.io, .dir = "", .parsed = parsed };
-    defer store.deinit();
-    var buf: [512]u8 = undefined;
-    try std.testing.expectEqualStrings("model.language_model.layers.0.x.weight", try store.resolveKey("language_model.model.layers.0.x.weight", &buf));
-    try std.testing.expectEqualStrings("lm_head.weight", try store.resolveKey("language_model.lm_head.weight", &buf));
-    try std.testing.expectEqualStrings("mtp.x", try store.resolveKey("language_model.mtp.x", &buf));
-    try std.testing.expectEqualStrings("language_model.model.direct", try store.resolveKey("language_model.model.direct", &buf));
-    try std.testing.expectError(error.MissingTensor, store.resolveKey("language_model.model.missing", &buf));
-    try std.testing.expect(hostOnly("model.visual.weight"));
-    try std.testing.expect(hostOnly("mtp.layers.0.weight"));
-}
-
-test "released expert planes reuse two indexed shards without invalidating held peers" {
-    const a = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
-    defer a.free(dir);
-    const header = "{\"x\":{\"dtype\":\"U8\",\"shape\":[1],\"data_offsets\":[0,1]}}";
-    var data: [8 + header.len + 1]u8 = undefined;
-    std.mem.writeInt(u64, data[0..8], header.len, .little);
-    @memcpy(data[8..][0..header.len], header);
-    data[data.len - 1] = 17;
-    try tmp.dir.writeFile(io, .{ .sub_path = "a", .data = &data });
-    data[data.len - 1] = 29;
-    try tmp.dir.writeFile(io, .{ .sub_path = "b", .data = &data });
-    try tmp.dir.writeFile(io, .{ .sub_path = "c", .data = &data });
-    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"x\":\"a\"}}" });
-    var store = try Store.open(a, io, dir);
-    defer store.deinit();
-    const first = try store.hold("x");
-    const address = first.bytes.ptr;
-    store.release();
-    try std.testing.expectEqual(@as(usize, 0), store.nheld);
-    try std.testing.expectEqual(@as(usize, 1), store.nreleased);
-    // Removing the path proves the next borrow uses the existing mapping and parsed header.
-    try tmp.dir.deleteFile(io, "a");
-    const again = try store.hold("x");
-    try std.testing.expectEqual(address, again.bytes.ptr);
-    try std.testing.expectEqual(@as(u8, 17), again.bytes[0]);
-    const wm = &store.parsed.value.object.getPtr("weight_map").?.object;
-    wm.getPtr("x").?.* = .{ .string = "b" };
-    const other = try store.hold("x");
-    try std.testing.expectEqual(@as(u8, 29), other.bytes[0]);
-    try std.testing.expectEqual(@as(u8, 17), again.bytes[0]);
-    store.release();
-    try std.testing.expectEqual(@as(usize, 2), store.nreleased);
-    try tmp.dir.deleteFile(io, "b");
-    wm.getPtr("x").?.* = .{ .string = "a" };
-    try std.testing.expectEqual(@as(u8, 17), (try store.hold("x")).bytes[0]);
-    wm.getPtr("x").?.* = .{ .string = "b" };
-    try std.testing.expectEqual(@as(u8, 29), (try store.hold("x")).bytes[0]);
-    store.release();
-    store.release();
-    try std.testing.expectEqual(@as(usize, 2), store.nreleased);
-    wm.getPtr("x").?.* = .{ .string = "c" };
-    _ = try store.hold("x");
-    store.release();
-    try std.testing.expectEqual(@as(usize, 2), store.nreleased);
-    for (store.released[0..store.nreleased]) |h| try std.testing.expect(!std.mem.eql(u8, "a", h.rel));
-}
-
-test "centered scales add one in FP32 while direct scales preserve the original bits" {
-    _ = @import("cuda_norms.zig");
-    const raw = [_]f32{ -0.25, 0.0001, 2.75 };
-    const t: Tensor = .{ .dtype = .f32, .rank = 1, .shape = .{ 3, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(&raw) };
-    var store: Store = undefined;
-    store.norm_offset = 1;
-    const scales = try store.normScale(std.testing.allocator, t);
-    defer std.testing.allocator.free(scales);
-    for (raw, scales) |v, scale| try std.testing.expectEqual(v + @as(f32, 1), scale);
-    store.norm_offset = 0;
-    const direct = try store.normScale(std.testing.allocator, t);
-    defer std.testing.allocator.free(direct);
-    try std.testing.expectEqualSlices(f32, &raw, direct);
+test "Flash Next load cache: a mixed PLE shard keeps its runtime pages" {
+    try std.testing.expect(runtimePages(&.{ "language_model.model.norm.weight", "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight" }));
+    try std.testing.expect(!runtimePages(&.{ "language_model.model.norm.weight", "language_model.mtp.norm.weight" }));
 }

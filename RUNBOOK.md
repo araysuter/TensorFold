@@ -19,7 +19,7 @@ For an archive installation, download the arm64 asset and its companion checksum
 [latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-V=1.0.12
+V=1.2.2
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
 shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
@@ -107,6 +107,13 @@ bin/tensorfold-native serve "$HOME/models/nemotron-lightning" \
   --name local-model --parallel 1 --context 8192 --temperature 0 --no-thinking
 ```
 
+This example's `--parallel 1` caps serving at one active request; extra requests wait for a free slot.
+Omit `--parallel` to use `auto`, which asks for up to eight streams as memory and the engine allow.
+Use `--parallel N` for an explicit cap; the engine refuses a count it cannot fit.
+Read the startup capacity line, such as `8 streams at once` on CUDA, for the accepted count.
+For example, `--parallel 4` keeps at most four requests active while the fifth and later requests wait.
+Completing or cancelling an active request frees its slot; cancelling a waiting request removes it from the queue.
+
 Leave the server running and check it from another terminal:
 
 ```sh
@@ -122,10 +129,63 @@ For streaming, add `"stream": true` to the request.
 The native server also has `/v1/responses` and Anthropic `/v1/messages` routes.
 Serve flags and request overrides are described in [README.md](README.md#serve-flags).
 
+With API authentication off, `/health` includes `live.connections`, the total active plus waiting requests,
+and `live.waiting`, the queued requests. Subtract waiting from connections to get the active count.
+For example, 8 connections with 4 waiting means 4 active and 4 queued.
+When API authentication is enabled, `/health` returns only status.
+
+## Prompt prefill share, budget and admission policy
+
+The native server reads four environment variables when it opens its lane host.
+All are optional. Set them before starting the server.
+`TENSORFOLD_PREFILL_SHARE` takes a number from 0.01 to 1.
+The default is 1. Any other text gives the default.
+It is the share of wall time long prompt steps get while other streams are decoding.
+A step of length t at share p owes the decoders t (1 - p) / p of decode time.
+The debt grows after each step and falls after each decode round.
+A long prompt's next step runs only when no debt is owed or no stream can decode.
+At the default 1 no debt is recorded, so the only waiting is the ordinary turn-taking: the host runs at most one step of a long prompt each time it turns to it, and chunked prompts still interleave with the decoding streams' rounds.
+Lower values add that debt, finish the long prompt later and leave more time for decoding streams.
+Flash Next's shared sessions on a Mac without tensor units start from a reply share of 0.8 when neither this nor `--decode-share` is set: see [the API](docs/api.md).
+A prompt whose whole uncached pass is at most 512 rows runs outside the share as one call.
+The check compares the prompt's length with the cached state, not how far the fill has reached, so a long prompt whose last rows remain does not become exempt when its unfilled tail is small.
+
+`TENSORFOLD_PREFILL_BUDGET` takes a whole number of prompt rows from 1 to 4,294,967,295.
+The default is 0, which means none.
+Empty text, 0, a negative number, a fractional form, a value above the range or any other text gives 0, which removes the cap.
+It caps the prompt rows filled in one pass while a stream is ready to decode.
+The cap counts only rows filled while such a stream waits.
+A call that reports no progress spends the allowance anyway and yields, so unknown or stale progress never holds the cap open.
+When a cap is set, one step of a long prompt that has waited long enough goes first.
+When the cap is reached the host stops prompt work for that pass.
+The decoders then take their next round before more prompt rows are filled.
+A single prompt call is never split, so one call can pass the cap.
+Raising the cap lets more prompt work run per pass.
+That delays the decoding streams' next round.
+Lowering it gives those streams their next round sooner.
+That costs more passes to finish the prompts.
+With the default 0 no cap applies: short prompts run as one burst beside decoders, bounded at a lane's worth of newly begun prompts while other work waits.
+
+`TENSORFOLD_PREFILL_POLICY` takes `fcfs`.
+Unset, or any other text, keeps the default order described above.
+Under `fcfs` the host fills only the oldest long prompt (more than 512 uncached rows) on each visit, in chunks of `TENSORFOLD_PREFILL_TOKENS` rows, and the decoding streams take one round after each chunk.
+A long prompt with no stream decoding beside it takes the engine's own cut, so a lone request runs exactly as without the policy.
+Short prompts run as they do without the policy. `TENSORFOLD_PREFILL_BUDGET` does not apply under a policy; `TENSORFOLD_PREFILL_SHARE` is checked once per visit.
+
+`TENSORFOLD_PREFILL_TOKENS` takes a whole number of prompt rows from 64 to 16384. Values outside the range are clamped.
+The default is 2048. Empty text, 0, or text that is not a whole number gives the default.
+It only matters when `TENSORFOLD_PREFILL_POLICY` is set.
+Smaller chunks shorten each pause the decoding streams see while a prompt fills; larger chunks let later prompts start sooner.
+On flashnext Metal with eight 14336-row prompts arriving together, `fcfs` at 2048 paused decoders about 1.7 s per chunk with the last first token at about 94 s;
+4096 gave about 3.1 s and 87 s; 8192 gave about 5.9 s and 83 s. 16384 matches 8192 at that prompt length.
+
 ## Linux and CUDA
 
+For source builds with `zig build native` (including `--prefix` installs): Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 Choose `linux-aarch64` for an arm64 host or `linux-x86_64` for an x86_64 host.
-The archives require glibc 2.28 or newer and an NVIDIA driver providing `libcuda.so.1`.
+The archives require glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0), providing `libcuda.so.1`.
+Their kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
 CUDA serves Nemotron 3.5 Lightning, qualified on GB10 (`linux-aarch64`, greedy and sampled) and on Ampere cards with
 compute capability 8.6 (`linux-x86_64`, greedy: the RTX 30 series, RTX A6000, A10 and A40), and checked on an RTX PRO 6000 Blackwell (compute
 capability 12.0, `linux-x86_64`).
@@ -135,7 +195,7 @@ Flash Next also serves on CUDA from its MLX 4-bit checkpoint, on the built-in ke
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-V=1.0.12
+V=1.2.2
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
 sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256
@@ -162,6 +222,10 @@ request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB b
 them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
 7 KiB a prompt token, in whole 2 MiB pages (62 MiB at 2,048 tokens), and the cache keeps four 48 MiB buffers of its
 budget free for the next states.
+Prompts fill a chunk at a time between decode rounds, so requests that arrive together on a new system prompt would each
+compute it. A request whose prompt shares a cut another prompt is still filling, which its own lookup would resume, waits
+in the queue until that fill stands there, then resumes the cut. `TENSORFOLD_PREFIX_WAIT_MS` bounds the wait (60000 by
+default; 0 turns it off).
 `TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest
 thermal zone (under `/sys/class/thermal`, or `TF_HEAT_ROOT`) is above the high band, until it is at or under the low one.
 The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do not change.
@@ -169,6 +233,29 @@ On three GB10s serving GLM-5.3-Flash NVFP4 at TP=3, a 1,035,295-token prompt wit
 zone at 94 C or more for most of the prompt (97.7 C at the top); `TF_HEAT_HIGH=92` and `TF_HEAT_LOW=88` held all three
 at 93.0 C or under, and the first token came 10% later.
 Archives whose names contain `host-only` are CPU verification artifacts and cannot serve CUDA inference.
+
+### Build a server for one GPU
+
+`zig build -Dgpu=<gpu>` builds only `tensorfold-native`, with kernel code for that one GPU architecture and every model family, stripped by default:
+
+```sh
+zig build -Dgpu=spark -Dnvcc=/usr/local/cuda/bin/nvcc            # zig-out/native/bin/tensorfold-native
+zig build -Dgpu=gfx1201 -Dhipcc=/opt/rocm/core/bin/hipcc          # zig-out/native-hip/bin/tensorfold-native
+```
+
+- `-Dgpu`: `sm_80`, `sm_86`, `sm_89`, `sm_120`, `sm_121`, `spark` (GB10, sm_121), or an exact HIP architecture from `zig/src/hip/caps.zig`. It replaces `-Dsm`, `-Dhip` and `-Dhip-arch`.
+- `sm_89` builds, but the release set (sm_80, 86, 120, 121) holds no image qualified on it.
+- The server refuses a GPU of another architecture at startup and names the `-Dgpu` that fits it (HIP already refuses one at device open).
+- CUDA needs `-Dnvcc`, or `-Dfatbins` with prebuilt images; each prebuilt image must hold exactly the one SASS profile its kernel needs on that GPU. `-Dstrip=false` keeps debug info.
+- The build offers no other step: tests, tools and `grammar` need the development build (no `-Dgpu`). Structured output needs `libtfgrammar` in the server's `../lib` (release archive `lib/`, or `zig build grammar -Dxgrammar=DIR`, which installs `native/lib`; copy it to `native-hip/lib` for HIP).
+
+Measured on 2026-11-02 (aarch64 for CUDA, x86_64 for HIP), every model family in every server:
+
+| Hardware GPU | Generic server | `-Dgpu` server | Saved |
+| --- | --- | --- | --- |
+| RTX PRO 6000 (`sm_120`, nvcc 13.3) | 145.5 MB (sm_80, 86, 120, 121) | 44.9 MB | 100.6 MB (69.2%) |
+| GB10 DGX Spark (`spark`, nvcc 13.4) | 146.1 MB (sm_80, 86, 120, 121) | 44.8 MB | 101.3 MB (69.3%) |
+| Radeon AI PRO R9700 (`gfx1201`, ROCm 7.16) | 48.9 MB (`native-hip`, unstripped) | 20.6 MB | 28.3 MB (58.0%) |
 
 ### GB10 CPU pinning for long CUDA runs
 
@@ -183,6 +270,43 @@ Keep the existing model, GPU, network and rank options.
 On GLM-5.3-Flash NVFP4, version 1.0.12 plus #1016-#1018, TP=2, with heat bands of 92/88 C, @Bizuayeu's pinned run
 completed 40/40 replies, peaking at 85.1 C; the unrestricted run stopped at the seventh reply at 94.7 C.
 Decode throughput fell 1.1% and prefill throughput 2.7%. These are the contributor's measurements, not 1.1.0 results.
+
+### GB10 GPU clock cap for long CUDA runs
+
+GB10 hosts are reported to power off under sustained GPU load, leaving no log
+([NVIDIA Developer Forums](https://forums.developer.nvidia.com/t/hard-power-off-under-sustained-gpu-load-at-90w-persists-after-full-platform-firmware-update/378315)).
+The reported workaround is a GPU clock cap at 2,200 MHz
+([tonyd2wild/dgx-spark-hard-poweroff-fix](https://github.com/tonyd2wild/dgx-spark-hard-poweroff-fix)).
+`sudo nvidia-smi -lgc 300,2200` sets the cap and `sudo nvidia-smi -rgc` removes it. To set it at each boot, save this
+unit as `/etc/systemd/system/gb10-clock-cap.service` and run `sudo systemctl enable --now gb10-clock-cap`:
+
+```ini
+[Unit]
+Description=GB10 GPU clock cap
+After=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nvidia-smi -lgc 300,2200
+ExecStop=/usr/bin/nvidia-smi -rgc
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Cap every rank's host. Under load the clock then reads 2,200 MHz or under
+(`nvidia-smi --query-gpu=clocks.gr --format=csv`). In the serves below, the hottest thermal zone (`/sys/class/thermal`)
+peaked 8 to 11 C above the GPU's own peak. The cap holds the GPU only: on a capped host the hottest zone reached 94 C
+with the GPU idle (312 MHz, 6.7 W) while the kernel contract's checks ran and nvcc built its fatbins. The cap does not
+replace the bands: without them, the 1,035,295-token prompt above (ranks not pinned) reached 97.7 C under the cap, the
+hottest host's clock held at 2,177 to 2,190 MHz.
+
+On GLM-5.3-Flash NVFP4, version 1.1.1, TP=2, each rank on the efficiency cores, @Bizuayeu's serves with the cap,
+twice without it and with it again: the cap made drafted decode about 1% slower, `"draft": false` decode about 1.5%
+slower and a cold prompt of 9,600 to 38,400 tokens 2 to 5% slower, with the same token ids; each GPU peaked at about
+60 W instead of 89 to 92 W, and the hottest thermal zone at 88.6 to 90.7 C instead of 96.8 to 98.1 C. These are the
+contributor's measurements.
 
 ## Flash Next and paired Metal serving
 
@@ -225,12 +349,60 @@ That guide's two-Mac Flash Next commands load the checkpoint directly, as one Ma
 On one Mac, GLM loads only when its weights and caches fit in 70% of RAM, 179.2 GB on a 256 GB Mac, and leaves the MTP head on disk when only the head is over.
 `GLM_LOAD_LIMIT_GB=N` sets that limit in GB, up to the GPU's recommended working set; a value that isn't a number above 0 stops the server.
 Past 70% of RAM the server warns at startup: a load that wires most of the RAM can stall macOS until its watchdog restarts the Mac, so run nothing else large beside it.
+GLM enables a shared residency set by default when its unique Metal buffers and a 2 GiB margin fit the load bound.
+`GLM_RESIDENCY=1` keeps that default, `GLM_RESIDENCY=0` disables it, and every other value stops loading before Metal allocations.
+The startup log reports the GiB held or the reason the set was skipped.
+
+A successful Metal residency set keeps weights, live stream state and working buffers wired during idle keepalive.
+This retains the memory already used by serving instead of letting macOS reclaim its pages between requests.
+The shared keepalive commits a small blit every 400 ms; the set alone is insufficient.
+The default keep-warm window is 900 seconds, and `--keep-warm 0` disables it.
+Later buffers join through their owners while they fit the same bound, and leave before they are freed or replaced.
+The bound reserves 2 GiB inside a validated family load limit, or 70% of known RAM by default.
+Neural Engine program weights are separate from Metal buffers and are outside this set.
+
+### Memory pressure on a shared Mac
+
+Engines served through the shared lane host, including Flash Next with `--parallel` above one, Qwen3.8-27B and GLM, read the macOS memory pressure level (`kern.memorystatus_vm_pressure_level`).
+The engine thread reads it at most four times a second and acts on the level:
+
+- Warning: a queued request starts only when no other stream runs, so the server serves one stream at a time.
+  New prompt states are not kept.
+  The prompt cache gives back kept states, least valuable first and one per round, until it holds no more than its soft watermark.
+  With `--spill-gib` each state is written to disk before it goes.
+  A state that a request is restoring is never dropped.
+- Critical: as warning, and new requests get 503 with a message saying the Mac is under critical memory pressure.
+  Requests already queued or running continue.
+- Normal: admission and kept states behave as before.
+
+A rise takes effect at the next reading; a fall waits for five seconds of lower readings, so admission does not flap near a threshold.
+Each change of level is logged once.
+At normal pressure the server behaves exactly as it does without the governor.
+Under pressure only admission and kept states change: every request served returns the same tokens, and a resumed request equals a fresh one.
+
+`TENSORFOLD_PRESSURE_CACHE_PERCENT=N` sets the soft watermark to N% of the prompt cache budget (default 50; 0 sheds every state not being restored).
+`TENSORFOLD_MEMORY_PRESSURE=0` (or `off`) disables the governor.
+Flash Next's single-reply driver (`--parallel 1` or `auto`) does not read pressure yet, and Linux and Windows builds never do.
+
 
 ## Access, context and updates
 
 To accept remote clients, choose `--host 0.0.0.0` and configure `--api-key-file` with a file readable only by its owner.
 Clients send `Authorization: Bearer KEY`.
 The default loopback server accepts local clients without a key.
+
+The server admits at most 128 open connections, including idle keep-alive connections and active replies.
+Extra connections receive `503 Service Unavailable` with `Retry-After: 1`, then close.
+The reply is best effort if the peer cannot receive it; no extra connection thread is created.
+This cap is independent of the process file limit.
+
+A new connection has 30 seconds to send its request line and all headers.
+A kept connection may wait idle for 900 seconds; its next request's first bytes start a fresh 30-second head budget.
+A fixed-length body has 30 seconds plus one second per 64 KiB declared, rounded up to a millisecond.
+Chunked bodies extend that same original budget only by declared payload bytes, within the 32 MiB body limit.
+Chunk metadata and trailers do not reset the deadline.
+The existing 120-second read-idle and 300-second write-idle limits still apply.
+Read budgets end when input is complete, so they impose no total deadline on inference or streamed replies.
 
 A context limit covers prompt plus reply tokens.
 Inspect the capacity and memory information printed at startup; larger contexts need more cache space.
@@ -239,7 +411,11 @@ After a memory refusal, reduce the context or reply limit, or choose a smaller q
 `--learn` writes a shared prompt state to disk only while the disk keeps `--learn-min-free-gib` free, 4 GiB by default.
 Below that, learning pauses with a log line and serving goes on; a refused write is tried again after 1 to 60 seconds, sooner when space comes back.
 Each learned file carries a checksum over its header and contents, so a damaged, truncated or older file is refused and learned again.
-`--learn-conversations` writes every kept prompt state behind, while the engine idles, and a SIGTERM stop writes what waits within 20 seconds.
+`--prompt-cache-disk DIR` writes every kept prompt state behind to that directory, while the engine idles,
+and a SIGTERM stop writes what waits within 20 seconds. It is equivalent to `--learn-conversations --learn-dir DIR`;
+the old flags remain supported, and `--learn-conversations` alone keeps its existing default directory.
+Use either spelling: combining `--prompt-cache-disk` with `--learn-dir` or `--learn-conversations` is refused.
+The startup line names the disk directory and the device budget when the engine reports one.
 Stop a server with SIGTERM, not SIGKILL, so its last turn is kept.
 `--learn-daily-gib` caps those writes a day (32 GiB by default); `DELETE /v1/imprint` forgets one model's conversation states.
 
@@ -259,3 +435,4 @@ Python 0.6.6 remains a separate release line.
 | Packed Metal runtime compilation fails | 1.0.0 probes and selects its prebuilt fallback; include chip, macOS version and startup error in a report. |
 
 For a bug report, include the version, checkpoint revision, public reproducing request, exact command and relevant startup/request logs.
+`TENSORFOLD_LOG_TIME=1` starts each server log line, the `[tensorfold]` lines and every engine's warnings, with its UTC time (`2026-10-30T18:54:04.123Z [tensorfold] ...`), to match the log against other records.

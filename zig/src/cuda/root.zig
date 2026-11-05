@@ -1,9 +1,12 @@
 //! TensorFold's CUDA runtime: the driver, cuBLASLt and NCCL through dlopen, our kernels and Triton's, no Python.
 
+pub const sm120_test_override = @import("sm120_test_override.zig");
 pub const abi = @import("abi.zig");
 pub const Driver = @import("driver.zig").Driver;
+pub const priority_copies = @import("priority_copies.zig");
 pub const copy_source = @import("copy_source.zig");
 pub const completion = @import("completion.zig");
+pub const paging_test_device = if (@import("builtin").is_test) @import("paging_test_device.zig") else struct {};
 pub const Error = @import("driver.zig").Error;
 pub const Context = @import("context.zig").Context;
 pub const DeviceBuffer = @import("memory.zig").DeviceBuffer;
@@ -34,10 +37,12 @@ pub const qmmf = @import("qmmf.zig");
 pub const fp8 = @import("fp8.zig");
 pub const mxfp8 = @import("mxfp8.zig");
 pub const exlr8 = @import("exlr8.zig");
+pub const experts_tile = @import("experts_tile.zig");
 pub const nvfp4 = @import("nvfp4.zig");
 pub const segments = @import("segments.zig");
 pub const grouped = @import("grouped.zig");
 pub const qlinear = @import("qlinear.zig");
+pub const w4a8 = @import("w4a8.zig");
 pub const norms = @import("norms.zig");
 pub const embed_rows = @import("embed_rows.zig");
 pub const route_rows = @import("route_rows.zig");
@@ -47,11 +52,14 @@ pub const act_rows = @import("act_rows.zig");
 pub const gdn_prep = @import("gdn_prep.zig");
 pub const qk_rows = @import("qk_rows.zig");
 pub const experts = @import("experts.zig");
+pub const experts32 = @import("experts32.zig");
+pub const experts_waves = @import("experts_waves.zig");
 pub const sample = @import("sample.zig");
 pub const rank_scatter = @import("rank_scatter.zig");
 pub const relay_plan = @import("relay_plan.zig");
 pub const tp_group = @import("tp_group.zig");
 pub const tp_watch = @import("tp_watch.zig");
+pub const p2p_report = @import("p2p_report.zig");
 pub const ck = @import("ck.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const tree_attention = @import("tree_attention.zig");
@@ -70,6 +78,12 @@ pub const pack = @import("pack.zig");
 pub const graph_cache = @import("graph_cache.zig");
 
 test {
+    _ = priority_copies;
+    _ = nccl;
+    _ = @import("p2p_nvml.zig");
+    _ = @import("p2p_probe.zig");
+    _ = @import("p2p_nccl_log_test.zig");
+    _ = @import("p2p_report_test.zig");
     _ = exl3_grouped;
     _ = gdn_train;
     _ = train_q4;
@@ -78,6 +92,7 @@ test {
     _ = memory_receipt;
     _ = @import("grouped.zig");
     _ = @import("qlinear.zig");
+    _ = @import("proposal_head_test.zig");
     _ = @import("norms.zig");
     _ = @import("embed_rows.zig");
     _ = @import("route_rows.zig");
@@ -88,8 +103,11 @@ test {
     _ = @import("qk_rows.zig");
     _ = @import("exl3_candidate.zig");
     _ = @import("experts.zig");
+    _ = @import("experts32.zig");
+    _ = @import("experts_waves.zig");
     _ = @import("sample.zig");
     _ = @import("roce.zig");
+    _ = @import("roce_nap.zig");
     _ = @import("rank_scatter.zig");
     _ = @import("relay_plan.zig");
     _ = launch;
@@ -101,6 +119,7 @@ test {
     _ = @import("mxfp8.zig");
     _ = carveout;
     _ = @import("nvfp4.zig");
+    _ = @import("experts_tile.zig");
     _ = exl3;
     _ = exl3_experts;
     _ = exl3_upload;
@@ -144,3 +163,12 @@ test {
     _ = exl3.block.lin2;
     _ = exl3.block.x3gm;
 }
+
+test {
+    _ = @import("context_health.zig");
+}
+
+test {
+    _ = @import("graph_instantiate_failure_test.zig");
+}
+pub const qwen35_bf16_rows = @import("qwen35_bf16_rows.zig");

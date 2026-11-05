@@ -1,5 +1,20 @@
 # Third-party notices
 
+The GLM-OCR HIP operators in `zig/kernels/hip/glm_ocr/pointwise.hip`
+adapt reduction ordering and vectorized LayerNorm statistics from PyTorch
+revision `8514f05`, `aten/src/ATen/native/cuda/Reduce.cuh` and
+`aten/src/ATen/native/cuda/layer_norm_kernel.cu`. These are maintained
+TensorFold adaptations under the BSD-3-Clause license, Copyright (c) 2016-
+Facebook, Inc. and the other holders listed in
+[`LICENSES/PyTorch-BSD-3.txt`](LICENSES/PyTorch-BSD-3.txt).
+
+The optional native attention adapter in `zig/src/hip/attention_aotriton.zig`
+uses the AOTriton 0.11.1 version-1 forward ABI from upstream revision
+`d34f3b6c824df77d5c5788a2e7555b2398be4b79`, under the MIT license.
+The declarations follow the original headers; this adapter is maintained
+by TensorFold. The AOTriton library and architecture images are external
+runtime dependencies. See [`LICENSES/AOTriton-MIT.txt`](LICENSES/AOTriton-MIT.txt).
+
 TensorFold uses [MLX](https://github.com/ml-explore/mlx) and
 [mlx-lm](https://github.com/ml-explore/mlx-lm), MIT License, Copyright © 2023 Apple Inc.
 The native engine installs and links neither. It reads checkpoints in their formats, and its Metal kernels under
@@ -15,6 +30,14 @@ The native engine carries that adaptation. `zig/kernels/metal/qwen3_5/gdn_pre.me
 `gdn_post.metal` are generated from the Python engine's dense Qwen kernels, whose recurrence step is `lane_tree.py`'s.
 `zig/kernels/metal/core/deltanet.metal` and Flash Next's `zig/kernels/metal/flashnext/q4_gdn_*.metal` run the same
 model math.
+
+## Vulkan affine projections
+
+`zig/kernels/vulkan/qmm.comp` adapts the GLSL shader from
+[mlx-omarchy](https://github.com/joshuaswarren/omarchy-mlx), MIT License,
+Copyright © 2026 Joshua Warren and mlx-omarchy contributors.
+Its arithmetic is unchanged; the native Vulkan path does not link MLX.
+See [the license text](LICENSES/mlx-omarchy-MIT.txt).
 
 ## Qwen Flash Next
 
@@ -189,6 +212,10 @@ the one-shot all-gather protocol of [b12x](https://github.com/local-inference-la
 sequence parity and a timeout that fails the transport. Copyright 2026 Luke Alonso and the b12x contributors,
 Apache License 2.0 (see [the license text](LICENSES/Apache-2.0.txt)); b12x ships no NOTICE file.
 
+The Zig tensor-parallel fabric's RoCE path (`zig/src/fabric/tp/mailbox.cu`, `roce.zig`, `roce_verbs.zig`) adapts
+the same one-shot all-gather protocol of b12x's RoCEnante (`b12x/comm/roce/`, PRs #295 and #315) for any family that
+runs tensor parallelism over it, under the same copyright and Apache License 2.0 terms.
+
 ## Vendored code and weights
 
 In the Python engine, frozen at 0.6.6, `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified
@@ -342,9 +369,31 @@ common EXL3 operators and their per-slot epilogues; tile decoding is shared.
 The ExLlamaV3 MIT attribution, Copyright (c) 2025 Turboderp, applies as described above.
 No external reference, captured cubin, model shard or CUDA compiler is bundled by this patch.
 
-The tensor-parallel fabric also uses the RoCE design described above (`zig/src/fabric/tp/mailbox.cu`, `roce.zig`, `roce_verbs.zig`).
-
 ## Shared EXL3 resolver setup
 
 The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
 with the common EXL3 and DeepSeek contributor credits preserved.
+
+## MiaAI-Lab Flash Next prompt expert staging
+
+`zig/kernels/cuda/nvfp4_experts_tile.cu` adapts the K32 shared-memory pipeline in patch0014 of
+[MiaAI-Lab's Flash Next recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark),
+recipe commit e1f564eb915bb5272474b6c1c527aec3b9ed3de6. It credits TensorFold Contributors for the expert
+arithmetic and staging design. Copyright (c) 2026 MiaAI-Lab and Copyright (c) 2026 TensorFold contributors.
+The complete original MIT notices and permission text are retained in [Mia-FlashNext-MIT.txt](LICENSES/Mia-FlashNext-MIT.txt).
+
+## Ling-3.0-tiny and Ling-3.1-flash
+
+Ling-3.0-tiny and Ling-3.1-flash are MIT licensed by inclusionAI. The host family package
+(`zig/src/families/ling/`) is a port of @jschmied's ling-tiny branch (98026d35). TensorFold ships no Ling weights.
+
+## MOSS-Image seeded noise
+
+`zig/src/families/moss_image/noise.zig` is an altered port, to Zig, of the code x86 PyTorch runs for `torch.randn` on a
+seeded CPU generator, so that it makes the same latents bit for bit:
+
+- PyTorch's mt19937 engine and `normal_fill` (BSD-3-Clause, Copyright (c) 2016- Facebook, Inc. and the other holders
+  listed in `LICENSES/PyTorch-BSD-3.txt`).
+- `log256_ps` and `sincos256_ps` from `avx_mathfun.h`, which PyTorch includes (zlib license, Copyright (C) 2012 Giovanni
+  Garberoglio, based on Julien Pommier's `sse_mathfun.h`, Copyright (C) 2007; the license is in
+  `LICENSES/avx_mathfun-zlib.txt`).

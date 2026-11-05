@@ -66,7 +66,7 @@ fn find(io: std.Io, a: Allocator) Loaded {
 
 /// One candidate: null when it does not load or lacks a function; `.wrong` when its version is not the pin.
 fn open(path: []const u8) ?Loaded {
-    var dl = std.DynLib.open(path) catch return null;
+    var dl = @import("sys").DynLib.open(path) catch return null;
     var f: Fns = undefined;
     const info = @typeInfo(Fns).@"struct";
     inline for (info.field_names, info.field_types) |name, T| {
@@ -85,8 +85,13 @@ fn open(path: []const u8) ?Loaded {
 
 /// Whether the pinned library loads here (tests skip WebP pixels without it).
 pub fn available(io: std.Io, a: Allocator) bool {
-    _ = load(io, a) catch return false;
+    check(io, a) catch return false;
     return true;
+}
+
+/// Check the decoder's symbols and exact version without reading pixels.
+pub fn check(io: std.Io, a: Allocator) !void {
+    _ = try load(io, a);
 }
 
 /// What Pillow's open read from the RIFF chunks: the VP8X animation flag and the EXIF and XMP chunks.
@@ -126,13 +131,18 @@ fn chunks(data: []const u8) picture.Error!Chunks {
 
 /// WebP bytes as Pillow loaded them: one frame, RGBA (alpha opaque without one), and the orientation its tags give.
 pub fn decode(io: std.Io, a: Allocator, data: []const u8) picture.Error!picture.Samples {
+    return decodeWithLimits(io, a, data, .{});
+}
+
+pub fn decodeWithLimits(io: std.Io, a: Allocator, data: []const u8, limits: picture.Limits) picture.Error!picture.Samples {
     const c = try chunks(data);
     if (c.animated) return error.Animated;
     const f = try load(io, a);
     var w: c_int = 0;
     var h: c_int = 0;
     if (f.WebPGetInfo(data.ptr, data.len, &w, &h) == 0) return error.Invalid;
-    try picture.fits(@intCast(w), @intCast(h));
+    if (w <= 0 or h <= 0) return error.Invalid;
+    try limits.fits(@intCast(w), @intCast(h));
     const width: usize = @intCast(w);
     const height: usize = @intCast(h);
     const rgba = try a.alloc(u8, width * height * 4);

@@ -1,11 +1,16 @@
 //! One load owns its capacity and rotary policy; planning a later load changes no live engine.
 const std = @import("std");
-pub const trained: usize = 262144;
+pub const trained: usize = @import("flashnext_memory").trained;
 pub const maximum: usize = 4 * trained + 64;
 pub const Settings = struct {
     capacity: usize = trained,
     factor: f64 = 0,
+    startup_extra: u64 = 0,
+    ssd_experts: ?u64 = null,
+    ple_on_ssd: bool = false,
+    fsr_trace: ?[]const u8 = null,
     pub fn validate(s: Settings, paired: bool) !void {
+        if (paired and (s.ssd_experts != null or s.ple_on_ssd or s.fsr_trace != null)) return error.FsrNeedsSingleMetalDevice;
         if (s.capacity < trained or s.capacity > maximum or s.capacity % 4 != 0) return error.ContextTooLong;
         if (s.factor != (if (s.capacity > trained) @as(f64, 4) else 0)) return error.BadRotaryPolicy;
         if (paired and s.factor > 0) return error.LongWindowPairUnsupported;

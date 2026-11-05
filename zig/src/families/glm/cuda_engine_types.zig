@@ -18,13 +18,18 @@ pub const Seq = struct {
 };
 
 /// One rank's copy of a kept prompt state: the state arena's bytes and the host fields beside them.
-pub const Snap = struct { buf: cuda.DeviceBuffer, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize };
+pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0 };
 
 /// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a multiple of the chunk rows.
 pub const Resume = struct { id: u64, at: usize };
 
 /// Rank 0's marks in a prompt pass: `call` may keep the state at a chunk start; other ranks copy at that chunk's gate.
-pub const Marks = struct { at: []const u32, ctx: *anyopaque, call: *const fn (ctx: *anyopaque, at: u32) void };
+pub const Marks = struct {
+    at: []const u32,
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, at: u32) void,
+    interrupted: ?*const fn (ctx: *anyopaque, at: u32) void = null,
+};
 
 const ranks = @import("cuda_ranks.zig");
 const images_mod = @import("cuda_images.zig");

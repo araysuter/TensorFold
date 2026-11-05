@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const layers = @import("layers.zig");
+const kvp = @import("kv_pages.zig");
 const backend = @import("backend.zig");
 const copy_lanes = @import("copy_lanes.zig");
 const Depth = @import("round_depth.zig").Depth;
@@ -231,11 +232,12 @@ const Round = struct {
         _ = win;
         // the kept path's keys and values into place, its hidden rows gathered, absorbed with the tokens after them
         for (0..r.c.attentions) |a| {
-            e.pipe(b.m.kernels.get("tf_kv_compact"));
-            e.buf(r.c.kv[a].k, 0, 0);
-            e.buf(r.c.kv[a].v, 0, 1);
+            const kv = r.c.kv[a];
+            e.pipe(if (kv.paged != null) b.m.kernels.paged.?.glue[1] else b.m.kernels.get("tf_kv_compact"));
+            kvp.bindKv(e, kv, 0, 1);
             e.buf(r.args, a_path * 4, 2);
             e.buf(r.args, a_cmp * 4, 3);
+            if (kv.paged) |pg| kvp.bindTable(e, pg, 4);
             if (a > 0) e.alongside();
             e.run(.{ cfg.head_dim, cfg.kv_heads, 1 }, .{ cfg.head_dim, 1, 1 });
         }
@@ -351,13 +353,6 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
     var queued: u64 = 0; // rounds submitted
     var read: u64 = 0; // rounds whose records the host took
     const log = platform.c.getenv("TF_ROUND_LOG") != null;
-    var depth = Depth{ .levels = o.depth, .most = o.depth, .fixed = o.fixed };
-    var windows: [ring]usize = undefined; // each queued round's verify rows
-    var levels = depth.levels; // the levels the last queued head drafts (the next verify's rows - 1)
-    var copy: u32 = 0; // the copy rows the last queued round may take for the next window
-    var copies = copy_lanes.Copy{ .most = o.copy_max };
-    var sib_offered: f64 = 0; // second choices' chances offered, and how many landed
-    var sib_landed: f64 = 0;
     var widths: [32]usize = undefined;
     var window_ms: [32]f64 = undefined;
     for (b.costs.window[0..b.costs.windows], 0..) |w, i| {
@@ -365,6 +360,13 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
         window_ms[i] = w.ms;
     }
     const costs = copy_lanes.Costs{ .rows = window_ms[0..b.costs.windows], .widths = widths[0..b.costs.windows] };
+    var depth = Depth.init(o.depth, o.fixed, costs, b.costs.head_ms);
+    var windows: [ring]usize = undefined; // each queued round's verify rows
+    var levels = depth.levels; // the levels the last queued head drafts (the next verify's rows - 1)
+    var copy: u32 = 0; // the copy rows the last queued round may take for the next window
+    var copies = copy_lanes.Copy{ .most = o.copy_max };
+    var sib_offered: f64 = 0; // second choices' chances offered, and how many landed
+    var sib_landed: f64 = 0;
     const Pre = struct {
         r: *Round,
         levels: usize,
@@ -374,6 +376,8 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
             j.r.chain(e, j.r.wins[0], 0, j.levels, j.rate, j.chunks, false, false);
         }
     };
+    try kvp.grow(c, @max(len_known, mtp_known) + rows + o.depth + 1); // the rounds' rows, taken before they are queued
+    kvp.holds(c.mtp.?, mtp_known + o.depth); // the first drafts' head rows
     try b.submit(.draft, b.next, Pre{ .r = &r, .levels = levels, .rate = rate, .chunks = (mtp_known + o.depth + 511) / 512 + 1 });
     const Job = struct {
         r: *Round,
@@ -438,6 +442,8 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
             if (log) std.debug.print("round {d}: window {d} rows {d} kept {d} copy {d} tail {d} match {d} second {d}/{d} at token {d}; drafts {any}\n", .{ read, windows[read % ring], x[1], kept, x[2], x[60], x[3], x[61], x[62], s.emitted().len, x[64 .. 63 + x[1]] });
             len_known += kept;
             mtp_known += kept;
+            kvp.holds(c.kv[0], len_known); // the rows a landed round wrote
+            kvp.holds(c.mtp.?, mtp_known);
             _ = try s.commit(gpa, x[4 .. 4 + kept], &.{});
             hooks.note();
             last_kept = kept;
@@ -472,6 +478,9 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
         if (log) std.debug.print("queue {d}: verify rows {d}, head levels {d}, copy rows {d}\n", .{ queued, verify_rows, levels, copy });
         windows[queued % ring] = verify_rows;
         inflight += verify_rows;
+        try kvp.grow(c, @max(len_known, mtp_known) + inflight + rows + o.depth + 1);
+        kvp.holds(c.kv[0], len_known + inflight); // the queued verifies' rows, and their heads' absorbs and drafts
+        kvp.holds(c.mtp.?, mtp_known + inflight + o.depth);
         try b.submit(.verify, b.next, Job{ .r = &r, .n = queued, .rows = verify_rows, .levels = levels, .copy = copy, .tail = tail, .rate = rate, .chunks = (len_known + ahead + rows + 511) / 512, .head_chunks = head_chunks });
         if (o.split) try b.submit(.draft, b.next, Head{ .r = &r, .n = queued, .rows = verify_rows, .levels = levels, .copy = copy, .tail = tail, .rate = rate, .head_chunks = head_chunks });
         queued += 1;

@@ -47,12 +47,15 @@ pub fn of(r: *replay.Run, map: std.json.ObjectMap) !?Scale {
     };
     if (!std.math.isFinite(value) or value == 0) return error.NgramTableScale;
     if (value == 1) return null;
-    return try compile(r.device, value);
+    var scale = try compile(r.device, value);
+    scale.pipe = try r.ownResource(scale.pipe);
+    return scale;
 }
 
 /// The kernel for `value`; a compile failure refuses the load.
 pub fn compile(device: mtl.Device, value: f32) !Scale {
     const lib = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
+    defer lib.deinit();
     return .{ .pipe = try mtl.Pipeline.init(device, lib, "tf_ple_scale", false), .value = value };
 }
 
@@ -84,8 +87,9 @@ test "the scale rounds each row value once to bf16 after the product, as bf16 ro
     try std.testing.expectEqualSlices(u16, want, x);
 }
 
-/// f32 to bf16, round to nearest even.
+/// f32 to bf16 as core's bf16_round.bits rounds (NaN stays NaN); a copy, the batch tests build core as a module.
 fn bf16(f: f32) u16 {
     const u: u32 = @bitCast(f);
-    return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+    if (std.math.isNan(f)) return @truncate((u >> 16) | 0x40);
+    return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }

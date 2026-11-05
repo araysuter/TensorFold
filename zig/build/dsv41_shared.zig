@@ -1,10 +1,14 @@
 const std = @import("std");
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, file: []const u8) *std.Build.Module {
-    const tok = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .Debug, .link_libc = true });
-    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .Debug, .link_libc = true });
+    return moduleAt(b, target, .Debug, file);
+}
+pub fn moduleAt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, file: []const u8) *std.Build.Module {
+    const tok = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     core.addImport("tokenizer", tok);
-    return b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    return b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes } } });
 }
 pub fn steps(b: *std.Build) void {
     const host = b.addTest(.{ .root_module = module(b, b.graph.host, "shared_test.zig") });
@@ -14,6 +18,12 @@ pub fn steps(b: *std.Build) void {
     b.step("compile-dsv41-engram-alloc-aarch64", "Emit Linux ARM64 Engram failure controls; never execute").dependOn(&arm.step);
     const run = b.addRunArtifact(host);
     run.setCwd(b.path("."));
+    if (b.graph.environ_map.get("TF_DSV41_HEADERS")) |dir| {
+        run.setEnvironmentVariable("TF_DSV41_HEADERS", dir);
+        if (b.graph.environ_map.get("TF_DSV41_HEADERS_FULL")) |full|
+            run.setEnvironmentVariable("TF_DSV41_HEADERS_FULL", full);
+        run.has_side_effects = true;
+    }
     b.step("test-dsv41-shared", "Shared DeepSeek checkpoint host tests, no GPU dependencies").dependOn(&run.step);
     const linux_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });
     const cross = b.addTest(.{ .root_module = module(b, linux_target, "shared_test.zig") });
@@ -24,4 +34,14 @@ pub fn steps(b: *std.Build) void {
     b.step("test-dsv41-token-map", "PCG64 and Unicode normalization without Metal").dependOn(&token_tests.step);
     const tool = b.addExecutable(.{ .name = "tf-dsv41-token-map", .root_module = builder });
     b.step("compile-dsv41-token-map", "Compile actual token-map CLI without running or Metal").dependOn(&tool.step);
+    const pack_host = moduleAt(b, b.graph.host, .ReleaseSafe, "neutral.zig");
+    @import("dsv41_draft.zig").addImportsAt(b, pack_host, b.graph.host, .ReleaseSafe);
+    const pack_tool = b.addExecutable(.{ .name = "tf-dsv41-engram-pack", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tools/dsv41_engram_pack.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{.{ .name = "dsv41", .module = pack_host }},
+    }) });
+    b.step("dsv41-engram-pack", "Build and install tf-dsv41-engram-pack (release Engram tables to packed row shards)").dependOn(&b.addInstallArtifact(pack_tool, .{}).step);
 }

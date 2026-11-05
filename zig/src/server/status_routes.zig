@@ -15,7 +15,9 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     // draining: the engine is not asked, it may be stopping
     if (srv.draining.load(.seq_cst)) return routes.sendDraining(conn, try std.fmt.allocPrint(a, "{{\"status\": \"draining\", \"requests_in_progress\": {d}}}", .{srv.generating.load(.seq_cst)}));
     var status: api.Status = .{};
-    srv.engine.status(&status, &.{});
+    if (srv.idle_manager) |m| {
+        m.readStatus(srv, &status, &.{}); // the manager lock guards the read: no closed-engine race with a park
+    } else srv.engine.status(&status, &.{});
     if (!status.healthy) return conn.sendJson(503, "{\"status\": \"unavailable\"}");
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
     routes.sendValue(conn, a, 200, try openHealth(srv, a, false));
@@ -29,20 +31,29 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     const ids = try a.alloc(Value, srv.config.model_ids.len);
     for (srv.config.model_ids, ids) |id, *slot| slot.* = .{ .string = id };
     try o.put(a, "model_ids", .{ .array = ids });
-    try o.put(a, "max_batch_size", try json.intValue(a, srv.info.lanes));
-    if (srv.info.policy.len > 0) try o.put(a, "policy", .{ .string = srv.info.policy });
+    const info_early: api.Info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
+    try o.put(a, "max_batch_size", try json.intValue(a, info_early.lanes));
+    if (info_early.policy.len > 0) try o.put(a, "policy", .{ .string = info_early.policy });
     var status: api.Status = .{};
-    srv.engine.status(&status, &.{});
-    try o.put(a, "warming", .{ .bool = status.warming });
+    var device: ?api.Memory = null;
+    if (srv.idle_manager) |m| {
+        // one lock pass reads status and memory, so the park cannot close the engine between the checks
+        m.readStatus(srv, &status, &.{});
+        device = m.readMemory(srv, reset_peak);
+    } else {
+        srv.engine.status(&status, &.{});
+        device = srv.engine.memory(reset_peak);
+    }
+    try o.put(a, "warming", .{ .bool = status.warming }); // a parked stub reports unhealthy: warming false, honestly
     const memory = try json.newObject(a);
-    if (srv.engine.memory(reset_peak)) |mem| {
+    if (device) |mem| {
         try memory.put(a, "active", try json.intValue(a, mem.active));
         try memory.put(a, "cache", try json.intValue(a, mem.cache));
         try memory.put(a, "peak", try json.intValue(a, mem.peak));
         if (mem.limit) |limit| try memory.put(a, "limit", try json.intValue(a, limit));
     }
     try o.put(a, "memory", .{ .object = memory });
-    try o.put(a, "live", try live.snapshot(a, srv.engine));
+    try o.put(a, "live", try live.snapshot(a, status));
     const ident = srv.config.identity;
     for ([_][2][]const u8{
         .{ "version", ident.version },
@@ -55,10 +66,12 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
 
 /// Facts an attached benchmark may copy. A missing or rejected manifest leaves the run unranked.
 pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
+    if (srv.draining.load(.seq_cst)) return routes.sendDraining(conn, "{\"status\":\"draining\"}");
+    const loaded = if (srv.idle_manager) |m| try m.readBenchmark(srv, a) else try api.Benchmark.copy(a, srv.info);
     const none: std.process.Environ.Map = .init(a);
     const env = srv.config.environ orelse &none;
     const backend = srv.config.identity.backend;
-    routes.sendValue(conn, a, 200, try manifest.serveDocument(a, srv.io, env, srv.config.identity.version, backend, srv.config.model_dir));
+    routes.sendValue(conn, a, 200, try manifest.serveDocument(a, srv.io, env, srv.config.identity.version, backend, srv.config.model_dir, loaded));
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
@@ -116,13 +129,69 @@ fn reasoningValue(
 /// Prometheus text, version 0.0.4.
 pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
     var out: std.Io.Writer.Allocating = .init(a);
-    srv.metrics.render(srv.io, &out.writer, srv.engine, srv.info.context_window) catch return;
+    const snap = srv.load.read(); // read first: it alone decides whether engine values render
+    if (srv.idle_manager) |m| {
+        var status: api.Status = .{};
+        var streams: [512]u32 = undefined;
+        const stub = m.readStatusParked(srv, &status, &streams); // the manager lock guards the read; no engine write
+        const info = m.readInfo(srv);
+        const memory = m.readMemory(srv, false);
+        // parked: no engine holds counters; the HTTP and process families still render
+        if (liveRead(snap, status)) {
+            ledgerCounts(&status, snap);
+            srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], info, memory, info.context_window) catch return;
+        } else srv.metrics.renderParked(srv.io, &out.writer, parkedView(snap, status, stub)) catch return;
+    } else {
+        var status: api.Status = .{};
+        var streams: [512]u32 = undefined;
+        srv.engine.status(&status, &streams);
+        if (liveRead(snap, status)) {
+            ledgerCounts(&status, snap);
+            srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], srv.info, srv.engine.memory(false), srv.info.context_window) catch return;
+        } else srv.metrics.renderParked(srv.io, &out.writer, parkedView(snap, status, false)) catch return;
+    }
+    @import("load_metrics.zig").render(&out.writer, snap, .{ .model = srv.config.served_name, .backend = srv.config.identity.backend, .version = srv.config.identity.version }) catch return;
+    if (srv.config.admission.enabled()) @import("metrics.zig").renderAdmission(&out.writer, srv.admission.snapshot(srv.io)) catch return;
     const body = out.written();
     conn.startResponse(200, null) catch return;
     conn.addHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8") catch return;
     var len: [24]u8 = undefined;
     conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{body.len}) catch return) catch return;
     conn.finish(body) catch {};
+}
+
+/// Whether the scrape reads the engine live: a parked ledger snapshot or an unhealthy host takes the fallback body.
+fn liveRead(snap: api.load_ledger.Snapshot, status: api.Status) bool {
+    return status.healthy and !snap.parked;
+}
+
+test "the scrape reads an engine live only when it is healthy and the ledger snapshot is not parked" {
+    var snap: api.load_ledger.Snapshot = .{ .instance = @splat('a'), .start_s = 0, .parked = false, .lanes = 1, .http = @splat(0) };
+    try std.testing.expect(liveRead(snap, .{ .healthy = true }));
+    try std.testing.expect(!liveRead(snap, .{ .healthy = false })); // stale or closing, resident or not
+    snap.parked = true;
+    try std.testing.expect(!liveRead(snap, .{ .healthy = true })); // a reload that lands between the two reads
+}
+
+/// The ledger's request counts and lane give-ups in place of the status read's, so each name shows one value.
+fn ledgerCounts(status: *api.Status, snap: api.load_ledger.Snapshot) void {
+    const r = snap.requests orelse return;
+    status.running = r.running;
+    status.waiting = r.waiting;
+    status.preemptions = r.requeued + r.yields;
+}
+
+/// The fallback body's counts, never a zero: none when the ledger is parked or the parked stub (`stub`) answered.
+fn parkedView(snap: api.load_ledger.Snapshot, status: api.Status, stub: bool) @import("metrics.zig").Metrics.Parked {
+    const hide = snap.parked or stub;
+    const r = snap.requests orelse return .{ .parked = hide, .running = status.running, .waiting = status.waiting, .generation = status.generation_tokens };
+    return .{ .parked = hide, .running = r.running, .waiting = r.waiting, .generation = status.generation_tokens };
+}
+
+test "the fallback body hides engine counts the parked stub answered, also while the ledger is not yet parked" {
+    const snap: api.load_ledger.Snapshot = .{ .instance = @splat('a'), .start_s = 0, .parked = false, .lanes = 1, .http = @splat(0) };
+    try std.testing.expect(parkedView(snap, .{ .healthy = false }, true).parked); // the close: the stub's zeros are no count
+    try std.testing.expect(!parkedView(snap, .{ .healthy = false, .running = 2 }, false).parked); // a resident host's last counts
 }
 
 pub fn dashboard(srv: *Server, conn: *Conn, a: Allocator) void {
@@ -137,8 +206,14 @@ pub fn dashboard(srv: *Server, conn: *Conn, a: Allocator) void {
 pub fn stats(srv: *Server, conn: *Conn, a: Allocator) void {
     if (!srv.config.dashboard) return routes.unknown(conn, a);
     var status: api.Status = .{};
-    srv.engine.status(&status, &.{});
-    const memory = srv.engine.memory(false);
+    var memory: ?api.Memory = null;
+    if (srv.idle_manager) |m| {
+        m.readStatus(srv, &status, &.{}); // the manager lock guards both reads against a concurrent park
+        memory = m.readMemory(srv, false);
+    } else {
+        srv.engine.status(&status, &.{});
+        memory = srv.engine.memory(false);
+    }
     srv.metrics.mutex.lockUncancelable(srv.io);
     const prompt = srv.metrics.prompt;
     const generation = srv.metrics.generation;

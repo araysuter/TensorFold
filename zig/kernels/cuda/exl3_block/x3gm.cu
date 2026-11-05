@@ -9,6 +9,8 @@
 
 #include "../exl3_decode.cuh"
 #include "experts_grouped.cuh"
+#include "common/qmm_frag.cuh"
+#include "common/cp_async.cuh"
 
 namespace dsv41_x3gm {
 
@@ -21,19 +23,10 @@ constexpr float HAD = 0.08838834764831845f;          // 1 / sqrt(128)
 constexpr int NB = 8;                                 // column tiles an item: 128 columns, one Hadamard block
 constexpr int MUL1 = 2;
 
-__device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok) {
-    const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(gmem), "r"(ok ? 16 : 0));
-}
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N>
-__device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
-__device__ __forceinline__ void ldsm4(uint32_t (&a)[4], const void* p) {
-    const unsigned s = (unsigned)__cvta_generic_to_shared(p);
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
-                 : "r"(s));
-}
+__device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok) { tf_common::cp16z(smem, gmem, ok); }
+using tf_common::cp_commit;
+using tf_common::cp_wait;
+using qmm_frag::ldmatrix4;
 
 // the 16-byte chunk c of member row r in a stage (CPR chunks a row): 8 rows of an ldmatrix phase in 8 bank groups
 template <int CPR>
@@ -191,7 +184,7 @@ __global__ void __launch_bounds__(Cfg<MATS, XM, K2, MTL, NG, KS, NSA, NGR>::THRE
                 for (int np = 0; np < NG / 2; ++np) {
                     if (16 * np < cnt) {                      // warp-uniform
                         uint32_t b[4];
-                        ldsm4(b, A + (16 * np + lr) * LDA + chunk * 8);
+                        ldmatrix4(b, A + (16 * np + lr) * LDA + chunk * 8);
                         const uint32_t b01[2] = {b[0], b[1]}, b23[2] = {b[2], b[3]};
 #pragma unroll
                         for (int l = 0; l < MTL; ++l) {
@@ -461,17 +454,18 @@ DSV41_X3GM_DN(10, GM_DN1)
 DSV41_X3GM_DN(10, GM_DN2)
 DSV41_X3GM_DN(10, GM_DN3)
 DSV41_X3GM_DN(10, GM_DN4)
-#define DSV41_X3GM_ROT(T, M) template __global__ void dsv41_x3gm::rot_kernel<T, M>(const T*, int, const int*, const half*, \
-    const half*, half*, half*, int, int, int);
+#define DSV41_X3GM_ROT(T, M) template __global__ void dsv41_x3gm::rot_kernel<T, M>(const T* __restrict__, int, \
+    const int* __restrict__, const half* __restrict__, const half* __restrict__, half* __restrict__, \
+    half* __restrict__, int, int, int);
 DSV41_X3GM_ROT(__nv_bfloat16, 1)
 DSV41_X3GM_ROT(__nv_bfloat16, 2)
 DSV41_X3GM_ROT(half, 1)
 DSV41_X3GM_ROT(half, 2)
-template __global__ void dsv41_x3gm::dequant_kernel<3>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<4>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<5>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<6>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<7>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<8>(const uint32_t*, half*, int);
-template __global__ void dsv41_x3gm::dequant_kernel<10>(const uint32_t*, half*, int);
+template __global__ void dsv41_x3gm::dequant_kernel<3>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<4>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<5>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<6>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<7>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<8>(const uint32_t* __restrict__, half* __restrict__, int);
+template __global__ void dsv41_x3gm::dequant_kernel<10>(const uint32_t* __restrict__, half* __restrict__, int);
 #endif  // DSV41_X3GM_NO_INSTANCES

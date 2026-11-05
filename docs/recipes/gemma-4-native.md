@@ -16,6 +16,10 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/gemma-4-31b" --port 888
   --drafter "$HOME/models/gemma-4-31b-dflash"
 ```
 
+`--parallel 4` caps this example at four active requests; additional requests wait for a free slot.
+
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 Without `--drafter` the model decodes plain, at about 51 tokens a second for one stream at short context (mlx-lm 46)
 and 40 at 32k. With z-lab's DFlash drafter
 a stream decodes at 150-190 tokens a second (6-7 accepted tokens a round on chat and code, 10 on copying replies,
@@ -210,3 +214,6 @@ variant is in `zig/kernels/metal/gemma4/lane_projection.metal`, with host encodi
 Ordinary Gemma lane packing and projections still use the shared lane module. The measurements above are the original
 PR's receipts. They do not qualify the isolated landing tree. Re-run numerical, resource, teacher-forced, draft/plain,
 resumed/fresh, concurrent/solo, vision and performance gates on that tree.
+
+The host attention adjoint and native learner implementation plan are in
+[Gemma Living Weights](gemma4-living-weights.md).

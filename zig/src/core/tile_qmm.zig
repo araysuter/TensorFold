@@ -10,6 +10,12 @@ pub const tile = 32;
 
 pub const Args = extern struct { k: i32, n: i32, r: i32, one: f32 = 1.0 };
 
+/// The tiles' source for a GPU generation: M1 and M2 (13, 14) store MMA fragments whole, later GPUs by element.
+pub fn source(generation: u32) []const u8 {
+    return if (generation == 13 or generation == 14) whole_fragments else sources.core_tile_qmm;
+}
+const whole_fragments = "#define TF_TQ_WHOLE_FRAGMENTS 1\n" ++ sources.core_tile_qmm;
+
 pub const Pipelines = struct {
     dense: [bit_widths.len]mtl.Pipeline,
     grouped: [bit_widths.len]mtl.Pipeline,
@@ -28,7 +34,7 @@ pub const Pipelines = struct {
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        const lib = try mtl.Library.fromSource(device, sources.core_tile_qmm, mtl.CompileOptions.mlx());
+        const lib = try mtl.Library.fromSource(device, source(device.generation()), mtl.CompileOptions.mlx());
         defer lib.deinit();
         var p: Pipelines = undefined;
         inline for (bit_widths, 0..) |bits, i| {
@@ -125,6 +131,8 @@ pub const twin_rows = 32;
 pub const window_slots = 4 * twin_rows;
 /// Rows from which a dense twin call takes the MMA window kernel over the scalar twin.
 pub const window_rows = 8;
+/// Outputs from which a matrix takes that window kernel: narrower ones keep the scalar passes' threadgroups.
+pub const window_n = 4096;
 /// Window rows from which the by-expert twin (each picked expert read once) beats a threadgroup row a slot.
 pub const group_rows = 16;
 /// Columns a scalar twin threadgroup (2 simdgroups of 4) and a window threadgroup (2 simdgroups of 8, one MMA block).
@@ -168,7 +176,7 @@ pub fn encodeTwin(
 ) !void {
     const i = try width(m);
     if (rows == 0 or rows > twin_rows) return error.NoRows;
-    const window = rows >= window_rows;
+    const window = rows >= window_rows and m.n >= window_n;
     e.setPipeline(if (window) p.rows[i] else if (rows > 1) p.twin_few[i] else p.twin[i]);
     bind(e, m, .{ .k = @intCast(m.k), .n = @intCast(m.n), .r = @intCast(rows) }, x, x_off, y, y_off);
     if (window) return e.dispatchGroups(.{ .width = m.n / window_columns }, .{ .width = 64 });
@@ -365,6 +373,13 @@ pub fn encodeGroupedGlu(
 test "work items bound every expert's tiles" {
     try std.testing.expectEqual(@as(usize, 2048 / 32 + 64 + 1), items(2048, 64));
     try std.testing.expectEqual(@as(usize, 0 + 4 + 1), items(4, 64));
+}
+
+test "M1 and M2 take whole-fragment tiles, later GPUs and unknown ones the shipped source" {
+    try std.testing.expectEqualStrings(whole_fragments, source(13));
+    try std.testing.expectEqualStrings(whole_fragments, source(14));
+    for ([_]u32{ 0, 15, 16, 17 }) |g| try std.testing.expectEqualStrings(sources.core_tile_qmm, source(g));
+    try std.testing.expect(std.mem.indexOf(u8, sources.core_tile_qmm, "#if TF_TQ_WHOLE_FRAGMENTS") != null);
 }
 
 test "window_slots is the kernels' TQ_SLOTS" {

@@ -79,3 +79,5 @@ id_ed25519
 /benchmarks/studio/ornith-gpqa-*/
 /tools/ornith/evaluation/tasks.jsonl
 /studio-benchmark-results/
+# The full E4B per-layer input oracle outputs (tools/zig/gemma4_e4b_layer_input_oracle.py --full); the committed fixture is the .json of SHA-256 prints.
+tools/zig/fixtures/e4b_layer_input_mlx.bin

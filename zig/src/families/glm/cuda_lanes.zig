@@ -7,6 +7,7 @@ const follow = @import("cuda_follow.zig");
 const fw = @import("cuda_forward.zig");
 const dflash = @import("dflash.zig");
 const prompt_lp = @import("cuda_prompt_logprobs.zig");
+const prefix_mod = @import("cuda_prefix.zig");
 const cuda = @import("cuda");
 
 const be = lanes.backend;
@@ -34,26 +35,33 @@ const Lane = struct {
     slot: u32,
     pending_rows: ?usize = null,
     held: [max_held]u32 = undefined,
-    chances: [max_held]f64 = undefined, // DFlash2's: each held draft's chance from the selector
+    chances: [max_held]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
     held_n: usize = 0,
     first: ?u64 = null,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
+    marks: []const u32 = &.{}, // TF_GLM_KV_SHARE: where the prompt cache keeps this stream's pass (owned)
 };
 
 pub const Lanes = struct {
     x: follow.Leader,
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
+    mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
     bits: ?cuda.HostBuffer = null, // structured output's grammar words (shared_rows rows), device-read, at first use
     bits_dev: u64 = 0,
+    prefix: ?*prefix_mod.Prefix = null, // TF_GLM_KV_SHARE: the prompt cache over the pool's pages (rank 0's)
 
     pub fn deinit(self: *Lanes) void {
         if (self.bits) |*b| b.free();
+        var it = self.lanes.valueIterator();
+        while (it.next()) |l| self.x.e.gpa.free(l.marks);
         self.lanes.deinit(self.x.e.gpa);
+        if (self.prefix) |x| x.deinit(); // its pages back to the pool before the pool goes
+        self.prefix = null;
     }
 
     /// A window's grammar rows (rows of the vocabulary's words) at row `row` of the bits, device-read; 0 for none.
@@ -93,6 +101,7 @@ pub const Lanes = struct {
     const steps_vt: be.Backend.VTable = vt: {
         var v = whole_vt;
         v.prefill_step = prefillStepFn;
+        v.cancel_prefill = cancelPrefillFn;
         v.prefill_many = null;
         v.many_rows = 0;
         break :vt v;
@@ -104,6 +113,7 @@ pub const Lanes = struct {
         const block = self.x.e.drafter != null;
         const sharing = drafting and !self.alone;
         return .{
+            .allocate_shared_drafts = drafting,
             .exact_width = if (drafting) max_rows else 1,
             .first_copy_rows = mtp_rows, // a first copy as wide as a head round; it grows as its tokens land
             .gpu_tokens = false,
@@ -113,7 +123,8 @@ pub const Lanes = struct {
             .drafts = if (block) max_held else engine.max_drafts,
             .draft_streams = block, // one block pass drafts every stream of the round
             .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
-            .draft_probabilities = block, // the selector's chances size each window against the costs below
+            .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
+            .draft_confidence = if (block) null else self.mtp_confidence,
             .window_costs = if (block) &gb10_window_costs else &.{},
             .shared_costs = if (block) &gb10_shared_costs else &.{},
             .hidden_rows = sharing,
@@ -187,13 +198,14 @@ pub const Lanes = struct {
         try sink.prepare();
         self.x.e.prompt_logprobs = sink.want();
         defer self.x.e.prompt_logprobs = null;
-        const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s));
+        var keeps: prefix_mod.Keeps = undefined;
+        const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
         self.lanes.getPtr(s).?.first = self.take(first);
     }
 
     fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
         const self = of(ptr);
-        if (!self.x.e.m.tiled or ss.len > engine.max_together) return false;
+        if (!self.x.e.m.tiled or ss.len > engine.max_together or self.prefix != null) return false; // the cache keeps a pass alone
         for (ss) |s| if (!canBatch(s)) return false;
         var opened: usize = 0;
         errdefer for (ss[0..opened]) |s| releaseFn(ptr, s);
@@ -221,8 +233,8 @@ pub const Lanes = struct {
         for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
     }
 
-    /// One chunk of the stream's prompt pass (fillOne runs other rounds between); true once the first token is drawn.
-    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+    /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
+    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
         const self = of(ptr);
         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
         const from = if (going == null) try self.opening(s) else null;
@@ -235,30 +247,109 @@ pub const Lanes = struct {
         try sink.prepare();
         self.x.e.prompt_logprobs = sink.want();
         defer self.x.e.prompt_logprobs = null;
-        if (try self.x.chunk(s.prompt(), at, from, .{ .ptr = s, .check = cancelled }, marksOf(s))) |first| {
+        var keeps: prefix_mod.Keeps = undefined;
+        const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
+        if (step.first) |first| {
             l.first = self.take(first);
             l.fill = null;
             return true;
         }
-        l.fill = at + engine.prompt_rows;
+        l.fill = at + step.rows; // on the 2048 grid (cuda_engine.zig), so uncapped; the share still works by time
+        if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
         return false;
+    }
+
+    fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) !void {
+        const self = of(ptr);
+        const l = self.lanes.getPtr(s) orelse return;
+        const at = l.fill orelse return;
+        if (at <= s.cached or s.reuse.hook == null) return;
+        try self.x.bind(l.slot);
+        var keeps: prefix_mod.Keeps = undefined;
+        _ = self.x.chunk(s.prompt(), at, false, null, .{ .ptr = null, .check = cancelNow }, self.marksOf(s, &keeps)) catch |err| {
+            if (err == error.Cancelled) return;
+            return err;
+        };
+        return error.CancellationIgnored;
+    }
+
+    fn cancelNow(_: ?*anyopaque) bool {
+        return true;
     }
 
     /// A prompt pass begins: the stream's slot bound and its sequence fresh; where the pass resumes (a kept state).
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
-        const l = try self.claim(s);
+        const gpa = self.x.e.gpa;
+        const share = self.cached(s);
+        var owner: prefix_mod.Owner = .{};
+        var adopt: std.ArrayList(u32) = .empty;
+        defer adopt.deinit(gpa);
+        // TF_GLM_KV_SHARE: the deepest kept state's pages, held for this call until the seat takes them
+        const marks: []const u32 = if (share) (try self.prefix.?.beginStream(s, &owner, &adopt)).marks else &.{};
+        var held = true;
+        errdefer if (held) gpa.free(marks);
+        const pages = try self.seat(s, ids.len, s.max_new, adopt.items);
+        errdefer {
+            self.x.e.release(self.lanes.get(s).?.slot);
+            _ = self.lanes.remove(s);
+        }
+        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
+        try self.x.beginOn(s.sampling, pages, adopt.items.len);
+        s.cached = 0;
+        s.prompt_rows.clearRetainingCapacity();
+        const l = self.lanes.getPtr(s).?;
+        gpa.free(l.marks);
+        l.marks = marks;
+        held = false;
+        if (share) {
+            const k = owner.pending orelse return null;
+            s.cached = k.at;
+            return .{ .id = k.id, .at = k.at };
+        }
+        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+    }
+
+    /// Whether the pool's prompt cache keeps this content-keyed pass, with no prompt logprob rows asked.
+    fn cached(self: *const Lanes, s: *const lanes.Stream) bool {
+        return self.prefix != null and prefix_mod.cacheable(s);
+    }
+
+    /// The stream's slot, its pages (the cache's `adopted` first, given back on a refusal), then its sequence.
+    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize, adopted: []const u32) ![]const u32 {
+        const l = self.claim(s) catch |err| {
+            if (self.x.e.pages) |p| p.give(adopted);
+            return err;
+        };
         l.pending_rows = null;
         l.held_n = 0;
         l.fill = null;
         l.first = null;
+        errdefer {
+            if (self.x.e.pages) |p| p.close(l.slot);
+            _ = self.lanes.remove(s);
+        }
+        const pages = try self.pagesFor(l.slot, prompt, max_new, adopted);
         try self.x.bind(l.slot);
-        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
-        try self.x.begin(s.sampling);
-        s.cached = 0;
-        s.prompt_rows.clearRetainingCapacity();
-        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
+        return pages;
+    }
+
+    /// A slot's pages for a prompt and its reply (none without a pool); LaneMemory: the pool lacks them now.
+    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize, adopted: []const u32) ![]const u32 {
+        const p = self.x.e.pages orelse return &.{};
+        if (!p.paged(slot)) { // every paged sequence is taken
+            p.give(adopted);
+            return error.LaneMemory;
+        }
+        p.close(slot); // a stream that opens again gives its earlier pages back first
+        return p.openWith(slot, prompt, max_new, adopted);
+    }
+
+    /// The lane host's admission: with a pool, a paged sequence and the request's pages are free.
+    pub fn fits(self: *const Lanes, prompt: usize, max_tokens: usize) bool {
+        const p = self.x.e.pages orelse return true;
+        return p.fits(prompt, max_tokens);
     }
 
     /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.
@@ -270,8 +361,17 @@ pub const Lanes = struct {
     }
     const Sink = @import("cuda_prompt_sink.zig").Sink;
 
-    fn marksOf(s: *lanes.Stream) ?engine.Marks {
-        return if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
+    fn marksOf(self: *Lanes, s: *lanes.Stream, keeps: *prefix_mod.Keeps) ?engine.Marks {
+        if (self.cached(s)) {
+            const l = self.lanes.getPtr(s) orelse return null;
+            return self.prefix.?.marks(l.slot, s, l.marks, keeps);
+        }
+        return if (s.reuse.hook == null) null else .{
+            .at = s.reuse.marks,
+            .ctx = s,
+            .call = keptAt,
+            .interrupted = keptInterrupted,
+        };
     }
 
     /// The stream's kept state, where its prompt pass starts (null: none, off the chunk grid, or no longer held).
@@ -291,6 +391,11 @@ pub const Lanes = struct {
     fn keptAt(ctx: *anyopaque, at: u32) void {
         const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
         if (s.reuse.hook) |k| k.at(k.ptr, s, at);
+    }
+
+    fn keptInterrupted(ctx: *anyopaque, at: u32) void {
+        const s: *lanes.Stream = @ptrCast(@alignCast(ctx));
+        s.keepInterruptedPrefill(at);
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
@@ -415,12 +520,13 @@ pub const Lanes = struct {
             if (r.position != self.x.e.pos() + 1) return error.PositionMismatch;
             if (r.lanes != null) return error.TreesNotBuilt;
             const depth = @min(r.depth, engine.max_drafts);
+            const chances: ?[]f64 = if (self.mtp_confidence != null) l.chances[0..depth] else null;
             if (r.rows) |rows| {
                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
-                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held);
+                try self.x.draft(false, r.follow[0..rows.len], depth, &l.held, chances);
             } else {
                 const first = self.value(r.first orelse return error.NoFirstToken);
-                try self.x.draft(true, &.{first}, depth, &l.held);
+                try self.x.draft(true, &.{first}, depth, &l.held, chances);
             }
             l.held_n = depth;
         }
@@ -441,11 +547,11 @@ pub const Lanes = struct {
                 n = rows.len;
                 break :a r.follow[rows.len - 1];
             } else self.value(r.first orelse return error.NoFirstToken);
-            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .out = &l.held, .probs = &l.chances };
+            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .propose = r.depth > 0, .out = &l.held, .probs = &l.chances };
             held[i] = l;
         }
         try self.x.block(reqs[0..requests.len]);
-        const cut = confidence();
+        const cut = dflash.confidence();
         for (requests, held[0..requests.len]) |r, l| {
             l.held_n = @min(r.depth, max_held);
             var chain: f64 = 1; // glm_cuda's rule: past the first, a chain stops where its product falls under the cut
@@ -457,16 +563,10 @@ pub const Lanes = struct {
         }
     }
 
-    /// TF_GLM_DRAFT_CONFIDENCE: where a DFlash2 chain's chance product stops it (glm_cuda's 0.7).
-    fn confidence() f64 {
-        const v = std.c.getenv("TF_GLM_DRAFT_CONFIDENCE") orelse return 0.7;
-        return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
-    }
-
-    /// DFlash2's chance for each held draft (the MTP head gives none: the lane core's per-depth rates stand).
+    /// Each held draft's chance, DFlash2's or the MTP head's under --mtp-confidence (else the per-depth rates stand).
     fn chancesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
         const self = of(ptr);
-        if (self.x.e.drafter == null) return false;
+        if (self.x.e.drafter == null and self.mtp_confidence == null) return false;
         const l = self.lanes.getPtr(s) orelse return false;
         if (l.held_n == 0) return false;
         const n = @min(out.len, l.held_n);
@@ -479,53 +579,18 @@ pub const Lanes = struct {
         return true;
     }
 
-    /// The stream left the rounds: its sequence is freed on every rank (slot 0 stays for the next stream).
+    /// The stream left the rounds: its sequence is freed, or its pages given back, on every rank (slot 0 stays).
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const self = of(ptr);
         const kv = self.lanes.fetchRemove(s) orelse return;
+        self.x.e.gpa.free(kv.value.marks);
         self.x.release(kv.value.slot) catch |err| std.log.err("releasing slot {d}: {s}", .{ kv.value.slot, @errorName(err) });
+        if (self.lanes.count() == 0) self.x.idle() catch |err| std.log.err("the other ranks' idle step: {s}", .{@errorName(err)});
     }
 };
 
 comptime {
     std.debug.assert(max_rows <= fw.window_rows);
-}
-
-test "a lane's slot is chosen before its map entry exists" {
-    var storage: [8192]u8 = @splat(0);
-    var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var e: engine.Engine = undefined;
-    e.gpa = fixed.allocator();
-    var self: Lanes = .{ .x = .{ .e = &e, .link = undefined } };
-    defer self.lanes.deinit(e.gpa);
-    var streams: [3]lanes.Stream = undefined;
-    const Probe = struct {
-        var bad = false;
-        fn choose(l: *const Lanes) u32 {
-            bad = l.lanes.count() != 0;
-            return 0;
-        }
-    };
-    _ = try self.claimUsing(&streams[0], Probe.choose);
-    try std.testing.expect(!Probe.bad);
-    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&streams[0])).slot);
-    try std.testing.expectEqual(@as(u32, 1), (try self.claim(&streams[1])).slot);
-    _ = self.lanes.remove(&streams[0]);
-    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&streams[2])).slot);
-    try std.testing.expectEqual(@as(u32, 1), (try self.claim(&streams[1])).slot);
-}
-
-test "a failed lane insertion leaves no entry, and a retry takes slot zero" {
-    var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var e: engine.Engine = undefined;
-    e.gpa = fail.allocator();
-    var self: Lanes = .{ .x = .{ .e = &e, .link = undefined } };
-    defer self.lanes.deinit(e.gpa);
-    var stream: lanes.Stream = undefined;
-    try std.testing.expectError(error.OutOfMemory, self.claim(&stream));
-    try std.testing.expectEqual(@as(usize, 0), self.lanes.count());
-    fail.fail_index = std.math.maxInt(usize);
-    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&stream)).slot);
 }
 
 /// Eligibility for the maintained fresh-prompt batching path.

@@ -17,6 +17,8 @@ interface AppWindowRuntimeDeps {
   beforeWindowClose?(win: BrowserWindowType): Promise<void>
   shouldGuardWindowClose?(): boolean
   onWindowCloseFailure?(error: unknown): void
+  /** Report a renderer that never loaded or died, so a blank window is not mistaken for a hang. */
+  onRendererFailure?(detail: string): void
 }
 
 interface MediaPermissionDetails {
@@ -83,8 +85,9 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
       minWidth: 720,
       minHeight: 520,
       show: false,
-      titleBarStyle: 'hiddenInset',
-      trafficLightPosition: { x: 18, y: 22 },
+      // Linux uses the window manager's native title bar and controls; no renderer IPC needed.
+      titleBarStyle: process.platform === 'linux' ? 'default' : 'hiddenInset',
+      trafficLightPosition: process.platform === 'linux' ? undefined : { x: 18, y: 22 },
       // macOS glass: native vibrancy blurs the desktop wallpaper through the window
       // (the dark tint comes from the translucent renderer surfaces on top). A clear
       // backgroundColor lets the material show; other platforms keep a solid dark.
@@ -138,6 +141,16 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
       }
     })
 
+    // A failed load or a dead renderer otherwise leaves the static boot splash on screen forever.
+    appWebContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return
+      // An aborted load is a navigation the app replaced, not a failure: Electron reports ERR_ABORTED as -3.
+      if (errorCode === -3) return
+      deps.onRendererFailure?.(`The interface failed to load (${errorCode} ${errorDescription}) for ${validatedURL}.`)
+    })
+    appWebContents.on('render-process-gone', (_event, details) => {
+      deps.onRendererFailure?.(`The interface process stopped (${details.reason}${details.exitCode != null ? `, exit ${details.exitCode}` : ''}).`)
+    })
     appWindow.webContents.setWindowOpenHandler(({ url }) => {
       openExternalSafely(url, { allowHttpLocalhost: true }).catch(() => {})
       return { action: 'deny' }

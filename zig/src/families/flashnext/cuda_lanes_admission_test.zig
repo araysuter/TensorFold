@@ -31,6 +31,8 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, coun
     self.ranks = null;
     self.head = &head;
     self.lanes = .empty;
+    self.parts = .{};
+    self.kv = .{};
     defer {
         var it = self.lanes.valueIterator();
         while (it.next()) |lane| drop(&self, lane);

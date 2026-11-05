@@ -3,6 +3,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Table = @import("table.zig").Table;
 
+/// A batched head's extra drafts cost the deepest stream's steps; FZ_PRICE_BATCHED=0 prices each stream's.
+pub fn pricedBatched() bool {
+    const v = std.c.getenv("FZ_PRICE_BATCHED") orelse return true;
+    return v[0] != '0';
+}
+
 pub const Cost = struct { width: u32, ms: f64 };
 
 /// Draft prefixes per stream with the most expected tokens a ms; fixed rows always run. Caller frees.
@@ -15,6 +21,7 @@ pub const HeadCost = struct {
     step_ms: f64 = 0.0,
     batched: bool = false,
     free_first: bool = false,
+    row_ms: f64 = 0.0, // what each row past a stream's first costs past the table on this machine
 };
 
 /// allocate, each stream's drafts past its first costing one more head step.
@@ -36,7 +43,9 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
     var deepest: u32 = 0;
     var firsts: u64 = 0;
     const timed = !costs.empty();
-    var best = rate(costs, timed, rows, expected, overhead_ms);
+    var live: u64 = 0;
+    for (fixed) |f| live += @intFromBool(f > 0);
+    var best = rate(costs, timed, rows, expected, overhead_ms + head.row_ms * @as(f64, @floatFromInt(rows -| live)));
     while (rows < max_rows) {
         // the likeliest next node, ties to the lowest stream (Python's heapq of (-p, stream))
         var pick: ?usize = null;
@@ -56,8 +65,8 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
         drafts += 1;
         deepest = @max(deepest, counts[s]);
         expected += pick_p;
-        const steps: f64 = @floatFromInt(if (head.batched) deepest else drafts - (if (head.free_first) firsts else 0));
-        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps);
+        const steps: f64 = @floatFromInt(if (head.batched) deepest -| @intFromBool(head.free_first) else drafts - (if (head.free_first) firsts else 0));
+        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps + head.row_ms * @as(f64, @floatFromInt(rows -| live)));
         if (now > best or (!timed and head.step_ms == 0)) {
             best = now;
             @memcpy(best_counts, counts);

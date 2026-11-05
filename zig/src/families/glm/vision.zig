@@ -3,7 +3,9 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
+const rope_freq = @import("../../core/rope_freq.zig");
 const st = @import("../../core/safetensors.zig");
+const bf16_round = @import("bf16_round");
 const wts = @import("weights.zig");
 const fwd = @import("forward.zig");
 const readAll = @import("weights_fix.zig").readAll;
@@ -11,6 +13,7 @@ const Engine = @import("engine.zig").Engine;
 const Ref = wts.Ref;
 
 const vcfg = @import("vision_config.zig");
+const tower_names = @import("vision_names.zig");
 pub const hidden = vcfg.hidden;
 pub const heads = vcfg.heads;
 pub const head_dim = vcfg.head_dim;
@@ -101,14 +104,11 @@ const Scratch = struct {
 };
 
 /// What --vision adds to the load limit's count before the load: the tower's weights and scratch, and the prompt rows.
-pub fn planBytes(gpa: std.mem.Allocator, lim: Limits, lm_hidden: usize) !usize {
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    var w: Weights = undefined;
+pub fn planBytes(lim: Limits, lm_hidden: usize) usize {
     var total: usize = 0;
-    for ((try wanted(arena_state.allocator(), &w)).items) |want| {
+    for (tower_names.tensors) |t| {
         var n: usize = 2; // bf16, the only dtype the loader takes
-        for (want.shape) |d| n *= d;
+        for (t.shape) |d| n *= d;
         total = std.mem.alignForward(usize, total, 256) + n;
     }
     const rows = @as(usize, lim.image_tokens) * lm_hidden * 2;
@@ -336,17 +336,13 @@ pub const Vision = struct {
     }
 };
 
-/// fp32 to bf16, round to nearest even (MLX's astype).
-pub fn bf16(x: f32) u16 {
-    const b: u32 = @bitCast(x);
-    if (b & 0x7fffffff > 0x7f800000) return @truncate((b >> 16) | 0x40); // NaN stays NaN
-    return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+/// fp32 to bf16, round to nearest even (MLX's astype); NaN stays NaN.
+pub const bf16 = bf16_round.bits;
 
 /// Each patch's 2-D rotary cos and sin: its row and column in the patch grid times the 16 frequencies 10000^(-k/16).
 fn rotary(v: *Vision, gh: u32, gw: u32) void {
     var inv: [16]f32 = undefined;
-    for (&inv, 0..) |*f, k| f.* = 1.0 / @as(f32, @floatCast(std.math.pow(f64, 10000.0, @as(f64, @floatFromInt(2 * k)) / 32.0)));
+    rope_freq.inverseFrequencies(10000.0, 32, &inv);
     const cs: [*]f32 = @ptrCast(@alignCast(v.cos.addr()));
     const sn: [*]f32 = @ptrCast(@alignCast(v.sin.addr()));
     const wx_n = gw / merge;
@@ -373,45 +369,38 @@ fn rotary(v: *Vision, gh: u32, gw: u32) void {
     }
 }
 
-const Want = struct { name: []const u8, shape: []const usize, ref: *Ref };
-
-/// Every tower tensor the loader reads, in its buffer order, with its bf16 shape and the place it fills in `w`.
-fn wanted(arena: std.mem.Allocator, w: *Weights) !std.ArrayList(Want) {
-    var wants: std.ArrayList(Want) = .empty;
-    try wants.append(arena, .{ .name = "patch_embed.proj.weight", .shape = &.{ hidden, 3, temporal, patch, patch }, .ref = &w.patch_w });
-    try wants.append(arena, .{ .name = "patch_embed.proj.bias", .shape = &.{hidden}, .ref = &w.patch_b });
-    for (&w.blocks, 0..) |*b, i| {
-        const fields = .{ .{ "norm1.weight", &b.norm1, &[_]usize{hidden} }, .{ "norm2.weight", &b.norm2, &[_]usize{hidden} }, .{ "attn.qkv.weight", &b.qkv_w, &[_]usize{ 3 * hidden, hidden } }, .{ "attn.qkv.bias", &b.qkv_b, &[_]usize{3 * hidden} }, .{ "attn.proj.weight", &b.proj_w, &[_]usize{ hidden, hidden } }, .{ "attn.proj.bias", &b.proj_b, &[_]usize{hidden} }, .{ "attn.q_norm.weight", &b.q_norm, &[_]usize{head_dim} }, .{ "attn.k_norm.weight", &b.k_norm, &[_]usize{head_dim} }, .{ "mlp.gate_proj.weight", &b.gate_w, &[_]usize{ mlp_inter, hidden } }, .{ "mlp.gate_proj.bias", &b.gate_b, &[_]usize{mlp_inter} }, .{ "mlp.up_proj.weight", &b.up_w, &[_]usize{ mlp_inter, hidden } }, .{ "mlp.up_proj.bias", &b.up_b, &[_]usize{mlp_inter} }, .{ "mlp.down_proj.weight", &b.down_w, &[_]usize{ hidden, mlp_inter } }, .{ "mlp.down_proj.bias", &b.down_b, &[_]usize{hidden} } };
-        inline for (fields) |f| try wants.append(arena, .{ .name = try std.fmt.allocPrint(arena, "blocks.{d}.{s}", .{ i, f[0] }), .shape = f[2], .ref = f[1] });
-    }
-    try wants.append(arena, .{ .name = "post_layernorm.weight", .shape = &.{hidden}, .ref = &w.post_norm });
-    try wants.append(arena, .{ .name = "downsample.weight", .shape = &.{ out_hidden, hidden, merge, merge }, .ref = &w.down_w });
-    try wants.append(arena, .{ .name = "downsample.bias", .shape = &.{out_hidden}, .ref = &w.down_b });
-    try wants.append(arena, .{ .name = "merger.proj.weight", .shape = &.{ out_hidden, out_hidden }, .ref = &w.m_proj });
-    try wants.append(arena, .{ .name = "merger.post_projection_norm.weight", .shape = &.{out_hidden}, .ref = &w.m_norm_w });
-    try wants.append(arena, .{ .name = "merger.post_projection_norm.bias", .shape = &.{out_hidden}, .ref = &w.m_norm_b });
-    try wants.append(arena, .{ .name = "merger.gate_proj.weight", .shape = &.{ merger_inter, out_hidden }, .ref = &w.m_gate });
-    try wants.append(arena, .{ .name = "merger.up_proj.weight", .shape = &.{ merger_inter, out_hidden }, .ref = &w.m_up });
-    try wants.append(arena, .{ .name = "merger.down_proj.weight", .shape = &.{ out_hidden, merger_inter }, .ref = &w.m_down });
-    return wants;
+/// The place a tower tensor fills in `w`.
+fn refOf(w: *Weights, place: tower_names.Place) *Ref {
+    return switch (place) {
+        .top => |t| switch (t) {
+            inline else => |f| &@field(w, @tagName(f)),
+        },
+        .block => |b| switch (b.part) {
+            inline else => |f| &@field(w.blocks[b.i], @tagName(f)),
+        },
+    };
 }
 
-/// model.visual.* from the checkpoint's shards into one buffer, the merge kernel's taps moved outermost.
+/// The tower's tensors (either prefix) from the checkpoint's shards into one buffer, conv kernels as the tower reads.
 fn loadWeights(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8) !Weights {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const Src = struct { path: [:0]const u8, off: u64, len: u64, dtype: st.DType, shape: []const usize };
     var names: std.StringHashMapUnmanaged(Src) = .empty;
+    var prefix: []const u8 = undefined;
     {
         const path = try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{dir}, 0);
         const f = try mtl.MappedFile.open(path);
         defer f.deinit();
+        if (f.size > st.index.max_bytes) return error.BadIndex;
         const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, f.bytes[0..f.size], .{ .allocate = .alloc_always });
+        const map = try st.index.weightMap(doc);
+        var tally: tower_names.Tally = .{};
+        for (map.keys()) |k| tally.add(k);
+        prefix = try tally.tower();
         var files: std.StringArrayHashMapUnmanaged(void) = .empty;
-        var it = doc.object.get("weight_map").?.object.iterator();
-        while (it.next()) |kv| if (std.mem.startsWith(u8, kv.key_ptr.*, "model.visual.")) try files.put(arena, kv.value_ptr.string, {});
-        if (files.count() == 0) return error.NoVisionTower;
+        for (map.keys(), map.values()) |k, v| if (std.mem.startsWith(u8, k, prefix)) try files.put(arena, v.string, {});
         for (files.keys()) |name| {
             const full = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ dir, name }, 0);
             const fd = std.c.open(full, .{ .ACCMODE = .RDONLY });
@@ -419,73 +408,50 @@ fn loadWeights(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8) !Wei
             defer _ = std.c.close(fd);
             var head: [8]u8 = undefined;
             try readAll(fd, &head, 0);
-            const hlen = std.mem.readInt(u64, &head, .little);
+            const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+            if (end < 8) return error.BadSafetensors;
+            const size = std.math.cast(usize, end) orelse return error.BadSafetensors;
+            const hlen = try st.headerSize(std.mem.readInt(u64, &head, .little), size);
             const header = try arena.alloc(u8, hlen);
             try readAll(fd, header, 8);
-            const end: u64 = @intCast(std.c.lseek(fd, 0, std.c.SEEK.END));
-            // read here, not by core/safetensors.zig: the patch kernel is 5-D, past its max_rank
-            const doc2 = try std.json.parseFromSliceLeaky(std.json.Value, arena, header, .{});
-            var eit = doc2.object.iterator();
-            while (eit.next()) |kv| {
-                if (!std.mem.startsWith(u8, kv.key_ptr.*, "model.visual.")) continue;
-                const o = kv.value_ptr.object;
-                const dtype = st.DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
-                const dims = o.get("shape").?.array.items;
-                const shape = try arena.alloc(usize, dims.len);
-                var n: u64 = dtype.size();
-                for (dims, shape) |d, *s| {
-                    s.* = @intCast(d.integer);
-                    n *= s.*;
-                }
-                const offs = o.get("data_offsets").?.array.items;
-                const b: u64 = @intCast(offs[0].integer);
-                const e: u64 = @intCast(offs[1].integer);
-                if (e < b or e - b != n or 8 + hlen + e > end) return error.BadSafetensors;
-                try names.put(arena, kv.key_ptr.*, .{ .path = full, .off = 8 + hlen + b, .len = e - b, .dtype = dtype, .shape = shape });
+            const entries = try st.parseHeaderPrefix(arena, header, size - 8 - hlen, prefix);
+            for (entries.keys(), entries.values()) |tensor_name, entry| {
+                const slot = try names.getOrPut(arena, tensor_name);
+                if (slot.found_existing) return error.DuplicateTensor;
+                slot.value_ptr.* = .{
+                    .path = full,
+                    .off = 8 + hlen + entry.begin,
+                    .len = entry.end - entry.begin,
+                    .dtype = entry.dtype,
+                    .shape = try arena.dupe(usize, entry.shape[0..entry.rank]),
+                };
             }
         }
     }
     // every tensor's place in one buffer, 256-aligned
     var w: Weights = undefined;
-    const wants = try wanted(arena, &w);
-    const srcs = try arena.alloc(Src, wants.items.len);
+    const plan = try tower_names.plan(Src, arena, prefix, &names);
     var total: usize = 0;
-    for (wants.items, srcs) |want, *s| {
-        const full = try std.fmt.allocPrint(arena, "model.visual.{s}", .{want.name});
-        s.* = names.get(full) orelse {
-            std.log.err("glm vision: the checkpoint has no tensor {s}", .{full});
-            return error.MissingTensor;
-        };
-        if (s.dtype != .bf16 or !std.mem.eql(usize, s.shape, want.shape)) {
-            std.log.err("glm vision: {s} is {t} {any}; the tower reads bf16 {any}", .{ full, s.dtype, s.shape, want.shape });
-            return error.UnexpectedTensor;
-        }
-        total = std.mem.alignForward(usize, total, 256) + s.len;
-    }
+    for (plan) |p| total = std.mem.alignForward(usize, total, 256) + p.src.len;
     w.buf = try device.buffer(total, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     errdefer w.buf.deinit();
+    var files: @import("weights_fix.zig").Files = .{ .a = gpa };
+    defer files.deinit();
     var at: usize = 0;
-    for (wants.items, srcs) |want, s| {
+    for (plan) |p| {
         at = std.mem.alignForward(usize, at, 256);
-        want.ref.* = .{ .buf = w.buf, .off = at };
-        const fd = std.c.open(s.path, .{ .ACCMODE = .RDONLY });
-        if (fd < 0) return error.OpenFailed;
-        defer _ = std.c.close(fd);
-        _ = std.c.fcntl(fd, 48, @as(c_int, 1)); // F_NOCACHE, as the language model's shards
-        const dst = w.buf.contents()[at..][0..s.len];
-        try readAll(fd, dst, s.off);
-        at += s.len;
-    }
-    // downsample [O, C, 2, 2] -> [O, 2, 2, C]: a merge window's four patch rows, tap by tap
-    const dw: [*]u16 = @ptrCast(@alignCast(w.down_w.addr()));
-    const tmp = try gpa.alloc(u16, hidden * merge * merge);
-    defer gpa.free(tmp);
-    for (0..out_hidden) |o| {
-        const row = dw[o * hidden * 4 ..][0 .. hidden * 4];
-        @memcpy(tmp, row);
-        for (0..hidden) |ch| for (0..4) |tap| {
-            row[tap * hidden + ch] = tmp[ch * 4 + tap];
-        };
+        refOf(&w, p.spec.place).* = .{ .buf = w.buf, .off = at };
+        const fd = try files.open(p.src.path);
+        const dst = w.buf.contents()[at..][0..p.src.len];
+        try readAll(fd, dst, p.src.off);
+        // the patch embedding channel by frame by row by column; the merge's [O, 2, 2, C], four patch rows tap by tap
+        if (tower_names.transposeOf(p.spec, p.layout)) |ab| {
+            const elems: []u16 = @alignCast(std.mem.bytesAsSlice(u16, dst));
+            const tmp = try gpa.dupe(u16, elems);
+            defer gpa.free(tmp);
+            tower_names.transposeRows(elems, tmp, ab[0], ab[1]);
+        }
+        at += p.src.len;
     }
     return w;
 }
@@ -506,7 +472,7 @@ pub fn attach(e: *Engine, gpa: std.mem.Allocator, dir: []const u8, config: []con
     errdefer v.deinit();
     const rows = @as(usize, lim.image_tokens) * e.c.hidden * 2;
     // the load limit counted planBytes before the load, so the tower holds no more than that
-    if (v.bytes + rows != try planBytes(gpa, lim, e.c.hidden)) return error.TowerBytes;
+    if (v.bytes + rows != planBytes(lim, e.c.hidden)) return error.TowerBytes;
     e.vision = v;
     e.vision_rows = try e.arena.buffer(rows);
     e.vision_limits = lim;
@@ -518,4 +484,29 @@ test "bf16 rounds to nearest even" {
     try std.testing.expectEqual(@as(u16, 0x3f80), bf16(@bitCast(@as(u32, 0x3f808000)))); // a tie to even (down)
     try std.testing.expectEqual(@as(u16, 0x3f82), bf16(@bitCast(@as(u32, 0x3f818000)))); // a tie to even (up)
     try std.testing.expectEqual(@as(u16, 0x3f81), bf16(@bitCast(@as(u32, 0x3f808001))));
+}
+
+test "GLM vision bf16: the old spelling's bits on every zero, subnormal, infinity, NaN and tie" {
+    const old = struct {
+        /// bf16 as it was spelled before it was core's bits(): the oracle for every input, NaN included.
+        fn spelled(x: f32) u16 {
+            const b: u32 = @bitCast(x);
+            if (b & 0x7fffffff > 0x7f800000) return @truncate((b >> 16) | 0x40);
+            return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = bf16(v);
+            try std.testing.expectEqual(spelled(v), h);
+            if (std.math.isNan(v)) try std.testing.expect(std.math.isNan(bf16_round.value(h)));
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
 }

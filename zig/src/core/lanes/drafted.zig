@@ -13,6 +13,7 @@ const Lane = struct {
     filler: u32 = 0, // drafts the next verify takes as fillers instead (a prompt restored whole: no row to draft from)
     tree_first: ?u32 = null, // the first token of the grown tree read back this round, until a verify carries it
     offered: u32 = 0, // the grown tree's nodes the last verify carried, told to the drafter with its kept rows
+    stepped: ?u64 = null, // a prompt pass going a step at a time: the prompt rows the drafter has been given
 };
 
 pub const Drafted = struct {
@@ -28,6 +29,8 @@ pub const Drafted = struct {
     absorbs: std.ArrayList(dr.Absorb) = .empty,
     holds: std.ArrayList(dr.Hold) = .empty,
     firsts: std.ArrayList(u32) = .empty,
+    /// The target reads held drafts from the drafter itself (Window.held), so windows without fillers pass as they are.
+    held_on_target: bool = false,
 
     /// The wrapper, with the target told the drafter's taps before any forward.
     pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
@@ -46,17 +49,56 @@ pub const Drafted = struct {
         x.firsts.deinit(x.gpa);
     }
 
+    const legacy_vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .probabilities = probabilities, .tree = tree, .release = release };
+    const planned_vtable: be.Backend.VTable = blk: {
+        var v = legacy_vtable;
+        v.proposal_draft = draft;
+        v.clear_proposals = clearProposals;
+        break :blk v;
+    };
+    /// The same over a target that steps its prompt passes and reports their fill: the host interleaves them.
+    const stepped_legacy: be.Backend.VTable = blk: {
+        var v = legacy_vtable;
+        v.prefill_step = prefillStep;
+        v.reports_fill = true;
+        break :blk v;
+    };
+    const stepped_planned: be.Backend.VTable = blk: {
+        var v = planned_vtable;
+        v.prefill_step = prefillStep;
+        v.reports_fill = true;
+        break :blk v;
+    };
     pub fn backend(x: *Drafted) be.Backend {
-        return .{ .ptr = x, .first_before_draft = x.target.first_before_draft, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .probabilities = probabilities, .tree = tree, .release = release } };
+        const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
     }
 
-    /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.
+    const cancellable: [4]be.Backend.VTable = blk: {
+        var tables = [_]be.Backend.VTable{ legacy_vtable, planned_vtable, stepped_legacy, stepped_planned };
+        for (&tables) |*v| v.cancel_prefill = cancelPrefill;
+        break :blk tables;
+    };
+
+    fn vtableFor(planned: bool, steps: bool, cancels: bool) *const be.Backend.VTable {
+        if (cancels) return &cancellable[@as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)];
+        if (steps) return if (planned) &stepped_planned else &stepped_legacy;
+        return if (planned) &planned_vtable else &legacy_vtable;
+    }
+
+    fn cancelPrefill(ptr: *anyopaque, s: *Stream) anyerror!void {
+        const target = self(ptr).target;
+        try target.vtable.cancel_prefill.?(target.ptr, s);
+    }
+
+    /// The target's facts with the drafter's depth, step cost, prior, guard, batching and copy match; chains late.
     pub fn facts(x: *const Drafted, target: Model) Model {
         const d = x.drafter.facts();
         var m = target;
         m.mtp = true;
         m.speculate = true;
         m.speculate_early = false;
+        m.allocate_shared_drafts = true;
         m.drafts = @min(d.depth, if (target.exact_width > 1) target.exact_width - 1 else 0);
         m.mtp_step_ms = d.step_ms;
         m.draft_prior = d.prior;
@@ -64,12 +106,24 @@ pub const Drafted = struct {
         m.draft_streams = d.batched;
         m.draft_probabilities = false;
         m.head_trees = d.trees;
+        m.copy_first = d.copy_first;
+        m.hold_costs = d.hold_costs;
+        if (d.chances and x.drafter.vtable.chances != null) {
+            // a chain's drafts priced by the drafter's own chances; the next hold as deep as the grant and its slack
+            m.draft_probabilities = d.confidence_floor == null;
+            m.draft_confidence = d.confidence_floor;
+            m.granted_depth = d.confidence_floor == null;
+            m.draft_slack = d.slack;
+        }
         if (d.tree_nodes > 0) {
             // the drafter grows its own trees, best first, and prices their nodes
             m.drafts = @min(d.tree_nodes, if (target.exact_width > 1) target.exact_width - 1 else 0);
             m.draft_probabilities = x.drafter.vtable.chances != null;
             m.head_trees = false;
         }
+        m.limit_shared_drafts = (target.limit_shared_drafts or d.limit_shared_drafts) and
+            !m.draft_probabilities and m.draft_confidence == null;
+        if (d.copy_match > 0) m.copy_match = d.copy_match;
         if (d.window_costs.len > 0) m.window_costs = d.window_costs;
         if (d.lane_costs.len > 0) m.lane_costs = d.lane_costs;
         return m;
@@ -78,6 +132,15 @@ pub const Drafted = struct {
     /// Device bytes an admitted stream takes: the target's own and the drafter's for the same stream.
     pub fn streamBytes(x: *const Drafted, target: usize) usize {
         return target + x.drafter.facts().stream_bytes;
+    }
+
+    fn clearProposals(ptr: *anyopaque, s: *Stream) void {
+        const x = self(ptr);
+        if (x.lanes.getPtr(s)) |lane| {
+            lane.filler = 0;
+            lane.tree_first = null;
+        }
+        x.drafter.vtable.clear_proposals.?(x.drafter.ptr, s);
     }
 
     fn self(ptr: *anyopaque) *Drafted {
@@ -108,6 +171,26 @@ pub const Drafted = struct {
         try x.drafter.absorb(&.{.{ .stream = s, .features = f, .start = from, .follow = ids[from + 1 ..] }});
     }
 
+    /// A step of the target's prompt pass, then the drafter absorbs its rows (as `take`); it opens at the first step.
+    fn prefillStep(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
+        const x = self(ptr);
+        const step = x.target.vtable.prefill_step.?;
+        if (!s.drafts) return step(x.target.ptr, s, max_rows);
+        errdefer x.dropStream(s);
+        const done = try step(x.target.ptr, s, max_rows);
+        if (!x.lanes.contains(s)) { // the target's lane is open now: the drafter that keeps its stream's rows finds it
+            try x.lanes.ensureUnusedCapacity(x.gpa, 1);
+            try x.drafter.open(s);
+            x.lanes.putAssumeCapacity(s, .{});
+        }
+        const lane = x.lanes.getPtr(s).?;
+        const from = lane.stepped orelse s.cached; // a resumed pass starts at its kept state
+        const to: u64 = if (done) s.prompt().len else s.fill_at.load(.monotonic);
+        lane.stepped = if (done) null else to;
+        if (to > from) try take(x, s, try x.target.features(s, x.drafter.taps(), from, @intCast(to - from)), from);
+        return done;
+    }
+
     /// A prompt chunk's rows but the prompt's last (absorbed with the first token, as `prefill` leaves it).
     fn take(ptr: *anyopaque, s: *Stream, f: be.Features, start: u64) anyerror!void {
         const x = self(ptr);
@@ -116,7 +199,7 @@ pub const Drafted = struct {
         if (start >= last) return;
         var rows = f;
         rows.rows = @intCast(@min(f.rows, last - start));
-        try x.drafter.absorb(&.{.{ .stream = s, .features = rows, .start = start, .follow = ids[@intCast(start + 1)..] }});
+        try x.drafter.absorb(&.{.{ .stream = s, .features = rows, .start = start, .follow = ids[@intCast(start + 1)..][0..rows.rows] }});
     }
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
@@ -149,11 +232,13 @@ pub const Drafted = struct {
             lane.tree_first = null;
         };
         var total: usize = 0;
+        var through = x.held_on_target;
         for (windows) |w| {
             if (w.held > 0 and w.tokens.len != 0) return error.MixedDrafts;
             total += w.held;
+            if (through and w.held > 0 and (x.lanes.getPtr(w.stream) orelse return error.NotDrafting).filler > 0) through = false;
         }
-        if (total == 0) return x.target.verify(x.windows.items, out);
+        if (total == 0 or through) return x.target.verify(x.windows.items, out);
         try x.tokens.resize(x.gpa, total);
         x.streams.clearRetainingCapacity();
         x.outs.clearRetainingCapacity();
@@ -213,7 +298,7 @@ pub const Drafted = struct {
                 for (rows, 0..) |row, i| prefix = prefix and row == i;
                 const n: u32 = @intCast(if (prefix) rows.len else rows[rows.len - 1] + 1);
                 const f = try x.target.features(r.stream, x.drafter.taps(), r.start, n);
-                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len], .rows = if (prefix) null else rows, .offered = lane.offered });
+                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len], .rows = if (prefix) null else rows, .prompt = false, .propose = r.depth > 0, .offered = lane.offered });
                 lane.offered = 0;
                 pending = r.follow[rows.len - 1];
                 lane.rows = true;
@@ -227,7 +312,7 @@ pub const Drafted = struct {
                 const last = r.stream.prompt_len - 1;
                 if (r.stream.cached <= last) { // the pass computed the prompt's last row (not restored whole)
                     const f = try x.target.features(r.stream, x.drafter.taps(), last, 1);
-                    try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok) });
+                    try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok), .propose = r.depth > 0 });
                     lane.rows = true;
                 }
             }
@@ -236,7 +321,7 @@ pub const Drafted = struct {
                 lane.filler = r.depth;
                 continue;
             }
-            try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth, .lanes = r.lanes });
+            try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth, .plan = r.plan, .lanes = r.lanes, .tokens = r.stream.context.items, .sampling = r.stream.sampling });
         }
         if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
         if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);

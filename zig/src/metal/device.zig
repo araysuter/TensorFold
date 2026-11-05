@@ -29,6 +29,10 @@ pub const Buffer = struct {
         return @as([*]T, @ptrCast(@alignCast(self.contents())))[0..len];
     }
 
+    pub fn deviceId(self: Buffer) Id {
+        return objc.msg(Id, self.id, "device", .{});
+    }
+
     pub fn gpuAddress(self: Buffer) u64 {
         return objc.msg(u64, self.id, "gpuAddress", .{});
     }
@@ -69,6 +73,11 @@ pub const Device = struct {
         return objc.msg(u64, self.id, "recommendedMaxWorkingSetSize", .{});
     }
 
+    /// The longest buffer this device makes, in bytes.
+    pub fn maxBufferLength(self: Device) u64 {
+        return objc.msg(u64, self.id, "maxBufferLength", .{});
+    }
+
     /// Bytes of every buffer and texture this device holds now.
     pub fn allocated(self: Device) u64 {
         return objc.msg(u64, self.id, "currentAllocatedSize", .{});
@@ -84,6 +93,7 @@ pub const Device = struct {
 
     /// A new buffer of `len` bytes; `options` from types.ResourceOptions (shared storage by default).
     pub fn buffer(self: Device, len: usize, options: usize) Error!Buffer {
+        @import("pass_metrics.zig").buffer();
         const id = objc.msg(?Id, self.id, "newBufferWithLength:options:", .{ len, options });
         return .{ .id = id orelse return error.NoBuffer };
     }

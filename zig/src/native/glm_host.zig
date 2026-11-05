@@ -84,10 +84,10 @@ fn learnedStates(gpa: Allocator, io: std.Io, eng: *const ge.Engine, sl: *glm.slo
 }
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?Learn, vision: ?api.VisionOpen) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, decode_share: ?f64, learn: ?Learn, vision: ?api.VisionOpen) !*Host {
     // a prompt's tower rows and images: the images' budget, and every video's frame groups beside it
     const limits: ?glm.vision.Limits = if (vision) |v| .{ .image_tokens = v.image_tokens + v.video_tokens, .max_images = v.max_images + v.max_videos * ((v.max_frames + 1) / 2) } else null;
-    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null, limits);
+    const eng = try ge.Engine.loadWith(gpa, io, dir, window + 64, speed_up, learn != null, limits, true);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
     for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i);
@@ -101,6 +101,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.learned = null;
     h.slots = try glm.slots.Slots.init(gpa, eng, try fit(eng, streams, fixed));
     errdefer h.slots.deinit(gpa);
+    glm.residency.wire(eng, io);
     const n: u32 = @intCast(h.slots.slots.len);
     h.back = .{ .gpa = gpa, .sl = &h.slots };
     errdefer h.back.deinit();
@@ -123,13 +124,13 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         }
     }
     // sampled draws on one Mac (the pair refuses them per request)
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .greedy_only = eng.ep != null, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (eng.ep != null) 2 else 1, .benchmark_group = if (eng.ep) |p| p.benchmark_group else null, .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .decode_share = decode_share, .greedy_only = eng.ep != null, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
         const B = glm.backend.Backend;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget, .forget_checked = B.snapForgetChecked, .reclaim = B.snapReclaim, .peer_other_used = B.peerOtherUsed, .peer_other_next = B.peerOtherNext, .peer_other_bytes = B.peerOtherBytes, .peer_other_remove = B.peerOtherRemove, .peer_need = B.peerNeed, .peer_reclaim = B.peerReclaim, .peer_reserve = B.peerReserve, .peer_finish = B.peerFinish, .rows = &glm_disk.image } }, cache_rules, budget);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .charged = B.snapCharged, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget, .forget_checked = B.snapForgetChecked, .reclaim = B.snapReclaim, .peer_other_used = B.peerOtherUsed, .peer_other_next = B.peerOtherNext, .peer_other_bytes = B.peerOtherBytes, .peer_other_remove = B.peerOtherRemove, .peer_need = B.peerNeed, .peer_reclaim = B.peerReclaim, .peer_reserve = B.peerReserve, .peer_finish = B.peerFinish, .rows = &glm_disk.image } }, cache_rules, budget);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
         h.slots.grow = .{ .ctx = h, .f = growSnap }; // a resident state made whole before its slot writes below it
@@ -141,9 +142,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         if (eng.ep != null) return error.LearnConversationsOnPair;
         if (h.cache) |*store| {
             const id = try glm_disk.identity(io, eng, &h.slots);
-            const r = try api.prompt_cache.rows.Rows.open(gpa, store.family, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = cache_rules.lookahead, .planned = cache_rules.planned });
+            const r = try api.prompt_cache.rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = cache_rules.lookahead, .planned = cache_rules.planned, .spill = l.spill, .slots = l.slots });
             r.prefill_rate = id.rate;
-            store.disk = r;
         }
     } else {
         h.learned = try learnedStates(gpa, io, eng, &h.slots, l.root, l.cap);
@@ -221,7 +221,7 @@ fn follow(h: *Host) void {
 }
 
 /// --learn's settings: the root, cap, free-disk floor and daily writes, and whether conversations go to disk too.
-pub const Learn = struct { root: []const u8, cap: u64, floor: u64, daily: u64, conversations: bool };
+pub const Learn = struct { root: []const u8, cap: u64, floor: u64, daily: u64, conversations: bool, spill: api.prompt_cache.rows.Spill = .off, slots: ?usize = null };
 
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));

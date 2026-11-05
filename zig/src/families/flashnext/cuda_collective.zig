@@ -23,9 +23,11 @@ pub const Collective = struct {
         if (rank > 1 or timeout_ms == 0) return error.BadRank;
         var c: Collective = .{ .lib = try nccl.Library.open(), .api = undefined, .link = link, .timeout_ms = timeout_ms };
         errdefer c.lib.close();
-        if (try c.lib.version() < 23000) return error.NcclVersion;
+        try c.lib.requireSupportedVersion();
         const info = @typeInfo(Advanced).@"struct";
         inline for (info.field_names, info.field_types) |name, T| @field(c.api, name) = c.lib.lib.lookup(T, name) orelse return error.MissingSymbol;
+        var diag = cuda.p2p_report.begin(rank, 2);
+        defer diag.end();
         var id: nccl.UniqueId = undefined;
         const until = wire.deadline(timeout_ms);
         if (rank == 0) {
@@ -36,6 +38,7 @@ pub const Collective = struct {
         errdefer c.abort();
         try c.submitted(c.api.ncclCommInitRankConfig(&c.comm, 2, id, @intCast(rank), &config));
         try c.wait(null, until);
+        cuda.p2p_report.afterInit(&diag, .{ .lib = &c.lib, .comm = c.comm }); // no driver here: no probe
         return c;
     }
 
@@ -79,6 +82,28 @@ pub const Collective = struct {
     pub fn finish(c: *Collective, stream: cuda.Stream) !void {
         if (c.failed or c.comm == null) return error.RankDisconnected;
         try c.wait(stream, wire.deadline(c.timeout_ms));
+    }
+
+    pub fn benchmarkShape(c: *Collective) !nccl.Shape {
+        if (c.failed or c.comm == null) return error.RankDisconnected;
+        const actual = try c.lib.shape(c.comm);
+        if (actual.world != 2) return error.BadRank;
+        return actual;
+    }
+
+    pub fn benchmarkGather(c: *Collective, comptime T: type, d: *const cuda.Driver, stream: cuda.Stream, mine: T, out: []T) !void {
+        const shape = try c.benchmarkShape();
+        if (out.len != shape.world or mine.rank != shape.rank) return error.BadRank;
+        const size = @sizeOf(T);
+        var dev = try cuda.DeviceBuffer.alloc(d, size * out.len);
+        defer dev.free();
+        errdefer c.abort();
+        try dev.uploadAsync(shape.rank * size, std.mem.asBytes(&mine), stream.handle);
+        try c.link.checkPeer();
+        try c.submitted(c.lib.api.ncclAllGather(dev.ptr + shape.rank * size, dev.ptr, size, .u8, c.comm, stream.handle));
+        try c.wait(null, wire.deadline(c.timeout_ms));
+        try c.finish(stream);
+        try dev.download(0, std.mem.sliceAsBytes(out));
     }
 
     /// Disjoint BF16 vocabulary columns are concatenated without an arithmetic reduction.

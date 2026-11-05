@@ -22,11 +22,7 @@ const prefix = "language_model.model.layers.47.self_attn.";
 
 const Gap = struct { off: usize, steps: u32, at: usize };
 
-fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+const toBf16 = core.bf16_round.bits;
 
 fn promote(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
@@ -115,8 +111,9 @@ fn shardPath(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![]u8 {
     defer gpa.free(text);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
     defer parsed.deinit();
-    const file = parsed.value.object.get("weight_map").?.object.get(prefix ++ "q_proj.weight").?.string;
-    return std.fs.path.join(gpa, &.{ dir, file });
+    const map = try core.safetensors.index.weightMap(parsed.value);
+    const file = map.get(prefix ++ "q_proj.weight") orelse return error.MissingTensor;
+    return std.fs.path.join(gpa, &.{ dir, file.string });
 }
 
 const Triple = struct { w: core.safetensors.Tensor, s: core.safetensors.Tensor, b: core.safetensors.Tensor };
@@ -258,7 +255,7 @@ pub fn decode(comptime Tri: type, gpa: std.mem.Allocator, driver: *cuda.Driver, 
     defer ik_b.free();
     var dummy = try cuda.DeviceBuffer.alloc(driver, 256);
     defer dummy.free();
-    try tri.attnPrep(pa_b.ptr, pos_b.ptr, qw_b.ptr, kw_b.ptr, iw_b.ptr, inv_b.ptr, q_b.ptr, kc_b.ptr, vc_b.ptr, iq_b.ptr, ik_b.ptr, dummy.ptr, dummy.ptr, eps, 1, 0);
+    try tri.attnPrep(pa_b.ptr, pos_b.ptr, qw_b.ptr, kw_b.ptr, iw_b.ptr, inv_b.ptr, q_b.ptr, kc_b.ptr, vc_b.ptr, iq_b.ptr, ik_b.ptr, dummy.ptr, dummy.ptr, eps, 1, 0, .{});
 
     var po_b = try cuda.DeviceBuffer.alloc(driver, nch * q_heads * head_dim * 4);
     defer po_b.free();
@@ -268,7 +265,7 @@ pub fn decode(comptime Tri: type, gpa: std.mem.Allocator, driver: *cuda.Driver, 
     defer pl_b.free();
     var o_b = try cuda.DeviceBuffer.alloc(driver, out_k * 2);
     defer o_b.free();
-    try tri.attnChunks(q_b.ptr, kc_b.ptr, vc_b.ptr, pos_b.ptr, po_b.ptr, pm_b.ptr, pl_b.ptr, dummy.ptr, dummy.ptr, dummy.ptr, 1, kv_heads, 1, false);
+    try tri.attnChunks(q_b.ptr, kc_b.ptr, vc_b.ptr, pos_b.ptr, po_b.ptr, pm_b.ptr, pl_b.ptr, dummy.ptr, dummy.ptr, dummy.ptr, 1, kv_heads, 1, false, .{});
     try tri.attnMerge(po_b.ptr, pm_b.ptr, pl_b.ptr, pos_b.ptr, o_b.ptr, dummy.ptr, dummy.ptr, 1, kv_heads, false);
 
     var gated_b = try cuda.DeviceBuffer.alloc(driver, out_k * 2);

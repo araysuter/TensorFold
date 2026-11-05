@@ -20,14 +20,31 @@ inline bfloat glm_rows_glu(float gv, float uv, float limit) {
   return (gt * sigmoid_fast(gt)) * up;
 }
 
-// out[m, h, c] = x[m, h] . W[h][c]: 4 columns a simdgroup, 2 simdgroups a threadgroup; grid (n / 8, heads).
-template <int BITS>
+// MB rows from m (ldx apart from x0) through the 2 columns at w into o0's rows: tf_rp_rows_at's sums, one pass over w.
+template <int MB, int BITS>
+inline void glm_rows_pass(const device uint8_t* w, const device bfloat* s, const device bfloat* b, const device bfloat* x0,
+                          int m, constant GlmRowDims& d, device bfloat* o0, int cols, uint lane) {
+  TfRpRows<MB> x;
+  for (int r = 0; r < MB; r++) x.x[r] = x0 + size_t(m + r) * d.ldx;
+  float acc[MB][2];
+  tf_rp_rows_at<2, MB, BITS, false>(w, s, b, x, d.k, d.group, lane, acc);
+  if (lane == 0)
+    for (int r = 0; r < MB; r++)
+      for (int j = 0; j < cols; j++) o0[size_t(m + r) * d.ldo + j] = bfloat(acc[r][j]);
+}
+
+// The three-row passes before a window's pairs and last row: four rows take two pairs, not a three and a one.
+inline int glm_threes(int rows) { return rows / 3 - (rows % 3 == 1 && rows > 3 ? 1 : 0); }
+
+// out[m, h, c] = x[m, h] . W[h][c]: 2 columns a simdgroup, 2 a threadgroup, grid (n / 4, heads); WIDE: 8s, a 4 first.
+template <int BITS, bool WIDE>
+[[max_total_threads_per_threadgroup(64)]]
 [[kernel]] void glm_rows(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
                          const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
                          constant GlmRowDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
                          uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                          uint3 tg [[threadgroup_position_in_grid]]) {
-  const int row0 = (int(tg.x) * 2 + int(sg)) * 4;
+  const int row0 = (int(tg.x) * 2 + int(sg)) * 2;
   if (row0 >= d.n) return;
   const int h = int(tg.y);
   const size_t at = size_t(h) * d.hsw + row0;
@@ -36,25 +53,21 @@ template <int BITS>
   const device bfloat* br = B + at * (d.k / d.group);
   const device bfloat* x0 = X + size_t(h) * d.hsx;
   device bfloat* o0 = OUT + size_t(h) * d.hso + row0;
-  const int cols = metal::min(4, d.n - row0);
+  const int cols = metal::min(2, d.n - row0);
   int m = 0;
-  if (d.ldx == d.k) {
+  if (WIDE) {
     #pragma clang loop unroll(disable)
-    for (; m + 2 <= d.rows; m += 2) {
-      float acc[2][4];
-      tf_rp_rows<4, 2, BITS, false>(wr, sr, br, x0 + size_t(m) * d.k, d.k, d.group, lane, acc);
-      if (lane == 0)
-        for (int b = 0; b < 2; b++)
-          for (int j = 0; j < cols; j++) o0[size_t(m + b) * d.ldo + j] = bfloat(acc[b][j]);
+    for (; m + 8 <= d.rows; m += 8) glm_rows_pass<8, BITS>(wr, sr, br, x0, m, d, o0, cols, lane);
+    if (m + 4 <= d.rows) {
+      glm_rows_pass<4, BITS>(wr, sr, br, x0, m, d, o0, cols, lane);
+      m += 4;
     }
   }
   #pragma clang loop unroll(disable)
-  for (; m < d.rows; m++) {
-    float acc[1][4];
-    tf_rp_rows<4, 1, BITS, false>(wr, sr, br, x0 + size_t(m) * d.ldx, d.k, d.group, lane, acc);
-    if (lane == 0)
-      for (int j = 0; j < cols; j++) o0[size_t(m) * d.ldo + j] = bfloat(acc[0][j]);
-  }
+  for (const int end = m + 3 * glm_threes(d.rows - m); m < end; m += 3) glm_rows_pass<3, BITS>(wr, sr, br, x0, m, d, o0, cols, lane);
+  #pragma clang loop unroll(disable)
+  for (; m + 2 <= d.rows; m += 2) glm_rows_pass<2, BITS>(wr, sr, br, x0, m, d, o0, cols, lane);
+  if (m < d.rows) glm_rows_pass<1, BITS>(wr, sr, br, x0, m, d, o0, cols, lane);
 }
 
 // Slot y through expert ids[y] on x row y / repeat (GLU: gate W and up W2, SwiGLU'd); grid (n / 8, slots).
@@ -221,8 +234,83 @@ template <int BITS, bool GLU>
   }
 }
 
+// OUT[m, c] = sum_k X[m,k]*W[c,k] on tensor units: fp32 8x8 mma, RNE writeback; B from the W^T staging non-transposed.
+template <int BM, int BN>
+[[kernel]] void glm_rows_bf16_nax(const device bfloat* X [[buffer(0)]], const device bfloat* W [[buffer(1)]],
+                                  constant GlmRowDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
+                                  uint3 tg [[threadgroup_position_in_grid]],
+                                  uint ti [[thread_index_in_threadgroup]]) {
+  constexpr int SG_M = BM / 8;
+  constexpr int SG_N = BN / 8;
+  constexpr int SG_TOTAL = SG_M * SG_N;
+  constexpr int TG_THREADS = SG_TOTAL * 32;
+  constexpr int A_PAD = 8 + 8;       // bf16 X tile: 8 rows × (8+8)-padded cols
+  constexpr int B_PAD = BN + 8;      // bf16 W tile: 8 rows × (BN+8)-padded cols (transposed)
+  constexpr int W_PAD = BN + 8;      // simdgroup_store writeback stride
+  if (TG_THREADS > 1024) return;     // threadgroup cap on M-series GPUs
+  const int sg_id = int(ti) / 32;
+  const int sg_m = sg_id / SG_N;
+  const int sg_n = sg_id % SG_N;
+  const int m0 = int(tg.y) * BM + sg_m * 8;
+  const int n0 = int(tg.x) * BN + sg_n * 8;
+  threadgroup float xs_pad[BM * A_PAD];                  // X tile buffer
+  threadgroup float ws_pad[8 * B_PAD];                    // W tile buffer (8 rows × BN cols)
+  threadgroup float wb[BM * W_PAD];                       // simdgroup_store writeback (overlaps unused TG)
+  simdgroup_matrix<float, 8, 8> acc(0.0f);
+  const bool m_in = m0 < d.rows;
+  if (m_in) {
+    const long x_base = long(m0) * d.ldx;
+    for (int k0 = 0; k0 < d.k; k0 += 8) {
+      // Cooperatively load X[BM, BK=8] from device bf16 into xs_pad (padded row-major; out-of-bounds = 0).
+      for (int e = int(ti); e < BM * 8; e += TG_THREADS) {
+        const int r = e / 8;
+        const int c = e % 8;
+        const int global_r = m0 + r;
+        const int global_c = k0 + c;
+        xs_pad[r * A_PAD + c] = (global_r < d.rows && global_c < d.k) ? float(X[x_base + long(r) * d.ldx + k0 + c]) : 0.0f;
+      }
+      // Load W[BN rows of K=8] into ws_pad as W^T [BK=8, BN]; the column base is threadgroup-scoped (tg.x * BN).
+      const int n_base = int(tg.x) * BN;
+      for (int e = int(ti); e < 8 * BN; e += TG_THREADS) {
+        const int kk = e / BN; // K position (rows of B)
+        const int nn = e % BN; // W column (cols of B)
+        const int global_nn = n_base + nn;
+        const int global_kk = k0 + kk;
+        ws_pad[kk * B_PAD + nn] = (global_nn < d.n && global_kk < d.k) ? float(W[long(global_nn) * d.k + global_kk]) : 0.0f;
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      simdgroup_matrix<float, 8, 8> a_mat;
+      simdgroup_matrix<float, 8, 8> b_mat;
+      simdgroup_load(a_mat, xs_pad, ulong(A_PAD));
+      // This tile's W slice is staged [kk][nn] = W^T: the load is non-transposed, b[l][j] = W[n0+j][k0+l].
+      simdgroup_load(b_mat, ws_pad + sg_n * 8, ulong(B_PAD), ulong2(0, 0), false);
+      simdgroup_multiply_accumulate(acc, a_mat, b_mat, acc);
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    simdgroup_store(acc, wb + sg_m * 8 * W_PAD + sg_n * 8, ulong(W_PAD));
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (m_in) {
+    for (int e = int(ti); e < BM * BN; e += TG_THREADS) {
+      const int rr = e / BN;
+      const int cc = e % BN;
+      const int out_m = int(tg.y) * BM + rr;
+      const int out_n = int(tg.x) * BN + cc;
+      if (out_m < d.rows && out_n < d.n) {
+        OUT[long(out_m) * d.ldo + out_n] = bfloat(wb[rr * W_PAD + cc]);
+      }
+    }
+  }
+}
+
+// bf16 GEMM on tensor units: 8 x 64 output tile per threadgroup (1 x 8 simdgroups, BM=8 BN=64).
+
+// D=4096 / BN=64 = 64 N-tiles; rows (p.rows chunks 2048..16384, all multiples of 8) / BM=8 covers M in full.
+template [[host_name("glm_rows_bf16_nax")]] [[kernel]] decltype(glm_rows_bf16_nax<8, 64>) glm_rows_bf16_nax<8, 64>;
+
 #define GLM_ROWS_AT(B)                                                                                                 \
-  template [[host_name("glm_rows_q" #B)]] [[kernel]] decltype(glm_rows<B>) glm_rows<B>;                                \
+  template [[host_name("glm_rows_q" #B)]] [[kernel]] decltype(glm_rows<B, false>) glm_rows<B, false>;                                \
+  template [[host_name("glm_rows_wide_q" #B)]] [[kernel]] decltype(glm_rows<B, true>) glm_rows<B, true>;                                \
   template [[host_name("glm_rows_ids_q" #B)]] [[kernel]] decltype(glm_rows_ids<B, false>) glm_rows_ids<B, false>;      \
   template [[host_name("glm_rows_glu_ids_q" #B)]] [[kernel]] decltype(glm_rows_ids<B, true>) glm_rows_ids<B, true>;    \
   template [[host_name("glm_rows_sorted_q" #B)]] [[kernel]] decltype(glm_rows_sorted<B, false>) glm_rows_sorted<B, false>; \

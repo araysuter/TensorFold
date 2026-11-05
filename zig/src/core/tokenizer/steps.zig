@@ -106,15 +106,31 @@ pub const Normalizer = union(enum) {
     sequence: []const Normalizer,
     nfc,
     nfd,
+    nfkc,
+    nfkd,
     replace: struct { pattern: Pattern, content: []const u8 },
     prepend: []const u8,
     strip: struct { left: bool, right: bool },
+
+    /// Only operations known to preserve every byte position can reuse an incoming request mask.
+    pub fn preservesBytes(n: *const Normalizer) bool {
+        return switch (n.*) {
+            .sequence => |items| for (items) |*item| {
+                if (!item.preservesBytes()) break false;
+            } else true,
+            .prepend => |prefix| prefix.len == 0,
+            .strip => |s| !s.left and !s.right,
+            else => false,
+        };
+    }
 
     pub fn parse(a: Allocator, v: Value) Error!Normalizer {
         const kind = string(v, "type") orelse return error.UnsupportedNormalizer;
         if (std.mem.eql(u8, kind, "Sequence")) return .{ .sequence = try sequence(Normalizer, a, v, "normalizers") };
         if (std.mem.eql(u8, kind, "NFC")) return .nfc;
         if (std.mem.eql(u8, kind, "NFD")) return .nfd;
+        if (std.mem.eql(u8, kind, "NFKC")) return .nfkc;
+        if (std.mem.eql(u8, kind, "NFKD")) return .nfkd;
         if (std.mem.eql(u8, kind, "Replace")) return .{ .replace = .{ .pattern = try Pattern.parse(a, field(v, "pattern")), .content = string(v, "content") orelse return error.InvalidTokenizer } };
         if (std.mem.eql(u8, kind, "Prepend")) return .{ .prepend = string(v, "prepend") orelse return error.InvalidTokenizer };
         if (std.mem.eql(u8, kind, "Strip")) return .{ .strip = .{ .left = flag(v, "strip_left", true), .right = flag(v, "strip_right", true) } };
@@ -126,7 +142,7 @@ pub const Normalizer = union(enum) {
             .sequence => |steps| for (steps) |*step| {
                 if (step.hasForms()) break true;
             } else false,
-            .nfc, .nfd => true,
+            .nfc, .nfd, .nfkc, .nfkd => true,
             else => false,
         };
     }
@@ -141,6 +157,8 @@ pub const Normalizer = union(enum) {
             },
             .nfc => return unicode.normalize(ctx.a, s, .nfc),
             .nfd => return unicode.normalize(ctx.a, s, .nfd),
+            .nfkc => return unicode.normalize(ctx.a, s, .nfkc),
+            .nfkd => return unicode.normalize(ctx.a, s, .nfkd),
             .replace => |r| {
                 // Replacement text takes the alignment of the text it replaces.
                 var out: std.ArrayList(u8) = .empty;
@@ -237,6 +255,8 @@ pub const PreTokenizer = union(enum) {
             return .{ .metaspace = .{ .replacement = replacement, .scheme = try scheme(v), .split = flag(v, "split", true) } };
         }
         if (std.mem.eql(u8, kind, "WhitespaceSplit")) return .whitespace_split;
+        // tokenizers' Digits splits on char::is_numeric (\p{N}): each digit isolated, or runs kept contiguous
+        if (std.mem.eql(u8, kind, "Digits")) return .{ .split = .{ .pattern = .{ .regex = try regex.Regex.compile(a, "\\p{N}") }, .behavior = if (flag(v, "individual_digits", false)) .isolated else .contiguous, .invert = false } };
         return error.UnsupportedPreTokenizer;
     }
 
@@ -524,6 +544,25 @@ test "split behaviors match tokenizers" {
     for (cases) |case| {
         var out: std.ArrayList(Piece) = .empty;
         try splitPiece(&ctx, &out, .{ .text = "the-final--countdown", .first = true }, &.{ .literal = "-" }, case[0], false);
+        try std.testing.expectEqual(case[1].len, out.items.len);
+        for (case[1], out.items) |want, got| try std.testing.expectEqualStrings(want, got.text);
+    }
+}
+
+test "Digits splits as tokenizers' does: each digit, or each run of them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = Context{ .a = a, .matcher = .{ .a = a } };
+    const cases = [_]struct { []const u8, []const []const u8 }{
+        .{ "{\"type\": \"Digits\", \"individual_digits\": true}", &.{ "a", "1", "2", "3", "b", "4" } },
+        .{ "{\"type\": \"Digits\", \"individual_digits\": false}", &.{ "a", "123", "b", "4" } },
+    };
+    for (cases) |case| {
+        const v = try std.json.parseFromSliceLeaky(Value, a, case[0], .{});
+        const p = try PreTokenizer.parse(a, v);
+        var out: std.ArrayList(Piece) = .empty;
+        try splitPiece(&ctx, &out, .{ .text = "a123b4", .first = true }, &p.split.pattern, p.split.behavior, false);
         try std.testing.expectEqual(case[1].len, out.items.len);
         for (case[1], out.items) |want, got| try std.testing.expectEqualStrings(want, got.text);
     }

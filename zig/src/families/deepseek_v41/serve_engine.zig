@@ -28,6 +28,10 @@ pub fn chip(_: Allocator) ?[]const u8 {
 
 /// The engine for `o.dir`, or null with `problem` set (the native_engines contract).
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "CUDA")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (@import("sys").experimental.refusal(o.model_type, @import("sys").getenv("TF_EXPERIMENTAL"))) |text| {
         problem.* = text;
         return null;
@@ -37,10 +41,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     const assets = std.mem.span(std.c.getenv("TF_DSV41_ASSETS") orelse {
-        problem.* = "TF_DSV41_ASSETS: the dir with rope.bin, engram-host.bin and aot/ (model.zig)";
+        problem.* = model.asset_names.unset;
         return null;
     });
-    const s = Served.open(gpa, io, o.dir, assets, o.drafts, o.context) catch |e| {
+    const s = Served.open(gpa, io, o.dir, assets, o.drafts, o.context, o.prompt_cache_gib) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the DeepSeek-V4.1 CUDA engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
@@ -70,8 +74,8 @@ pub const Served = struct {
     lookup: ?*lookup.Planner = null,
 
     /// Rank 0's engine over a loaded model (`drafts`: DSpark's pass, else serial windows through the same lanes).
-    pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, assets: []const u8, drafts: bool, context: ?i64) !*Served {
-        const m = try model.Model.open(gpa, io, dir, assets, .{ .drafts = drafts, .own_prefill = model.ownPrefillEnv(), .layers = try model.layersEnv(gpa) });
+    pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, assets: []const u8, drafts: bool, context: ?i64, prompt_cache_gib: ?f64) !*Served {
+        const m = try model.Model.open(gpa, io, dir, assets, .{ .drafts = drafts, .own_prefill = model.ownPrefillEnv(), .layers = try model.layersEnv(gpa), .prompt_cache_gib = prompt_cache_gib });
         errdefer m.close();
         if (m.rank() != 0) return error.NotRankZero; // the other ranks run `tf-dsv41 follow`
         const s = try gpa.create(Served);
@@ -123,11 +127,14 @@ pub const Served = struct {
         s.core = lanes.Engine.init(gpa, &s.cfg, s.x.backend(), s.clock.clock());
         s.x.attach(&s.core);
         const window: u32 = @intCast(@min(context orelse m.f.opts.limit, m.f.opts.limit));
-        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .name = "dsv41-cuda", .lanes = m.slots, .context_window = window, .prefill_step = m.gt.prefill_rows });
+        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .benchmark_ranks = m.session.nccl.size, .benchmark_group = m.benchmark_group, .name = "dsv41-cuda", .lanes = m.slots, .context_window = window, .prefill_step = m.gt.prefill_rows });
+        s.host.info_.draft_sources = draftSources(m.pass != null, s.cfg.max_copy > 0);
         // the lanes run on LaneHost's thread: the model's CUDA context must be current there
         s.host.on_thread = .{ .ctx = m, .run = bindContext };
         // /metrics' device memory: bytes this rank holds in cuda.DeviceBuffers (weights, KV pool, staging), peak
         s.host.memory = .{ .read = readMemory };
+        s.host.health = .{ .ctx = m, .read = @import("model_health.zig").serving };
+        @import("model_health.zig").attach(m, &s.host);
         // TF_DSV41_PREFILL_PIECES=1: the batcher plans the rounds; served shape only, same setting on every rank
         s.sched = null;
         if (model.Model.piecesEnv()) {
@@ -348,3 +355,16 @@ pub const Recorder = struct {
         std.Io.Dir.cwd().writeFile(r.io, .{ .sub_path = r.path.?, .data = r.log.items }) catch {};
     }
 };
+
+fn draftSources(dspark: bool, copies: bool) api.DraftSources {
+    return .{ .copies = copies, .drafter = if (dspark) .{ .kind = "DSpark" } else null };
+}
+
+test "draft sources: DeepSeek names the loaded DSpark pass and never calls NoDraft an MTP head" {
+    const t = std.testing;
+    const active = draftSources(true, true);
+    try t.expect(active.copies and !active.mtp);
+    try t.expectEqualStrings("DSpark", active.drafter.?.kind);
+    const plain = draftSources(false, true);
+    try t.expect(plain.copies and !plain.mtp and plain.drafter == null);
+}

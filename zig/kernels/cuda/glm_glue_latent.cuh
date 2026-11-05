@@ -66,9 +66,30 @@ extern "C" __global__ void __launch_bounds__(128)
   }
 }
 
-// latent._lat_write (BF16 cache): row r of `lat` into cache slot pos + r.
+namespace glm_pages {
+
+// Row r's first element in a cache of `width`-element rows: in order (pt null), or row r % P of page pt[r / P].
+template <int P>
+__device__ __forceinline__ int64_t at(const int* pt, int64_t page_elems, int64_t r, int64_t width) {
+  return pt ? (int64_t)pt[r / P] * page_elems + (r % P) * width : r * width;
+}
+
+}  // namespace glm_pages
+
+// latent._lat_write (BF16 cache): row r of `lat` into cache slot pos + r (on pages, through the stream's table).
 extern "C" __global__ void tf_glm_lat_write(const __nv_bfloat16* lat, int64_t lat_stride, __nv_bfloat16* cache,
-                                            const int* pos, int64_t lw) {
+                                            const int* pos, int64_t lw, const int* pt, int64_t ps) {
+  const int64_t r = blockIdx.x, at = glm_pages::at<512>(pt, ps / 2, (int64_t)pos[0] + r, lw);
+  for (int64_t k = threadIdx.x; k < lw; k += blockDim.x) cache[at + k] = lat[r * lat_stride + k];
+}
+
+#include "kv_fp8.cuh"
+
+// One 512-wide latent row as E4M3 and its FP32 scale, with the same row-wise rounding as other FP8 caches.
+extern "C" __global__ void __launch_bounds__(512)
+    tf_glm_lat_write_fp8(const __nv_bfloat16* lat, int64_t stride, unsigned char* cache, float* scales, const int* pos) {
   const int64_t r = blockIdx.x, at = (int64_t)pos[0] + r;
-  for (int64_t k = threadIdx.x; k < lw; k += blockDim.x) cache[at * lw + k] = lat[r * lat_stride + k];
+  const int d = threadIdx.x;
+  __shared__ float red[16];
+  tf_kv_fp8::quant_row<512, true>(__bfloat162float(lat[r * stride + d]), d, cache + at * 512, scales + at, red);
 }

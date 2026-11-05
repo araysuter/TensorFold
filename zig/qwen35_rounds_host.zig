@@ -69,6 +69,7 @@ test "Verify width calibration: actual DeltaNet dispatch selects its register va
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Capture.launch;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = &d;
     e.stream = .{ .d = &d, .handle = null };
     e.tables = .{ .d = &d, .ptr = 0x100000, .len = q.round.bytes };
@@ -103,12 +104,13 @@ test "Verify width calibration: actual keep launches carry the complete 64-row p
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Capture.launch;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = &d;
     e.stream = .{ .d = &d, .handle = null };
     e.g = .{ .hidden = 512, .intermediate = 256, .layers = 2, .vocab = 248320, .k_heads = 2, .v_heads = 4, .q_heads = 4, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(true) };
     e.g.linear[1] = false;
     e.geo = .{ .hid = 512, .nk = 2, .nv = 4, .qh = 4, .kvh = 1, .nl = 1 };
-    e.keeps = .{ .apply = function(&d, 1), .conv = function(&d, 2), .compact = function(&d, 3) };
+    e.keeps = .{ .apply = function(&d, 1), .apply_pend = function(&d, 4), .conv = function(&d, 2), .compact = function(&d, 3) };
     e.kv8 = false;
     e.n_taps = 0;
     const buffer: cuda.DeviceBuffer = .{ .d = &d, .ptr = 0x1000, .len = 1 << 20 };
