@@ -80,7 +80,7 @@ def main(args):
     credentials = keys(args.key_file)
     owner = Client(args.endpoint, credentials['owner'])
     guest = Client(args.endpoint, credentials['friend'])
-    row = {'status': 'running', 'context': 131072, 'runtime': 'temporary-mlx', 'dflash2': False,
+    row = {'status': 'running', 'context': 131072, 'runtime': 'temporary-mlx', 'dflash2': args.dflash2,
            'checks': {}, 'max_resident_model_processes': 0}
     stop = threading.Event()
 
@@ -123,6 +123,11 @@ def main(args):
         cold = owner.request('POST', '/v1/chat/completions', chat(first), 'ripple-smoke-owner')
         check('ripple_cold_answer', cold['status'] == 200 and '391' in message(cold)['content'] and cached(cold) == 0)
         row['cold'] = summarize(cold)
+        if args.dflash2:
+            stats = owner.request('GET', '/stats')
+            check('draft_verification_active', stats['status'] == 200
+                  and stats['body'].get('draft_verify_calls_total', 0) > 0
+                  and stats['body'].get('draft_proposed_tokens_total', 0) > 0)
         history = first + [message(cold), {'role': 'user', 'content': 'Add 9 to that. Give only the final number.'}]
         warm = owner.request('POST', '/v1/chat/completions', chat(history), 'ripple-smoke-owner')
         check('warm_followup', warm['status'] == 200 and cached(warm) > 0 and '400' in message(warm)['content'])
@@ -156,6 +161,16 @@ def main(args):
             check('swap_back_from_' + model, response['status'] == 200 and cached(response) > 0
                   and response['context_status'] == 'resumed' and '391' in message(response)['content'])
             swap_history += [message(response), {'role': 'user', 'content': 'Repeat that same number.'}]
+        if args.dflash2:
+            code = [{'role': 'user', 'content':
+                     'Write a Python function merge_intervals(intervals) and explain its time complexity. Include edge cases.'}]
+            plain = owner.request('POST', '/v1/chat/completions',
+                                  chat(code, maximum=64, draft=False, temperature=0.7, seed=17), 'ripple-plain-control')
+            drafted = owner.request('POST', '/v1/chat/completions',
+                                    chat(code, maximum=64, draft=True, temperature=0.7, seed=17), 'ripple-draft-control')
+            check('api_seeded_plain_drafted_identity', plain['status'] == drafted['status'] == 200
+                  and tokens(plain) == tokens(drafted))
+            row['plain_control'], row['draft_control'] = summarize(plain), summarize(drafted)
         if args.capacity:
             from mlx_lm.tokenizer_utils import load
             from probe import long_prompt
@@ -211,4 +226,5 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--model', type=Path, required=True)
     parser.add_argument('--capacity', action='store_true')
+    parser.add_argument('--dflash2', action='store_true')
     main(parser.parse_args())

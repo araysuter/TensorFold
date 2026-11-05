@@ -3,10 +3,17 @@
   "aliases": ["ripple-65b", "ripple-65b-preview-mixed-4bit"],
   "readiness_timeout": 240,
   "text_chat_only": true,
+  "env": {
+    "PYTHONPATH": "/absolute/path/to/mlx-verify-build/override",
+    "PYTHONNOUSERSITE": "1"
+  },
   "argv": [
     "~/ai/ripple-mlx-env/bin/python",
     "~/ai/TensorFold/tools/ripple/worker.py",
     "--model", "~/ai/models/Ripple-65B-Preview-MLX-mixed-4bit",
+    "--dflash-drafter", "~/ai/models/Ripple-DFlash2-MLX-mixed4",
+    "--dflash-exact-verify",
+    "--mlx-build-receipt", "~/ai/mlx-verify-build/build-receipt.json",
     "--name", "ripple-65b-preview",
     "--context", "131072",
     "--prefill-step-size", "512",

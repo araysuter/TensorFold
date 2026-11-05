@@ -23,6 +23,8 @@ def validate_body(body, name, context):
         raise ValueError('Invalid output token budget')
     if body.get('n', 1) != 1 or not isinstance(body.get('stream', False), bool):
         raise ValueError('One completion is supported')
+    if 'draft' in body and type(body['draft']) is not bool:
+        raise ValueError('draft must be a boolean')
     for key in ['temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty', 'presence_penalty',
                 'frequency_penalty', 'xtc_probability', 'xtc_threshold']:
         if key in body and (type(body[key]) not in (int, float) or not finite(body[key])):

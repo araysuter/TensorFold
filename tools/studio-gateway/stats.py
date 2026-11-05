@@ -16,6 +16,7 @@ LIMIT = 1024 * 1024
 COUNTERS = {
     "running", "waiting", "decode_tokens_per_second", "prefill_tokens_per_second",
     "fill_prompt_tokens", "fill_tokens_left", "generation_tokens_total", "prompt_tokens_total",
+    "draft_proposed_tokens_total", "draft_accepted_tokens_total", "draft_verify_calls_total",
 }
 MEMORY = {
     "physical_footprint_bytes", "lifetime_peak_physical_footprint_bytes", "device_active_bytes",

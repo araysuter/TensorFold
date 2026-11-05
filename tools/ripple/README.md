@@ -181,10 +181,12 @@ fresh/warm token equality, tenant separation and full-window SSD restoration.
 The native Swift/Ornith profiles continue to use the previously qualified
 session-enabled binary. Synchronizing upstream source does not replace that
 binary. Ripple uses the temporary MLX worker above, not a native TensorFold
-family. Its matching DFlash2 tensors have been prepared separately, but no
-Ripple-aware draft execution or acceptance verifier is qualified here. The
-temporary profile runs plain target decoding and reports `dflash2: false` on
-its private health endpoint; it does not claim drafter acceleration.
+family. The [matching DFlash2 implementation](DFLASH2.md) now supports strict
+target verification, synchronized draft/target KV, cancellation and SSD state.
+It uses an isolated MLX dispatcher build and preserves the single-token target
+arithmetic during verification. A stock MLX installation serves plain decoding.
+Follow the DFlash2 guide for the selected mixed-4/8-bit drafter, installation,
+measured speed and the distinction between short-context and full-window checks.
 
 The current upstream Ripple bring-up is tracked in
 [TensorFold #2171](https://github.com/ashhart/TensorFold/issues/2171); the stated

@@ -8,8 +8,10 @@ synchronizing this source tree does not upgrade that binary.
 The [Ripple MLX conversion experiment](tools/ripple/README.md) builds independent
 mixed-precision checkpoints from the original BF16 release. An optional temporary
 MLX worker adds `ripple-65b-preview` to the same API while native Ripple support
-is developed upstream. It supports text chat and private SSD KV restoration;
-Ripple DFlash2 and tool calling remain unqualified. Swift and Ornith retain their
+is developed upstream. It supports text chat and private SSD KV restoration.
+Its [matching DFlash2 runtime](tools/ripple/DFLASH2.md) has passed short-prompt
+target-token equality checks and improves measured generation speed; long-context
+qualification is recorded separately. Tool calling remains unsupported. Swift and Ornith retain their
 existing native engines and matching drafters.
 
 ## Models through one Studio API
