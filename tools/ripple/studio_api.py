@@ -195,6 +195,10 @@ def main(args):
         check('one_resident_model', row['max_resident_model_processes'] == 1)
         row['status'] = 'complete'
         save()
+    except BaseException as exc:
+        row['status'] = 'failed'
+        row['error_type'] = type(exc).__name__
+        raise
     finally:
         stop.set()
         save()

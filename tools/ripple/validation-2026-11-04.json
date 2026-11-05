@@ -453,8 +453,191 @@
     "tools/studio-gateway/config.py": "0a0e18e5f4063a3cc9f0daaa341377a03f5c89e070b48cad59ce30b1cb84966c"
   },
   "api_full_window": {
-    "status": "pending",
-    "scope": "Near-window generation and SSD state restoration; not long-context task accuracy"
+    "status": "complete",
+    "context": 131072,
+    "runtime": "temporary-mlx",
+    "dflash2": false,
+    "checks": {
+      "model_discovery_owner": true,
+      "model_discovery_guest": true,
+      "unauthenticated_refused": true,
+      "public_controls_refused": true,
+      "ripple_cold_answer": true,
+      "warm_followup": true,
+      "warm_equals_fresh_tokens": true,
+      "same_context_id_tenant_isolation": true,
+      "ssd_restore_positive_cache": true,
+      "ssd_restore_matches_fresh": true,
+      "streaming_usage_and_done": true,
+      "existing_model_swift-1.5": true,
+      "swap_back_from_swift-1.5": true,
+      "existing_model_ornith-1.5-122b-mixed-2bit": true,
+      "swap_back_from_ornith-1.5-122b-mixed-2bit": true,
+      "capacity_prompt_exact": true,
+      "capacity_generation": true,
+      "capacity_swap_to_swift": true,
+      "capacity_followup_fits": true,
+      "capacity_ssd_resume": true,
+      "one_resident_model": true
+    },
+    "max_resident_model_processes": 1,
+    "cold": {
+      "status": 200,
+      "seconds": 24.53383899992332,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 2,
+        "total_tokens": 25,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "948600cdff7616475e21aa89ad63670b45e5b23f411bf10aab910f8b19b0fc4a",
+      "finish_reason": "stop"
+    },
+    "warm": {
+      "status": 200,
+      "seconds": 0.5275267502292991,
+      "context_status": "resident",
+      "usage": {
+        "prompt_tokens": 46,
+        "completion_tokens": 2,
+        "total_tokens": 48,
+        "prompt_tokens_details": {
+          "cached_tokens": 25
+        }
+      },
+      "token_sha256": "a23833a588d10ec1231644ada21c353adffa825dea519ca42d722670c9b61e96",
+      "finish_reason": "stop"
+    },
+    "fresh": {
+      "status": 200,
+      "seconds": 0.680976209230721,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 46,
+        "completion_tokens": 2,
+        "total_tokens": 48,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "a23833a588d10ec1231644ada21c353adffa825dea519ca42d722670c9b61e96",
+      "finish_reason": "stop"
+    },
+    "guest": {
+      "status": 200,
+      "seconds": 0.6650744169019163,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 46,
+        "completion_tokens": 2,
+        "total_tokens": 48,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "a23833a588d10ec1231644ada21c353adffa825dea519ca42d722670c9b61e96",
+      "finish_reason": "stop"
+    },
+    "restored": {
+      "status": 200,
+      "seconds": 0.658480083104223,
+      "context_status": "resumed",
+      "usage": {
+        "prompt_tokens": 68,
+        "completion_tokens": 2,
+        "total_tokens": 70,
+        "prompt_tokens_details": {
+          "cached_tokens": 48
+        }
+      },
+      "token_sha256": "559b02bfdf0d255089e19c1f6f6a550011911c1d44511d9f7ed325aa46401055",
+      "finish_reason": "stop"
+    },
+    "existing_native_response": {
+      "status": 200,
+      "error": null
+    },
+    "capacity_marker_observed": true,
+    "capacity_cold": {
+      "status": 200,
+      "seconds": 519.5094479583204,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 130944,
+        "completion_tokens": 64,
+        "total_tokens": 131008,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "072e1d98b58f6913ef4876a0da5f4cba13f9fea11bbf91e031762daf4b2ee69d",
+      "finish_reason": "length"
+    },
+    "capacity_stats": {
+      "generation_tokens_total": 66,
+      "prompt_tokens_total": 130958,
+      "decode_tokens_per_second": 9.546074497651285,
+      "running": 0,
+      "fill_tokens_left": 0,
+      "prefill_tokens_per_second": 255.44103942747088,
+      "waiting": 0,
+      "fill_prompt_tokens": 130944,
+      "memory": {
+        "device_active_bytes": 47911979184,
+        "device_cache_bytes": 35363778,
+        "physical_footprint_bytes": 48570266232,
+        "device_peak_bytes": 49411807948
+      },
+      "gateway": {
+        "status": "ok",
+        "busy": false,
+        "model": "ripple-65b-preview",
+        "loaded_models": 1,
+        "queued": 0,
+        "context_window": 131072,
+        "idle_unload_seconds": 1800
+      }
+    },
+    "capacity_restored_marker_observed": true,
+    "full_context_task_accuracy_qualified": false,
+    "capacity_restored": {
+      "status": 200,
+      "seconds": 27.97974166693166,
+      "context_status": "resumed",
+      "usage": {
+        "prompt_tokens": 131023,
+        "completion_tokens": 32,
+        "total_tokens": 131055,
+        "prompt_tokens_details": {
+          "cached_tokens": 131008
+        }
+      },
+      "token_sha256": "8f9802b46bd8f7f982157837f70c9d0a4729452bad54cf76f27c06af17b29a04",
+      "finish_reason": "length"
+    },
+    "scope": "Functional capacity/cache/SSD check during authorized uploads, not a controlled throughput or long-context accuracy benchmark",
+    "prior_attempts": [
+      {
+        "attempt": 1,
+        "failed_check": "existing_model_swift-1.5",
+        "cause": "Probe requested logprobs from the older native executable; removed for those native smoke calls"
+      },
+      {
+        "attempt": 2,
+        "failed_check": "capacity_followup_fits",
+        "cause": "131000 input plus 64 actual output left no room for another turn"
+      },
+      {
+        "attempt": 3,
+        "failed_check": "capacity_answer",
+        "input_tokens": 130944,
+        "stop": ".",
+        "scope": "Brittle stop/needle assertion; actual reply was not retained, so cause is unconfirmed"
+      }
+    ]
   },
   "coordination": {
     "atc_complete": false,
@@ -463,11 +646,81 @@
       "pull_requests": [
         4,
         5,
-        6
+        6,
+        7
       ],
       "all_heads_are_ancestors_of_source_base": true,
       "upstream_sync_changed_files": 4828,
       "worktree_conflicts": []
     }
-  }
+  },
+  "production_https": {
+    "status": "complete",
+    "runtime": "temporary-mlx",
+    "dflash2": false,
+    "checks": {
+      "owner_discovers_three_models": true,
+      "friend_discovers_three_models": true,
+      "unauthenticated_refused": true,
+      "private_controls_refused": true,
+      "ripple_https_generation": true,
+      "https_followup_reuses_cache": true,
+      "https_streaming_and_usage": true,
+      "unsupported_tools_refused": true
+    },
+    "cold": {
+      "seconds": 13.207982916850597,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 2,
+        "total_tokens": 25,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "948600cdff7616475e21aa89ad63670b45e5b23f411bf10aab910f8b19b0fc4a"
+    },
+    "warm": {
+      "seconds": 0.7097576661035419,
+      "context_status": "resident",
+      "usage": {
+        "prompt_tokens": 46,
+        "completion_tokens": 2,
+        "total_tokens": 48,
+        "prompt_tokens_details": {
+          "cached_tokens": 25
+        }
+      },
+      "token_sha256": "a23833a588d10ec1231644ada21c353adffa825dea519ca42d722670c9b61e96"
+    }
+  },
+  "tested_runtime_commit": "57e3d4ab89e74552d0787c7195125104951dc906",
+  "native_serving_binary_sha256": "06cb7d1f4a11a88db7494a39f7b2082112facfa348cc38e6c36cff65a28b00a0",
+  "hugging_face": [
+    {
+      "repo_id": "araysuter/Ripple-65B-Preview-MLX-mixed-4bit",
+      "revision": "5f064cd653c5f32a398e85f0371ed0415132deb5",
+      "public": true,
+      "hash_readback_verified": true,
+      "base_model": "ricursiveAI/Ripple-65B-Preview",
+      "base_model_relation": "quantized"
+    },
+    {
+      "repo_id": "araysuter/Ripple-65B-Preview-MLX-mixed-2bit",
+      "revision": "d92b65366b5fb03b167041e84c046f9dc9953164",
+      "public": true,
+      "hash_readback_verified": true,
+      "base_model": "ricursiveAI/Ripple-65B-Preview",
+      "base_model_relation": "quantized"
+    },
+    {
+      "repo_id": "araysuter/Ripple-65B-Preview-MLX-mixed-1bit",
+      "revision": "73dec04ce6383e898a57e8fe8a45f41d726070d1",
+      "public": true,
+      "hash_readback_verified": true,
+      "base_model": "ricursiveAI/Ripple-65B-Preview",
+      "base_model_relation": "quantized"
+    }
+  ]
 }

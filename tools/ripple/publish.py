@@ -58,6 +58,8 @@ def prepare(args):
         (model / 'VALIDATION.json').write_text(json.dumps(validation, indent=2) + '\n')
         repo = f'araysuter/Ripple-65B-Preview-MLX-mixed-{bits}bit'
         extra = ('**Experimental low-bit MLP quantization. Expect substantial quality loss; this is not a reliable agent model.**\n\n'
+                 'The Hub automatic parameter counter does not recognize this one-bit packing at release. '
+                 'All 64,782,689,360 source parameters are retained; this is not a pruned 19B model.\n\n'
                  if bits == 1 else '**Reduced-fidelity variant. A smoke probe produced an incorrect `is_prime` function; '
                  'prefer mixed-4bit when memory permits.**\n\n' if bits == 2 else '')
         paging = capacity['after_paging']['swapouts'] - capacity['before_paging']['swapouts']
@@ -85,7 +87,7 @@ tags:
 
 {extra}Converted independently from the original instruction-tuned BF16 checkpoint,
 revision `{conversion['source_revision']}`. No existing quantized model was requantized.
-The pretraining-only Ripple Base model was not used.
+The pretraining-only Ripple Base model was not used. All **{conversion['source_parameters']:,} source parameters** are retained.
 
 | Stored component | Precision |
 | --- | --- |

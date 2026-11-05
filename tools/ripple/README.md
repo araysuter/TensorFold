@@ -132,7 +132,8 @@ base URL and API key as the other configured models. Send complete text message
 history and optionally a stable `X-TensorFold-Context` header. The 131,072-token
 limit counts the rendered prompt plus requested output budget. It rejects an
 oversized request instead of truncating history. The temporary worker supports
-one text completion per request, streaming, sampling, token usage and logprobs.
+one text completion per request, streaming, sampling, token usage and non-stream
+logprobs.
 Use `stream: true` for long prompts so prefill keepalives keep the tunnel active.
 Tools, images, JSON-schema constraints, Responses and Anthropic Messages are not
 implemented by this temporary Ripple profile; they are rejected.
@@ -152,6 +153,15 @@ download or select arbitrary checkpoints or adapters. The default 512-token
 prompt chunks were compared with 256 on identical cold 2K/8K/32K inputs. The
 process has a 54 GiB MLX allocation limit and a 56 GiB physical-footprint guard.
 The whole 64 GiB machine still needs memory for macOS and other applications.
+
+The [Studio receipt](validation-2026-11-04.json) records a 130,944-token cold API
+prompt, a switch through Swift, and restoration of 131,008 cached tokens for a
+131,023-token follow-up. Only 15 new prompt tokens needed processing. At most one
+model process was observed. This was a capacity/cache check during uploads, not
+a task-accuracy benchmark; its replies reached their requested output caps.
+The separate target-only capacity probe peaked at 46.33 GiB. Production HTTPS
+generation, streaming, both existing credentials and a short warm turn passed;
+the short warm request took about 0.71 seconds, including its two output tokens.
 
 ```sh
 python3 tools/ripple/test_worker.py --source /path/to/original-bf16
