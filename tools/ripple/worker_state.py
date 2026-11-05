@@ -101,7 +101,7 @@ class ResidentState:
                 or metadata.get('0.identity') != self.identity):
             raise ValueError('Snapshot model/build mismatch')
         tokens = json.loads(metadata.get('0.tokens', 'null'))
-        if (not isinstance(tokens, list) or not 0 < len(tokens) < self.context
+        if (not isinstance(tokens, list) or not 0 < len(tokens) <= self.context
                 or any(type(t) is not int or not 0 <= t < self.args.vocab_size for t in tokens)):
             raise ValueError('Invalid saved token history')
         expected = ['RotatingKVCache' if t == 'sliding_attention' else 'KVCache' for t in self.args.layer_types]
@@ -118,13 +118,25 @@ class ResidentState:
         finally:
             Path(temporary).unlink(missing_ok=True)
         try:
+            if len(cache) != len(expected):
+                raise ValueError('Missing saved cache entries')
             for index, c in enumerate(cache):
-                if int(c.offset) != len(tokens):
+                if type(c.offset) is not int or c.offset != len(tokens):
                     raise ValueError('Invalid saved cache offset')
                 local = expected[index] == 'RotatingKVCache'
-                bound = self.args.sliding_window + 512 if local else self.context + 256
-                if local and (c.max_size != self.args.sliding_window or c.keep != 0 or not 0 <= c._idx <= bound):
+                window = getattr(self.args, 'cache_windows', [self.args.sliding_window] * len(expected))[index]
+                bound = window + 2048 if local else self.context + 256
+                if c.keys is None or c.values is None or c.keys.shape != c.values.shape:
+                    raise ValueError('Inconsistent KV shapes')
+                if c.keys.ndim != 4:
+                    raise ValueError('Invalid saved KV rank')
+                if local and any(type(value) is not int for value in [c._idx, c.max_size, c.keep]):
+                    raise ValueError('Invalid rotating cache coordinates')
+                if local and (c.max_size != window or c.keep != 0 or not 0 <= c._idx <= c.keys.shape[2]):
                     raise ValueError('Invalid rotating cache state')
+                minimum = min(len(tokens), window) if local else len(tokens)
+                if c.keys.shape[2] < minimum or (local and len(tokens) <= window and c._idx != len(tokens)):
+                    raise ValueError('Missing saved KV history')
                 for array in (c.keys, c.values):
                     if (array is None or array.dtype != mx.bfloat16 or array.ndim != 4
                             or array.shape[0] != 1 or array.shape[1] != self.args.num_key_value_heads

@@ -21,6 +21,10 @@ from mlx_lm.models.cache import make_prompt_cache
 from modeling_ricursive_mlx import ModelArgs
 from probe import footprint
 from worker_state import ResidentState
+from dflash_model import DraftArgs, load_draft
+from dflash_target import DraftedTarget
+from dflash_generate import stream_generate as dflash_stream_generate
+from dflash_runtime import verify_runtime
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'studio-gateway'))
 from config import KeyFile
@@ -29,13 +33,16 @@ from errors import GatewayError
 from text_chat import validate_body
 
 
-def build_identity(model):
+def build_identity(model, drafter=None):
     value = hashlib.sha256()
     for file in [Path(__file__), Path(__file__).with_name('worker_state.py'), Path(__file__).with_name('probe.py'),
                  Path(__file__).with_name('modeling_ricursive_mlx.py'),
                  model / 'config.json', model / 'model.safetensors.index.json',
                  model / 'conversion-receipt.json', model / 'modeling_ricursive_mlx.py',
-                 model / 'tokenizer.json', model / 'tokenizer_config.json']:
+                 model / 'tokenizer.json', model / 'tokenizer_config.json',
+                 *[Path(__file__).with_name(name) for name in
+                   ['dflash_model.py', 'dflash_target.py', 'dflash_generate.py',
+                    'dflash_exact.py', 'dflash_runtime.py']]]:
         value.update(file.read_bytes())
     index = json.loads((model / 'model.safetensors.index.json').read_text())
     for name in sorted(set(index['weight_map'].values())):
@@ -43,11 +50,23 @@ def build_identity(model):
         value.update(f'{name}:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}'.encode())
     for package in ['mlx', 'mlx-lm', 'transformers']:
         value.update(f'{package}={importlib.metadata.version(package)}'.encode())
+    if drafter is not None:
+        for name in ['config.json', 'conversion-receipt.json']:
+            value.update((drafter / name).read_bytes())
+        info = (drafter / 'model.safetensors').stat()
+        value.update(f'drafter:{info.st_ino}:{info.st_size}:{info.st_mtime_ns}'.encode())
     value.update(os.environ.get('TF_SESSION_BUILD_ID', '').encode())
     return value.hexdigest()
 
 
 class LocalProvider(api.ModelProvider):
+    def _load(self, *args, **kwargs):
+        super()._load(*args, **kwargs)
+        if self.cli_args.dflash_drafter is not None:
+            self.model = DraftedTarget(self.model, load_draft(self.cli_args.dflash_drafter),
+                                       exact_verification=self.cli_args.dflash_exact_verify)
+        self.is_batchable = False
+
     def load(self, model_path, adapter_path=None, draft_model_path=None):
         if model_path not in ('default_model', self.cli_args.name) or adapter_path or draft_model_path not in (None, 'default_model'):
             raise ValueError('Only the configured local model is available')
@@ -123,23 +142,30 @@ class Engine(api.ResponseGenerator):
                 responses.put((done, total))
 
             matcher = stops.matcher()
-            for gen in api.stream_generate(model, tokenizer, prompt[reused:], max_tokens=args.max_tokens,
-                                           sampler=api._make_sampler(args, tokenizer), logits_processors=processors,
-                                           prompt_cache=cache, prefill_step_size=self.cli_args.prefill_step_size,
-                                           prompt_progress_callback=progress, stream=stream):
-                generated += 1
-                if first is None:
-                    first = time.monotonic()
-                finish = 'stop' if matcher.advance(gen.token) else gen.finish_reason
-                history.append(gen.token)
-                responses.put(api.Response(gen.text, gen.token, gen.logprobs[gen.token].item(), finish,
-                                           api._format_top_logprobs(gen.logprobs, args.top_logprobs, tokenizer)))
-                if finish is not None or ctx._should_stop:
-                    break
+            use_draft = isinstance(model, DraftedTarget) and getattr(request, 'use_draft', True)
+            generate = dflash_stream_generate if use_draft else api.stream_generate
+            iterator = generate(model, tokenizer, prompt[reused:], max_tokens=args.max_tokens,
+                                sampler=api._make_sampler(args, tokenizer), logits_processors=processors,
+                                prompt_cache=cache, prefill_step_size=self.cli_args.prefill_step_size,
+                                prompt_progress_callback=progress, stream=stream)
+            try:
+                for gen in iterator:
+                    generated += 1
+                    if first is None:
+                        first = time.monotonic()
+                    finish = 'stop' if matcher.advance(gen.token) else gen.finish_reason
+                    history.append(gen.token)
+                    responses.put(api.Response(gen.text, gen.token, gen.logprobs[gen.token].item(), finish,
+                                               api._format_top_logprobs(gen.logprobs, args.top_logprobs, tokenizer)))
+                    if finish is not None or ctx._should_stop:
+                        break
+            finally:
+                iterator.close()
             mx.eval([c.state for c in cache])
             self.state.commit(history, cache)
             self.stats['prompt_tokens_total'] += len(prompt) - reused
             self.stats['generation_tokens_total'] += generated
+            self.stats.update(getattr(model, 'counters', {}))
             self.stats.update(prefill_tokens_per_second=(len(prompt) - reused) / max((first or started) - started, 1e-6),
                               decode_tokens_per_second=max(0, generated - 1) / max(time.monotonic() - (first or started), 1e-6),
                               fill_tokens_left=0)
@@ -161,6 +187,10 @@ class Handler(api.APIHandler):
 
     def log_message(self, *args):
         pass
+
+    def handle_completion(self, request, stop_words):
+        request.use_draft = self._use_draft
+        return super().handle_completion(request, stop_words)
 
     def _authorized(self):
         try:
@@ -190,7 +220,8 @@ class Handler(api.APIHandler):
         if self.path == '/health':
             healthy = engine.ready.is_set() and engine.is_healthy
             self._json(200 if healthy else 503, {'status': 'ok' if healthy else 'loading',
-                       'runtime': 'temporary-mlx', 'dflash2': False, 'context': engine.cli_args.context})
+                       'runtime': 'temporary-mlx', 'dflash2': engine.cli_args.dflash_drafter is not None,
+                       'context': engine.cli_args.context})
         elif self.path == '/v1/models':
             self._json(200, {'object': 'list', 'data': [{'id': engine.cli_args.name, 'object': 'model'}]})
         elif self.path == '/stats':
@@ -233,6 +264,7 @@ class Handler(api.APIHandler):
             if self.path == '/v1/imprint/resume':
                 self._json(200, engine.control(lambda: {'ram_tokens': engine.state.resumable(prompt)}))
             elif self.path == '/v1/chat/completions':
+                self._use_draft = body.get('draft', True)
                 body['model'] = engine.cli_args.name
                 if body.get('stream_options') is not None:
                     body['stream_options'].setdefault('include_usage', False)
@@ -255,11 +287,24 @@ def main():
     parser.add_argument('--snapshot-dir', type=Path, required=True)
     parser.add_argument('--context', type=int, default=131072)
     parser.add_argument('--prefill-step-size', type=int, default=512)
+    parser.add_argument('--dflash-drafter', type=Path)
+    parser.add_argument('--dflash-exact-verify', action='store_true')
+    parser.add_argument('--mlx-build-receipt', type=Path)
     args = parser.parse_args()
+    os.environ.pop('MLX_RIPPLE_EXACT_VERIFY', None)
+    if args.dflash_drafter is not None and not args.dflash_exact_verify:
+        raise ValueError('Serving DFlash2 requires the isolated, verified MLX arithmetic path')
+    runtime_identity = ''
+    if args.dflash_exact_verify:
+        if args.dflash_drafter is None or args.mlx_build_receipt is None:
+            raise ValueError('Exact verification requires a drafter and isolated MLX build receipt')
+        runtime_identity = verify_runtime(args.mlx_build_receipt)
     if importlib.metadata.version('mlx-lm') != '0.32.2':
         raise ValueError('This worker is qualified with MLX-LM 0.32.2 only')
     if not 128 <= args.context <= 131072 or args.prefill_step_size not in (128, 256, 512):
         raise ValueError('Unqualified context or prompt chunk size')
+    if args.dflash_drafter is not None and args.prefill_step_size != 512:
+        raise ValueError('The DFlash2 serving profile is qualified with 512-token prompt chunks')
     if (args.model / 'CONVERSION_INCOMPLETE').exists():
         raise ValueError('Incomplete model conversion')
     os.umask(0o077)
@@ -267,7 +312,15 @@ def main():
     mx.set_memory_limit(54 * 1024**3)
     mx.set_cache_limit(128 * 1024**2)
     config = json.loads((args.model / 'config.json').read_text())
-    state = ResidentState(args.snapshot_dir, build_identity(args.model), ModelArgs.from_dict(config), args.context)
+    model_args = ModelArgs.from_dict(config)
+    schema = SimpleNamespace(**vars(model_args))
+    schema.cache_windows = [model_args.sliding_window] * model_args.num_hidden_layers
+    if args.dflash_drafter is not None:
+        draft = DraftArgs.from_dict(json.loads((args.dflash_drafter / 'config.json').read_text()))
+        schema.layer_types = model_args.layer_types + draft.layer_types
+        schema.cache_windows += [draft.sliding_window] * draft.num_hidden_layers
+    identity = build_identity(args.model, args.dflash_drafter) + runtime_identity
+    state = ResidentState(args.snapshot_dir, identity, schema, args.context)
     cli = SimpleNamespace(**vars(args), adapter_path=None, draft_model=None, pipeline=False,
                           trust_remote_code=True, chat_template=None, chat_template_args={},
                           use_default_chat_template=False, num_draft_tokens=0, max_tokens=4096,

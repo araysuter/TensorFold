@@ -1,0 +1,465 @@
+{
+  "schema": "ripple-dflash-validation-v1",
+  "tested_core_commit": "b64cd6aac21d824a07900799cd21d9893b7f9a52",
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "gpu_cores": 40,
+    "ram_gib": 64,
+    "os": "macOS 27.0.1"
+  },
+  "target_revision": "4f308b9954b73cd200812095916c7baf68cf27f4",
+  "drafter_revision": "35609b3be3dd08a822b3ba1257c1ea5dd6f87632",
+  "settings": {
+    "context": 131072,
+    "prefill_step_size": 512,
+    "verification_block_size": 4,
+    "adaptive_blocks": false,
+    "allocator_cache_mib": 128,
+    "target_weight_bytes": 39053609120,
+    "drafter_weight_bytes": 2477500928,
+    "kv": "BF16"
+  },
+  "runtime": "temporary MLX profile, not a native TensorFold family",
+  "mlx_base_version": "0.32.4",
+  "mlx_lm_version": "0.32.2",
+  "mlx_dispatch_patch": "mlx-0.32.4-exact-verify.patch",
+  "native_binary_sha256": "06cb7d1f4a11a88db7494a39f7b2082112facfa348cc38e6c36cff65a28b00a0",
+  "native_binary_changed": false,
+  "tests": {
+    "gateway": 46,
+    "benchmark": 11,
+    "comparison": 7,
+    "cache": 25,
+    "decoder": 10,
+    "exact_attention": 12,
+    "architecture": 11,
+    "conversion": 7,
+    "original_worker": 7,
+    "draft_worker": 9
+  },
+  "test_status": "Passed on the scoped local/Studio environments; CI is separate",
+  "api_full_window": {
+    "status": "complete",
+    "context": 131072,
+    "runtime": "temporary-mlx",
+    "dflash2": true,
+    "checks": {
+      "model_discovery_owner": true,
+      "model_discovery_guest": true,
+      "unauthenticated_refused": true,
+      "public_controls_refused": true,
+      "ripple_cold_answer": true,
+      "draft_verification_active": true,
+      "warm_followup": true,
+      "warm_equals_fresh_tokens": true,
+      "same_context_id_tenant_isolation": true,
+      "ssd_restore_positive_cache": true,
+      "ssd_restore_matches_fresh": true,
+      "streaming_usage_and_done": true,
+      "existing_model_swift-1.5": true,
+      "swap_back_from_swift-1.5": true,
+      "existing_model_ornith-1.5-122b-mixed-2bit": true,
+      "swap_back_from_ornith-1.5-122b-mixed-2bit": true,
+      "api_seeded_plain_drafted_identity": true,
+      "capacity_prompt_exact": true,
+      "capacity_generation": true,
+      "capacity_swap_to_swift": true,
+      "capacity_followup_fits": true,
+      "capacity_ssd_resume": true,
+      "one_resident_model": true
+    },
+    "max_resident_model_processes": 1,
+    "cold": {
+      "status": 200,
+      "seconds": 17.022568999789655,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 2,
+        "total_tokens": 25,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "948600cdff7616475e21aa89ad63670b45e5b23f411bf10aab910f8b19b0fc4a",
+      "finish_reason": "stop"
+    },
+    "warm": {
+      "status": 200,
+      "seconds": 0.4985674172639847,
+      "context_status": "resident",
+      "usage": {
+        "prompt_tokens": 46,
+        "completion_tokens": 2,
+        "total_tokens": 48,
+        "prompt_tokens_details": {
+          "cached_tokens": 24
+        }
+      },
+      "token_sha256": "a23833a588d10ec1231644ada21c353adffa825dea519ca42d722670c9b61e96",
+      "finish_reason": "stop"
+    },
+    "fresh": {
+      "status": 200,
+      "seconds": 0.6044364999979734,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 46,
+        "completion_tokens": 2,
+        "total_tokens": 48,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "a23833a588d10ec1231644ada21c353adffa825dea519ca42d722670c9b61e96",
+      "finish_reason": "stop"
+    },
+    "guest": {
+      "status": 200,
+      "seconds": 0.6006210409104824,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 46,
+        "completion_tokens": 2,
+        "total_tokens": 48,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "a23833a588d10ec1231644ada21c353adffa825dea519ca42d722670c9b61e96",
+      "finish_reason": "stop"
+    },
+    "restored": {
+      "status": 200,
+      "seconds": 0.5691595412790775,
+      "context_status": "resumed",
+      "usage": {
+        "prompt_tokens": 68,
+        "completion_tokens": 2,
+        "total_tokens": 70,
+        "prompt_tokens_details": {
+          "cached_tokens": 47
+        }
+      },
+      "token_sha256": "559b02bfdf0d255089e19c1f6f6a550011911c1d44511d9f7ed325aa46401055",
+      "finish_reason": "stop"
+    },
+    "existing_native_response": {
+      "status": 200,
+      "error": null
+    },
+    "plain_control": {
+      "status": 200,
+      "seconds": 5.912298874929547,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 27,
+        "completion_tokens": 64,
+        "total_tokens": 91,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "face83df35115dc46c0169cef3a5b12384fcee901af0684276ee7f12a548fdf9",
+      "finish_reason": "length"
+    },
+    "draft_control": {
+      "status": 200,
+      "seconds": 2.9968902082182467,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 27,
+        "completion_tokens": 64,
+        "total_tokens": 91,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "face83df35115dc46c0169cef3a5b12384fcee901af0684276ee7f12a548fdf9",
+      "finish_reason": "length"
+    },
+    "capacity_marker_observed": true,
+    "capacity_cold": {
+      "status": 200,
+      "seconds": 518.6823434168473,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 130944,
+        "completion_tokens": 64,
+        "total_tokens": 131008,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "072e1d98b58f6913ef4876a0da5f4cba13f9fea11bbf91e031762daf4b2ee69d",
+      "finish_reason": "length"
+    },
+    "capacity_stats": {
+      "draft_verify_calls_total": 37,
+      "running": 0,
+      "fill_tokens_left": 0,
+      "waiting": 0,
+      "fill_prompt_tokens": 130944,
+      "draft_proposed_tokens_total": 106,
+      "prompt_tokens_total": 131013,
+      "draft_accepted_tokens_total": 91,
+      "decode_tokens_per_second": 12.442905314706085,
+      "generation_tokens_total": 194,
+      "prefill_tokens_per_second": 255.09545657158594,
+      "memory": {
+        "device_cache_bytes": 134335646,
+        "physical_footprint_bytes": 51673168232,
+        "device_active_bytes": 50995262190,
+        "device_peak_bytes": 52722686690
+      },
+      "gateway": {
+        "status": "ok",
+        "busy": false,
+        "model": "ripple-65b-preview",
+        "loaded_models": 1,
+        "queued": 0,
+        "context_window": 131072,
+        "idle_unload_seconds": 1800
+      }
+    },
+    "capacity_restored_marker_observed": true,
+    "full_context_task_accuracy_qualified": false,
+    "capacity_restored": {
+      "status": 200,
+      "seconds": 28.55844366690144,
+      "context_status": "resumed",
+      "usage": {
+        "prompt_tokens": 131023,
+        "completion_tokens": 32,
+        "total_tokens": 131055,
+        "prompt_tokens_details": {
+          "cached_tokens": 131007
+        }
+      },
+      "token_sha256": "8f9802b46bd8f7f982157837f70c9d0a4729452bad54cf76f27c06af17b29a04",
+      "finish_reason": "length"
+    }
+  },
+  "production_https": {
+    "status": "complete",
+    "source_commit": "b64cd6aac21d824a07900799cd21d9893b7f9a52",
+    "previous_source_commit": "1523b6b368859a47144e82305d15ac975b0d2d06",
+    "checks": {
+      "native_profile_unchanged_swift-1.5": true,
+      "native_profile_unchanged_ornith-1.5-122b-mixed-2bit": true,
+      "global_settings_unchanged": true,
+      "https_models_owner": true,
+      "https_models_friend": true,
+      "https_unauthenticated_refused": true,
+      "https_native_swift-1.5": true,
+      "https_native_ornith-1.5-122b-mixed-2bit": true,
+      "solo_ripple": true,
+      "concurrent_equals_solo": true,
+      "https_ripple_answer": true,
+      "https_ripple_warm_cache": true,
+      "https_tenant_isolation": true,
+      "https_streaming": true,
+      "production_drafter_active": true,
+      "one_resident_model": true,
+      "native_binary_unchanged": true
+    },
+    "max_resident_model_processes": 1,
+    "native_binary_before_sha256": "06cb7d1f4a11a88db7494a39f7b2082112facfa348cc38e6c36cff65a28b00a0",
+    "concurrent": [
+      {
+        "status": 200,
+        "seconds": 6.0728445420973,
+        "context_status": "cold",
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 64,
+          "total_tokens": 85,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "token_sha256": "face83df35115dc46c0169cef3a5b12384fcee901af0684276ee7f12a548fdf9",
+        "finish_reason": "length"
+      },
+      {
+        "status": 200,
+        "seconds": 3.106381915975362,
+        "context_status": "cold",
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 64,
+          "total_tokens": 85,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "token_sha256": "face83df35115dc46c0169cef3a5b12384fcee901af0684276ee7f12a548fdf9",
+        "finish_reason": "length"
+      }
+    ],
+    "solo": {
+      "status": 200,
+      "seconds": 19.145176332909614,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 21,
+        "completion_tokens": 64,
+        "total_tokens": 85,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "face83df35115dc46c0169cef3a5b12384fcee901af0684276ee7f12a548fdf9",
+      "finish_reason": "length"
+    },
+    "native_binary_after_sha256": "06cb7d1f4a11a88db7494a39f7b2082112facfa348cc38e6c36cff65a28b00a0",
+    "cold": {
+      "status": 200,
+      "seconds": 0.7861621249467134,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 23,
+        "completion_tokens": 2,
+        "total_tokens": 25,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "948600cdff7616475e21aa89ad63670b45e5b23f411bf10aab910f8b19b0fc4a",
+      "finish_reason": "stop"
+    },
+    "warm": {
+      "status": 200,
+      "seconds": 0.5978145832195878,
+      "context_status": "resident",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 2,
+        "total_tokens": 46,
+        "prompt_tokens_details": {
+          "cached_tokens": 24
+        }
+      },
+      "token_sha256": "a23833a588d10ec1231644ada21c353adffa825dea519ca42d722670c9b61e96",
+      "finish_reason": "stop"
+    },
+    "stats": {
+      "generation_tokens_total": 200,
+      "running": 0,
+      "draft_accepted_tokens_total": 141,
+      "prefill_tokens_per_second": 114.98349226783608,
+      "decode_tokens_per_second": 6.459348509269369,
+      "waiting": 0,
+      "fill_tokens_left": 0,
+      "prompt_tokens_total": 194,
+      "draft_proposed_tokens_total": 159,
+      "fill_prompt_tokens": 44,
+      "draft_verify_calls_total": 55,
+      "memory": {
+        "device_peak_bytes": 41806593618,
+        "device_cache_bytes": 134942632,
+        "physical_footprint_bytes": 42192042272,
+        "device_active_bytes": 41562321646
+      },
+      "gateway": {
+        "status": "ok",
+        "busy": false,
+        "model": "ripple-65b-preview",
+        "loaded_models": 1,
+        "queued": 0,
+        "context_window": 131072,
+        "idle_unload_seconds": 1800
+      }
+    }
+  },
+  "prior_plain_full_window": {
+    "capacity_cold": {
+      "status": 200,
+      "seconds": 519.5094479583204,
+      "context_status": "cold",
+      "usage": {
+        "prompt_tokens": 130944,
+        "completion_tokens": 64,
+        "total_tokens": 131008,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "token_sha256": "072e1d98b58f6913ef4876a0da5f4cba13f9fea11bbf91e031762daf4b2ee69d",
+      "finish_reason": "length"
+    },
+    "capacity_restored": {
+      "status": 200,
+      "seconds": 27.97974166693166,
+      "context_status": "resumed",
+      "usage": {
+        "prompt_tokens": 131023,
+        "completion_tokens": 32,
+        "total_tokens": 131055,
+        "prompt_tokens_details": {
+          "cached_tokens": 131008
+        }
+      },
+      "token_sha256": "8f9802b46bd8f7f982157837f70c9d0a4729452bad54cf76f27c06af17b29a04",
+      "finish_reason": "length"
+    },
+    "capacity_stats": {
+      "generation_tokens_total": 66,
+      "prompt_tokens_total": 130958,
+      "decode_tokens_per_second": 9.546074497651285,
+      "running": 0,
+      "fill_tokens_left": 0,
+      "prefill_tokens_per_second": 255.44103942747088,
+      "waiting": 0,
+      "fill_prompt_tokens": 130944,
+      "memory": {
+        "device_active_bytes": 47911979184,
+        "device_cache_bytes": 35363778,
+        "physical_footprint_bytes": 48570266232,
+        "device_peak_bytes": 49411807948
+      },
+      "gateway": {
+        "status": "ok",
+        "busy": false,
+        "model": "ripple-65b-preview",
+        "loaded_models": 1,
+        "queued": 0,
+        "context_window": 131072,
+        "idle_unload_seconds": 1800
+      }
+    }
+  },
+  "full_window_comparison": {
+    "cold_tokens_identical": true,
+    "restored_tokens_identical": true,
+    "plain_decode_tps": 9.546074497651285,
+    "draft_decode_tps": 12.442905314706085,
+    "plain_prefill_tps": 255.44103942747088,
+    "draft_prefill_tps": 255.09545657158594,
+    "scope": "Separate capacity runs with the same synthetic prompt generator and checkpoint; not an interleaved study"
+  },
+  "coordination": {
+    "atc_complete": false,
+    "limitation": "pullFilesLimit on the inherited upstream-sync PR",
+    "fork_pr_overlap_count": 0,
+    "worktree_overlap_count": 0,
+    "local_worktrees_inspected": 3,
+    "supplemental_git_coverage": {
+      "full_sync_files": 4828,
+      "all_open_fork_heads_ancestor_of_parent": true,
+      "parent": "1523b6b368859a47144e82305d15ac975b0d2d06"
+    }
+  },
+  "lean": {
+    "base": 425,
+    "head": 425,
+    "new": 0,
+    "files": 5427
+  },
+  "limits": [
+    "No native Ripple or other GPU/OS qualification",
+    "No new model-quality benchmark score",
+    "Synthetic full-window fit/marker tests do not qualify long-context accuracy",
+    "Peak MLX allocation is a device allocator metric; process physical footprint is sampled separately"
+  ]
+}

@@ -116,6 +116,16 @@ class StateTests(unittest.TestCase):
 
 
 class HTTPTests(unittest.TestCase):
+    DRAFT = False
+
+    @classmethod
+    def fixture_model(cls):
+        return small_model(100352)
+
+    @classmethod
+    def extra_arguments(cls, root):
+        return []
+
     @classmethod
     def setUpClass(cls):
         if SOURCE is None:
@@ -124,7 +134,7 @@ class HTTPTests(unittest.TestCase):
         root = Path(cls.directory.name)
         model_path = root / 'model'
         model_path.mkdir()
-        model, args = small_model(100352)
+        model, args = cls.fixture_model()
         tensors = dict(tree_flatten(model.parameters()))
         mx.save_safetensors(str(model_path / 'model.safetensors'), tensors)
         config = vars(args) | {'model_file': 'modeling_ricursive_mlx.py'}
@@ -148,7 +158,7 @@ class HTTPTests(unittest.TestCase):
         cls.log = (root / 'worker.log').open('wb')
         command = [sys.executable, str(Path(__file__).with_name('worker.py')), '--model', str(model_path),
                    '--name', 'ripple-test', '--context', '512', '--port', str(cls.port),
-                   '--snapshot-dir', str(cls.snapshots), '--api-key-file', str(keyfile)]
+                   '--snapshot-dir', str(cls.snapshots), '--api-key-file', str(keyfile)] + cls.extra_arguments(root)
         cls.process = subprocess.Popen(command, stdout=cls.log, stderr=cls.log)
         for _ in range(300):
             try:
@@ -192,7 +202,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(raw)['data'][0]['id'], 'ripple-test')
         self.assertNotIn(str(Path.home()), raw)
-        self.assertFalse(json.loads(self.request('GET', '/health')[1])['dflash2'])
+        self.assertEqual(json.loads(self.request('GET', '/health')[1])['dflash2'], self.DRAFT)
 
     def test_unsupported_features_and_total_context_budget_refused(self):
         for options in [{'tools': []}, {'draft_model': 'external/model'}, {'max_tokens': 512},

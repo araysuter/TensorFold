@@ -8,14 +8,17 @@ synchronizing this source tree does not upgrade that binary.
 The [Ripple MLX conversion experiment](tools/ripple/README.md) builds independent
 mixed-precision checkpoints from the original BF16 release. An optional temporary
 MLX worker adds `ripple-65b-preview` to the same API while native Ripple support
-is developed upstream. It supports text chat and private SSD KV restoration;
-Ripple DFlash2 and tool calling remain unqualified. Swift and Ornith retain their
+is developed upstream. It supports text chat and private SSD KV restoration.
+Its [matching DFlash2 runtime](tools/ripple/DFLASH2.md) passes matched token checks,
+improves short-prompt generation from about 12 to 16–22 tokens/sec, and fits the
+128K capacity/SSD test at 49.1 GiB peak MLX allocation. Prompt processing remains
+about 255 tokens/sec at the full window. Tool calling remains unsupported. Swift and Ornith retain their
 existing native engines and matching drafters.
 
 ## Models through one Studio API
 
-The [Studio gateway](tools/studio-gateway/README.md) exposes Swift-1.5 and our
-smallest Ornith-1.5-122B MLX quant through the same API. It loads **one model and
+The [Studio gateway](tools/studio-gateway/README.md) exposes Swift-1.5, our
+smallest Ornith-1.5-122B quant and the optional Ripple MLX profile through one API. It loads **one model and
 its DFlash2 drafter at a time**, keeps the most recently used conversation in
 RAM, and parks up to four additional conversations per model on SSD. After
 30 minutes idle, it saves the conversation and unloads the engine. Temporary
@@ -32,6 +35,12 @@ DFlash2 drafters.
 | --- | --- | --- |
 | [Swift-1.5 affine 4-bit](https://huggingface.co/ukisai/Swift-1.5-4bit-MLX) | 15.83 GB / 14.74 GiB | **175/189 — 92.6%** |
 | [Ornith-1.5-122B mixed 2-bit](https://huggingface.co/araysuter/Ornith-1.5-122B-MLX-mixed-2bit) | 40.62 GB / 37.83 GiB | **157/189 — 83.1%** |
+
+[Ripple mixed-4bit](https://huggingface.co/araysuter/Ripple-65B-Preview-MLX-mixed-4bit)
+uses 39.05 GB of target weights plus the selected 2.48 GB drafter. Its
+[runtime receipt](tools/ripple/DFLASH2.md) covers speed and 128K capacity; there
+is no matched GPQA result for Ripple here. The conversion's 89.75% synthetic
+top-token agreement is a separate fidelity diagnostic, not a task score.
 
 These are [our local results](benchmarks/studio/charts/studio-model-gateway-2026-10-22/gpqa-summary.json),
 not the model authors' scores. The cleaned set
