@@ -22,7 +22,6 @@
     {
       "id": "swift-1.5",
       "env": {"TF_PROMPT_ROWS": "128"},
-      "env": {"TF_PROMPT_ROWS": "128"},
       "argv": [
         "~/ai/tensorfold-gateway/TensorFold/zig-out/native/bin/tensorfold-native",
         "serve",

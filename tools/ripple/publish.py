@@ -58,6 +58,8 @@ def prepare(args):
         (model / 'VALIDATION.json').write_text(json.dumps(validation, indent=2) + '\n')
         repo = f'araysuter/Ripple-65B-Preview-MLX-mixed-{bits}bit'
         extra = ('**Experimental low-bit MLP quantization. Expect substantial quality loss; this is not a reliable agent model.**\n\n'
+                 'The Hub automatic parameter counter does not recognize this one-bit packing at release. '
+                 'All 64,782,689,360 source parameters are retained; this is not a pruned 19B model.\n\n'
                  if bits == 1 else '**Reduced-fidelity variant. A smoke probe produced an incorrect `is_prime` function; '
                  'prefer mixed-4bit when memory permits.**\n\n' if bits == 2 else '')
         paging = capacity['after_paging']['swapouts'] - capacity['before_paging']['swapouts']
@@ -72,6 +74,7 @@ def prepare(args):
 license: apache-2.0
 library_name: mlx
 base_model: ricursiveAI/Ripple-65B-Preview
+base_model_relation: quantized
 pipeline_tag: text-generation
 tags:
 - mlx
@@ -84,7 +87,7 @@ tags:
 
 {extra}Converted independently from the original instruction-tuned BF16 checkpoint,
 revision `{conversion['source_revision']}`. No existing quantized model was requantized.
-The pretraining-only Ripple Base model was not used.
+The pretraining-only Ripple Base model was not used. All **{conversion['source_parameters']:,} source parameters** are retained.
 
 | Stored component | Precision |
 | --- | --- |
@@ -213,6 +216,10 @@ def publish(args):
             commit = remote_verify(api, repo, model)
             if not record.get('remote_verified') or commit != record['verified_commit']:
                 raise ValueError('Staged repository changed before publication')
+            card = api.model_info(repo).card_data
+            if (card.base_model != 'ricursiveAI/Ripple-65B-Preview'
+                    or card.base_model_relation != 'quantized'):
+                raise ValueError('Quantization lineage must be explicit before publication')
             api.update_repo_settings(repo, private=False)
             with urllib.request.urlopen('https://huggingface.co/api/models/' + repo, timeout=30) as response:
                 public = json.load(response)

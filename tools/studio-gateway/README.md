@@ -1,9 +1,14 @@
-# One API, two models, one resident engine
+# One API, one resident engine
 
 The Studio gateway exposes Swift-1.5 and Ornith-1.5-122B mixed 2-bit through one
 OpenAI-compatible API. It runs one native TensorFold model process and its
 DFlash2 drafter at a time. Model and drafter weights stay on SSD between uses.
-The gateway is a small Python supervisor; inference remains in the native engine.
+The gateway is a small Python supervisor; those two profiles keep inference in
+the native engine. The optional [Ripple MLX profile](../ripple/README.md#optional-temporary-mlx-api-worker)
+adds `ripple-65b-preview` through a temporary MLX worker. Its `text_chat_only`
+setting rejects tools, images, constrained output and unsupported endpoints
+before loading or switching models. Ripple currently uses plain decoding;
+its DFlash2 runtime is not qualified.
 
 Requests for the resident model reuse it. A request for the other model parks
 the active conversation, stops the old model process, waits for it to exit, and
@@ -20,7 +25,7 @@ state-restoration time.
 
 ## Native runtime requirement
 
-This gateway needs native binaries with its internal session save, load, and
+The native profiles need binaries with internal session save, load, and
 clear endpoints. A stock release binary does not provide that contract. Native
 session snapshots preserve the model's tokens, attention cache, recurrent state,
 and drafter state; saving only message text would require prompt recomputation.
@@ -48,8 +53,9 @@ The published build target and these measurements were checked on the M5 Max.
 ## Download and prepare the checkpoints
 
 Python 3.11 or later is sufficient for the supervisor. It uses the standard
-library and does not need Python MLX. Model loading requires compatible Apple
-Silicon hardware and the prepared native executables above.
+library and does not need Python MLX. The native profiles require compatible
+Apple Silicon hardware and the prepared executables above; the optional Ripple
+profile has a separate pinned MLX environment as described in its guide.
 
 Run these commands from this repository's root. A separate download environment
 provides the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli);

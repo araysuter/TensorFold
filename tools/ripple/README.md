@@ -96,13 +96,95 @@ tokens. It retains BF16 KV, caps MLX allocations at 54 GiB and stops above a
 56 GiB process physical footprint. A target-only capacity result does not
 qualify a DFlash2-enabled server or prove long-context task accuracy.
 
-## Native API status
+## Optional temporary MLX API worker
 
-The existing gateway continues to use its previously qualified session-enabled
-binary and Swift/Ornith configuration. Synchronizing upstream source does not
-replace that binary. Ripple is **not advertised as a working native API model**
-until its family, quantized loaders, DFlash2, cache behavior and 128K footprint
-pass actual served tests.
+The Studio gateway can supervise `worker.py` alongside the existing native
+Swift/Ornith profiles. It stops and reaps the previous engine before starting
+another, so only one model's weights and active conversation occupy RAM.
+The worker listens only on loopback and uses the gateway's ephemeral private
+credential. Public authentication, request serialization, tenant isolation,
+idle unloading and four parked SSD conversations remain owned by the gateway.
+
+Use **mixed-4bit** for this profile. The tested weights are 39.05 GB / 36.37 GiB,
+including higher-precision protected tensors. In the synthetic teacher-forced
+diagnostic it retained 89.75% top-token agreement with the streamed BF16
+reference. The selected mixed-2bit reached 76.27% but generated an incorrect
+`is_prime` function; mixed-1bit reached 24.12% and repeated text. These are
+conversion diagnostics, not task accuracy. There is no matched Ripple GPQA
+result to compare with the Swift/Ornith scores in the main README.
+
+Install the pinned MLX environment outside the checkout, download the selected
+checkpoint, and append the model object in `gateway-profile.example.json` to
+your private gateway configuration's `models` array. Edit only the environment,
+checkout and model paths for your machine; keep the gateway substitutions.
+
+```sh
+python3 -m venv "$HOME/ai/ripple-mlx-env"
+"$HOME/ai/ripple-mlx-env/bin/pip" install mlx==0.32.4 mlx-lm==0.32.2
+"$HOME/ai/ripple-mlx-env/bin/hf" download araysuter/Ripple-65B-Preview-MLX-mixed-4bit \
+  --local-dir "$HOME/ai/models/Ripple-65B-Preview-MLX-mixed-4bit"
+python3 tools/studio-gateway/gateway.py --config /path/to/private/gateway.json --check-config
+python3 tools/studio-gateway/gateway.py --config /path/to/private/gateway.json
+```
+
+Choose `ripple-65b-preview` in `POST /v1/chat/completions`, using the same public
+base URL and API key as the other configured models. Send complete text message
+history and optionally a stable `X-TensorFold-Context` header. The 131,072-token
+limit counts the rendered prompt plus requested output budget. It rejects an
+oversized request instead of truncating history. The temporary worker supports
+one text completion per request, streaming, sampling, token usage and non-stream
+logprobs.
+Use `stream: true` for long prompts so prefill keepalives keep the tunnel active.
+Tools, images, JSON-schema constraints, Responses and Anthropic Messages are not
+implemented by this temporary Ripple profile; they are rejected.
+
+The worker uses one active BF16 attention cache, without a second in-RAM KV
+checkpoint. It saves private safetensors snapshots under the gateway's ephemeral
+run directory. Import checks build/model identity, token history, cache classes,
+positions and shapes; the gateway compares the full-file receipt fingerprint.
+Control operations serialize behind generation, including after a stream's
+final event. A changed or shorter token prefix starts cold. Shutdown removes
+the gateway's temporary context directory. No prompts or credentials are logged.
+
+`worker.py` pins the MLX-LM server interface to version 0.32.2, reusing its chat
+response and reasoning formatting while replacing model selection and cache
+ownership. The model path is fixed by operator configuration; requests cannot
+download or select arbitrary checkpoints or adapters. The default 512-token
+prompt chunks were compared with 256 on identical cold 2K/8K/32K inputs. The
+process has a 54 GiB MLX allocation limit and a 56 GiB physical-footprint guard.
+The whole 64 GiB machine still needs memory for macOS and other applications.
+
+The [Studio receipt](validation-2026-11-04.json) records a 130,944-token cold API
+prompt, a switch through Swift, and restoration of 131,008 cached tokens for a
+131,023-token follow-up. Only 15 new prompt tokens needed processing. At most one
+model process was observed. This was a capacity/cache check during uploads, not
+a task-accuracy benchmark; its replies reached their requested output caps.
+The separate target-only capacity probe peaked at 46.33 GiB. Production HTTPS
+generation, streaming, both existing credentials and a short warm turn passed;
+the short warm request took about 0.71 seconds, including its two output tokens.
+
+```sh
+python3 tools/ripple/test_worker.py --source /path/to/original-bf16
+python3 tools/ripple/studio_api.py --endpoint http://127.0.0.1:8080 \
+  --key-file /path/to/private/labeled-key-file --model /path/to/mixed-4bit \
+  --output /path/to/new-private-receipt.json --capacity
+```
+
+The Studio integration probe expects existing `owner` and `friend` labels; it
+reads credentials locally and emits only scoped results and numeric usage. Run
+it on an idle, isolated gateway because it switches all three models and can
+fill nearly the entire context. Its receipt records actual process overlap,
+fresh/warm token equality, tenant separation and full-window SSD restoration.
+
+## Native API and DFlash2 status
+
+The native Swift/Ornith profiles continue to use the previously qualified
+session-enabled binary. Synchronizing upstream source does not replace that
+binary. Ripple uses the temporary MLX worker above, not a native TensorFold
+family. Its matching DFlash2 tensors have been prepared separately, but no
+Ripple-aware draft execution or acceptance verifier is qualified here. The
+temporary profile runs plain target decoding and reports `dflash2: false` on
+its private health endpoint; it does not claim drafter acceleration.
 
 The current upstream Ripple bring-up is tracked in
 [TensorFold #2171](https://github.com/ashhart/TensorFold/issues/2171); the stated
