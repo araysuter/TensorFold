@@ -5,6 +5,10 @@ The optional [Studio gateway](tools/studio-gateway/README.md) supervises one nat
 model at a time. Its deployed runtime remains separately pinned and qualified;
 synchronizing this source tree does not upgrade that binary.
 
+The [Ripple MLX conversion experiment](tools/ripple/README.md) builds independent
+mixed-precision checkpoints from the original BF16 release. Ripple and its DFlash2
+path are **not yet qualified in this fork's native API**.
+
 ## Two models through one Studio API
 
 The [Studio gateway](tools/studio-gateway/README.md) exposes Swift-1.5 and our
