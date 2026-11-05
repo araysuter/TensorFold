@@ -72,6 +72,7 @@ def prepare(args):
 license: apache-2.0
 library_name: mlx
 base_model: ricursiveAI/Ripple-65B-Preview
+base_model_relation: quantized
 pipeline_tag: text-generation
 tags:
 - mlx
@@ -213,6 +214,10 @@ def publish(args):
             commit = remote_verify(api, repo, model)
             if not record.get('remote_verified') or commit != record['verified_commit']:
                 raise ValueError('Staged repository changed before publication')
+            card = api.model_info(repo).card_data
+            if (card.base_model != 'ricursiveAI/Ripple-65B-Preview'
+                    or card.base_model_relation != 'quantized'):
+                raise ValueError('Quantization lineage must be explicit before publication')
             api.update_repo_settings(repo, private=False)
             with urllib.request.urlopen('https://huggingface.co/api/models/' + repo, timeout=30) as response:
                 public = json.load(response)

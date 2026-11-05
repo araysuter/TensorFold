@@ -3,11 +3,30 @@ import http.client
 import json
 import socket
 import unittest
+from dataclasses import replace
 
 from support import FRIEND_KEY, OWNER_KEY, gateway, private_file
 
 
 class HTTPSecurityTests(unittest.TestCase):
+    def test_text_chat_limits_refused_before_loading_or_switching(self):
+        with gateway() as server:
+            server.server.manager.models['swift'] = replace(server.config.models[0], text_chat_only=True)
+            for body in [dict(tools=[]), dict(response_format={'type': 'json_object'}),
+                         dict(temperature=float('nan')), dict(seed=-1),
+                         dict(messages=[{'role': 'user', 'content': [{'type': 'image_url'}]}])]:
+                status, _, raw = server.completion(**body)
+                self.assertEqual(status, 400, raw)
+                self.assertEqual(json.loads(raw)['error']['code'], 'unsupported_model_feature')
+            for path in ['/v1/responses', '/v1/messages', '/v1/completions']:
+                self.assertEqual(server.request(path, body={'model': 'swift', 'messages':
+                                 [{'role': 'user', 'content': 'Hello'}]})[0], 400)
+            self.assert_no_backend_started(server)
+            self.assertEqual(server.completion(model='ornith', tools=[])[0], 200)
+            self.assertEqual(server.completion(tools=[])[0], 400)
+            self.assertEqual(server.server.manager.backend.model.id, 'ornith')
+            self.assertTrue(server.server.manager.backend.alive())
+
     def assert_no_backend_started(self, server):
         self.assertEqual([row for row in server.rows() if row["event"] == "start"], [])
 

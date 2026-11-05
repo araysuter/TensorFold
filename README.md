@@ -1,15 +1,18 @@
 # TensorFold
 
 This fork tracks native TensorFold and retains the [Studio runbook](docs/studio/README.md).
-The optional [Studio gateway](tools/studio-gateway/README.md) supervises one native
+The optional [Studio gateway](tools/studio-gateway/README.md) supervises one
 model at a time. Its deployed runtime remains separately pinned and qualified;
 synchronizing this source tree does not upgrade that binary.
 
 The [Ripple MLX conversion experiment](tools/ripple/README.md) builds independent
-mixed-precision checkpoints from the original BF16 release. Ripple and its DFlash2
-path are **not yet qualified in this fork's native API**.
+mixed-precision checkpoints from the original BF16 release. An optional temporary
+MLX worker adds `ripple-65b-preview` to the same API while native Ripple support
+is developed upstream. It supports text chat and private SSD KV restoration;
+Ripple DFlash2 and tool calling remain unqualified. Swift and Ornith retain their
+existing native engines and matching drafters.
 
-## Two models through one Studio API
+## Models through one Studio API
 
 The [Studio gateway](tools/studio-gateway/README.md) exposes Swift-1.5 and our
 smallest Ornith-1.5-122B MLX quant through the same API. It loads **one model and

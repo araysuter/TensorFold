@@ -4,17 +4,26 @@ import argparse
 import json
 from pathlib import Path
 import tempfile
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
-import mlx.core as mx
-import numpy as np
-from mlx.utils import tree_flatten
-from mlx_lm.utils import load_model
-from modeling_ricursive_mlx import Model, ModelArgs
-import convert
-import fidelity
-import quantization
+try:
+    import mlx.core as mx
+    import numpy as np
+    from mlx.utils import tree_flatten
+    from mlx_lm.utils import load_model
+    from modeling_ricursive_mlx import Model, ModelArgs
+    import convert
+    import fidelity
+    import quantization
+except ModuleNotFoundError as exc:
+    if exc.name.split('.')[0] not in ('mlx', 'mlx_lm', 'numpy', 'safetensors', 'transformers'):
+        raise
+    if __name__ == '__main__':
+        print('SKIP: Ripple conversion tests require the documented Apple Silicon MLX test environment')
+        sys.exit(0)
+    raise unittest.SkipTest('Requires the Ripple MLX test environment') from exc
 
 
 class ConversionTests(unittest.TestCase):

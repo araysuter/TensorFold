@@ -28,6 +28,7 @@ from errors import GatewayError
 from private_state import Principal, KeyStore, Workspace, Conversation, ContextStore
 from runtime import NativeBackend, ModelManager
 from stats import read_stats
+from text_chat import validate_body as validate_text_chat
 
 
 def client_gone(connection: socket.socket) -> bool:
@@ -183,6 +184,14 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
             payload = self._payload(path)
             model = self.server.manager.model(payload.get("model"))
             payload["model"] = model.id
+            if model.text_chat_only:
+                if path != "/v1/chat/completions":
+                    raise GatewayError(400, "This model supports text chat completions only", "unsupported_model_feature")
+                try:
+                    validate_text_chat(payload, model.id, 131072)
+                except (ValueError, TypeError):
+                    raise GatewayError(400, "This model requires text-only chat without tools or constrained output",
+                                       "unsupported_model_feature") from None
             context_values = self.headers.get_all("X-TensorFold-Context", [])
             if len(context_values) > 1:
                 raise GatewayError(400, "A single X-TensorFold-Context header is allowed", "invalid_context")

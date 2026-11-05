@@ -30,6 +30,7 @@ class ModelConfig:
     aliases: tuple[str, ...] = ()
     env: dict[str, str] = dataclasses.field(default_factory=dict)
     readiness_timeout: float = 240.0
+    text_chat_only: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -91,6 +92,8 @@ def validate(config: GatewayConfig) -> GatewayConfig:
             raise ValueError("model environment must contain valid string entries")
         if not 0 < model.readiness_timeout <= 1800:
             raise ValueError("model readiness timeout must be between zero and 1800 seconds")
+        if not isinstance(model.text_chat_only, bool):
+            raise ValueError("text_chat_only must be a boolean")
     if config.default_model not in names:
         raise ValueError("default model must name a configured model")
     for key in config.key_files:
@@ -152,6 +155,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         id=row["id"], argv=tuple(os.path.expanduser(arg) for arg in row["argv"]),
         aliases=tuple(row.get("aliases", ())), env=dict(row.get("env", {})),
         readiness_timeout=row.get("readiness_timeout", 240),
+        text_chat_only=row.get("text_chat_only", False),
     ) for row in document["models"])
     document["key_files"] = tuple(KeyFile(
         label=row["label"], path=_path(row["path"]), required=row.get("required", True),

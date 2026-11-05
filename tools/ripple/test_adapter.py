@@ -8,11 +8,19 @@ import sys
 import time
 import types
 import unittest
-import mlx.core as mx
-import numpy as np
-import torch
-from mlx.utils import tree_flatten
-from modeling_ricursive_mlx import Model, ModelArgs
+try:
+    import mlx.core as mx
+    import numpy as np
+    import torch
+    from mlx.utils import tree_flatten
+    from modeling_ricursive_mlx import Model, ModelArgs
+except ModuleNotFoundError as exc:
+    if exc.name.split('.')[0] not in ('mlx', 'mlx_lm', 'numpy', 'torch', 'transformers'):
+        raise
+    if __name__ == '__main__':
+        print('SKIP: Ripple adapter tests require the documented Apple Silicon MLX test environment')
+        sys.exit(0)
+    raise unittest.SkipTest('Requires the Ripple MLX test environment') from exc
 
 
 def reference(path):
