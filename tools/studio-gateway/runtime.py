@@ -22,6 +22,7 @@ from config import GatewayConfig, ModelConfig, validate
 
 from errors import GatewayError
 from private_state import Workspace, ContextStore, Conversation
+from memory import check_memory
 
 
 _BUILD_HASHES: dict[tuple[str, int, int], str] = {}
@@ -310,6 +311,7 @@ class ModelManager:
             if self.backend is backend:
                 self.backend = None
         self.active = None
+
         self.contexts.prune()
 
     @contextlib.contextmanager
@@ -342,16 +344,20 @@ class ModelManager:
             self._unload(save=False)
         if self.backend and self.backend.model.id != model.id:
             self._unload(save=True)
+        check_memory(model, self.config.memory_reserve_gib, self.backend)
         if self.backend is None:
             if cancel() or self.closing:
                 raise GatewayError(499, "Request cancelled", "request_cancelled")
             self.backend = self.backend_factory(self.config, model, self.workspace)
             try:
                 self.backend.start(lambda: self.closing or cancel())
+                check_memory(model, self.config.memory_reserve_gib, self.backend)
             except BaseException:
                 # Keep a failed, unreaped child owned here. Any later switch
                 # must stop/reap it before another engine can be launched.
-                if self.backend.process is None:
+                if self.backend.process is not None and self.backend.alive():
+                    self._unload(save=False)
+                elif self.backend.process is None:
                     self.backend = None
                 raise
         self.backend.context_status = "resident" if self.active is wanted else "cold"

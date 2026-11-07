@@ -31,6 +31,7 @@ class ModelConfig:
     env: dict[str, str] = dataclasses.field(default_factory=dict)
     readiness_timeout: float = 240.0
     text_chat_only: bool = False
+    memory_required_gib: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -44,6 +45,7 @@ class GatewayConfig:
     default_model: str = "swift-1.5"
     idle_seconds: float = 1800.0
     max_parked: int = 4
+    memory_reserve_gib: float = 6.0
     max_body_bytes: int = 8 * 1024 * 1024
     max_pending: int = 16
     queue_timeout: float = 3600.0
@@ -94,6 +96,10 @@ def validate(config: GatewayConfig) -> GatewayConfig:
             raise ValueError("model readiness timeout must be between zero and 1800 seconds")
         if not isinstance(model.text_chat_only, bool):
             raise ValueError("text_chat_only must be a boolean")
+        if (isinstance(model.memory_required_gib, bool)
+                or not isinstance(model.memory_required_gib, (int, float))
+                or not 0 <= model.memory_required_gib <= 1024):
+            raise ValueError("memory_required_gib must be between zero and 1024")
     if config.default_model not in names:
         raise ValueError("default model must name a configured model")
     for key in config.key_files:
@@ -114,6 +120,7 @@ def validate(config: GatewayConfig) -> GatewayConfig:
         ("idle_seconds", 0.05, 86400), ("queue_timeout", 0.05, 86400),
         ("request_timeout", 0.05, 86400), ("stop_timeout", 0.05, 120),
         ("release_delay", 0, 30),
+        ("memory_reserve_gib", 1, 64),
     ):
         value = getattr(config, key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
@@ -156,6 +163,7 @@ def load_config(path: str | Path) -> GatewayConfig:
         aliases=tuple(row.get("aliases", ())), env=dict(row.get("env", {})),
         readiness_timeout=row.get("readiness_timeout", 240),
         text_chat_only=row.get("text_chat_only", False),
+        memory_required_gib=row.get("memory_required_gib", 0.0),
     ) for row in document["models"])
     document["key_files"] = tuple(KeyFile(
         label=row["label"], path=_path(row["path"]), required=row.get("required", True),

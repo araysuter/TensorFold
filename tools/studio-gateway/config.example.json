@@ -5,6 +5,7 @@
   "default_model": "swift-1.5",
   "idle_seconds": 1800,
   "max_parked": 4,
+  "memory_reserve_gib": 6,
   "cache_root": "~/Library/Caches/TensorFold/studio-gateway",
   "allowed_hosts": [],
   "key_files": [
@@ -21,6 +22,7 @@
   "models": [
     {
       "id": "swift-1.5",
+      "memory_required_gib": 45,
       "env": {"TF_PROMPT_ROWS": "128"},
       "argv": [
         "~/ai/tensorfold-gateway/TensorFold/zig-out/native/bin/tensorfold-native",
@@ -45,6 +47,7 @@
     },
     {
       "id": "ornith-1.5-122b-mixed-2bit",
+      "memory_required_gib": 51,
       "aliases": ["ornith-1.5-122b"],
       "env": {"TF_PROMPT_ROWS": "128"},
       "argv": [

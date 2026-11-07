@@ -24,6 +24,15 @@ and releases the model process. The next request loads the selected model and
 restores its conversation. Cold requests therefore include model-loading and
 state-restoration time.
 
+On macOS, set each profile's `memory_required_gib` to a conservative physical
+budget for weights, drafter, full context and scratch space. The gateway checks
+reclaimable RAM and OS memory pressure after queuing, before loading or restoring
+state, and after loading. It credits only the measured resident backend group's
+physical footprint and leaves `memory_reserve_gib` (default 6 GiB) for the host.
+Insufficient headroom returns HTTP 503 with `insufficient_memory`; unavailable
+telemetry fails closed. Zero profile budget disables admission for legacy/test
+profiles. The example enables it for both native profiles. This is an admission
+check, not a reservation against another process allocating RAM afterward.
 
 ## Native runtime requirement
 
