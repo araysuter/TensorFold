@@ -22,7 +22,7 @@
   "models": [
     {
       "id": "swift-1.5",
-      "memory_required_gib": 47,
+      "memory_required_gib": 45.5,
       "env": {"TF_PROMPT_ROWS": "128"},
       "argv": [
         "~/ai/tensorfold-gateway/TensorFold/zig-out/native/bin/tensorfold-native",
@@ -49,7 +49,7 @@
     },
     {
       "id": "ornith-1.5-122b-mixed-2bit",
-      "memory_required_gib": 53,
+      "memory_required_gib": 51,
       "aliases": ["ornith-1.5-122b"],
       "env": {"TF_PROMPT_ROWS": "128"},
       "argv": [
