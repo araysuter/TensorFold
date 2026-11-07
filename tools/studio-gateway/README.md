@@ -7,8 +7,8 @@ The gateway is a small Python supervisor; those two profiles keep inference in
 the native engine. The optional [Ripple MLX profile](../ripple/README.md#optional-temporary-mlx-api-worker)
 adds `ripple-65b-preview` through a temporary MLX worker. Its `text_chat_only`
 setting rejects tools, images, constrained output and unsupported endpoints
-before loading or switching models. Ripple currently uses plain decoding;
-its DFlash2 runtime is not qualified.
+before loading or switching models. Ripple's matching DFlash2 runtime is
+documented in its [qualified MLX setup](../ripple/DFLASH2.md).
 
 Requests for the resident model reuse it. A request for the other model parks
 the active conversation, stops the old model process, waits for it to exit, and
@@ -35,6 +35,11 @@ profiles. The example enables it for both native profiles. This is an admission
 check, not a reservation against another process allocating RAM afterward.
 
 ## Native runtime requirement
+
+For image input, prepare Swift's original BF16 tower and enable the native
+vision options in the example. Ornith already includes its BF16 tower. See
+[native image profiles](VISION.md) for preparation, input limits and the current
+image-history cache limitation. Ripple remains text-only.
 
 The native profiles need binaries with internal session save, load, and
 clear endpoints. A stock release binary does not provide that contract. Native

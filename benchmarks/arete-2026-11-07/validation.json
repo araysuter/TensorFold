@@ -1,0 +1,28 @@
+{
+  "status": "passed",
+  "source_model": "NousResearch/Arete-27B",
+  "source_revision": "108f0afbdcfaa1ceeda4a635004304dfff6d4da2",
+  "weight_revision": "fe55469f0c69fb73c3680f49f384ec78175381ed",
+  "native_binary_sha256": "06cb7d1f4a11a88db7494a39f7b2082112facfa348cc38e6c36cff65a28b00a0",
+  "hardware": "64 GiB M5 Max",
+  "os": "macOS 27.0.1",
+  "arete_checks": 26,
+  "swift_checks": 19,
+  "ornith_checks": 19,
+  "arete_peak_physical_bytes": 45256262096,
+  "arete_full_window_input": 130944,
+  "arete_restored_cached_tokens": 130950,
+  "image_history_cache_reused": false,
+  "mlx_vlm_image_checks": {
+    "red": true,
+    "blue": true
+  },
+  "quality_benchmark": false,
+  "qualification_admission": "Profile budgets disabled only in isolated calibration; watchdog floor 4 GiB for Arete and 6 GiB for Swift/Ornith. Production requires profile budgets and 6 GiB host reserve.",
+  "production_checks": 13,
+  "production_implementation_head": "3459b3d7d8671682331c37f6a4287ae260f232b2",
+  "gateway_cpu_tests": 56,
+  "vision_attachment_cpu_tests": 3,
+  "hugging_face_public": true,
+  "weight_files_verified": 5
+}

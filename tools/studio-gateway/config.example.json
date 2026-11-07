@@ -22,13 +22,15 @@
   "models": [
     {
       "id": "swift-1.5",
-      "memory_required_gib": 45,
+      "memory_required_gib": 45.5,
       "env": {"TF_PROMPT_ROWS": "128"},
       "argv": [
         "~/ai/tensorfold-gateway/TensorFold/zig-out/native/bin/tensorfold-native",
         "serve",
-        "~/ai/models/swift-1.5-native-82276731",
+        "~/ai/models/swift-1.5-native-vision-b4c84d42",
         "--name", "swift-1.5",
+        "--vision", "--vision-image-tokens", "2048", "--vision-max-images", "2",
+        "--vision-video-tokens", "2048", "--vision-max-videos", "1",
         "--context", "131072",
         "--parallel", "1",
         "--prompt-cache-gib", "9",
@@ -55,6 +57,8 @@
         "serve",
         "~/ai/models/ornith-1.5-122b-mlx-mixed-2bit-dfa07bab",
         "--name", "ornith-1.5-122b-mixed-2bit",
+        "--vision", "--vision-image-tokens", "2048", "--vision-max-images", "2",
+        "--vision-video-tokens", "2048", "--vision-max-videos", "1",
         "--context", "131072",
         "--parallel", "1",
         "--prompt-cache-gib", "4",
