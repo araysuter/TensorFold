@@ -343,6 +343,7 @@ class ModelManager:
                 self.active.dirty = False
             self._unload(save=False)
         if self.backend and self.backend.model.id != model.id:
+            check_memory(model, self.config.memory_reserve_gib, floor_only=True)
             self._unload(save=True)
         check_memory(model, self.config.memory_reserve_gib, self.backend)
         if self.backend is None:

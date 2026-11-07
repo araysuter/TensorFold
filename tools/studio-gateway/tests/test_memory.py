@@ -75,6 +75,15 @@ class MemoryTests(unittest.TestCase):
             starts = [r for r in server.rows() if r['event'] == 'start']
             self.assertTrue(all(not r['live_predecessors'] for r in starts))
 
+    def test_low_memory_switch_refuses_before_saving_or_stopping_old_model(self):
+        with support.gateway() as server:
+            self.assertEqual(server.completion()[0], 200)
+            before = server.rows()
+            with patch('runtime.check_memory', side_effect=GatewayError(503, 'RAM busy', 'insufficient_memory')):
+                self.assertEqual(server.completion(model='ornith')[0], 503)
+            self.assertEqual(server.rows(), before)
+            self.assertEqual(server.server.manager.backend.model.id, 'swift')
+
 
 if __name__ == "__main__":
     unittest.main()

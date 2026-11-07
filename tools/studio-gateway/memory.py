@@ -37,17 +37,17 @@ def group_footprint(group):
     return total
 
 
-def check_memory(model, reserve_gib, backend=None):
+def check_memory(model, reserve_gib, backend=None, *, floor_only=False):
     if not model.memory_required_gib:
         return
     try:
         available, pressure = snapshot()
         credit = 0
-        if backend and backend.model.id == model.id and backend.alive():
+        if not floor_only and backend and backend.model.id == model.id and backend.alive():
             credit = min(group_footprint(backend.process.pid), int(model.memory_required_gib * GIB))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         raise GatewayError(503, "Memory status unavailable; retry later", "memory_status_unavailable") from None
-    required = int((model.memory_required_gib + reserve_gib) * GIB) - credit
+    required = int((reserve_gib + (0 if floor_only else model.memory_required_gib)) * GIB) - credit
     if pressure != 1 or available < required:
         raise GatewayError(503, "Insufficient RAM headroom for this model; retry after other tasks finish",
                            "insufficient_memory")
