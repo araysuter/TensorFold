@@ -13,7 +13,7 @@ conversation retention remains four total, with one resident model and drafter.
 |---|---|---|
 | Swift | Existing native-prepared 4-bit weights | Original Swift BF16 tower, separate preparation below |
 | Ornith mixed 2-bit | Existing published quant | Already includes 333 BF16 vision tensors and processor assets |
-| Arete | MLX affine 5-bit, group 64 | Original Arete BF16 tower; see [conversion](../arete/README.md) |
+| Arete | MLX affine 5-bit, group 64 | Original Arete BF16 tower |
 | Ripple | Existing mixed 4-bit | None; image input is refused |
 
 All three published Ornith quants retain the BF16 tower. The gateway uses the
