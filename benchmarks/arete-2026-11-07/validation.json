@@ -18,5 +18,11 @@
     "blue": true
   },
   "quality_benchmark": false,
-  "qualification_admission": "Profile budgets disabled only in isolated calibration; watchdog floor 4 GiB for Arete and 6 GiB for Swift/Ornith. Production requires profile budgets and 6 GiB host reserve."
+  "qualification_admission": "Profile budgets disabled only in isolated calibration; watchdog floor 4 GiB for Arete and 6 GiB for Swift/Ornith. Production requires profile budgets and 6 GiB host reserve.",
+  "production_checks": 13,
+  "production_implementation_head": "3459b3d7d8671682331c37f6a4287ae260f232b2",
+  "gateway_cpu_tests": 56,
+  "vision_attachment_cpu_tests": 3,
+  "hugging_face_public": true,
+  "weight_files_verified": 5
 }

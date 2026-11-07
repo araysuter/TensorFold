@@ -6,6 +6,14 @@ byte count. The archive contains public synthetic request hashes, token hashes,
 numeric receipts and validation results; no credentials, private configuration,
 snapshot payloads, model weights or private logs are included.
 
+The separate [production receipt](production.json) has 13 passing HTTPS checks
+on implementation commit `3459b3d7d8671682331c37f6a4287ae260f232b2`: both keys,
+authentication rejection, Ripple image refusal, Arete images and arithmetic,
+concurrent identity, tenant isolation, unchanged text tokens with vision enabled,
+four saved snapshots, and nonzero admission budgets on every production profile.
+The default urllib test client received an edge HTTP 403 before inference; an
+explicitly identified validation client passed. No edge policy was changed.
+
 The successful Arete run has 26 checks, including a 130,944-token cold prompt
 and SSD-restored continuation reusing 130,950 tokens. Its native lifetime peak
 physical footprint was 45,256,262,096 bytes. Swift and Ornith each passed 19

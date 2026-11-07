@@ -79,6 +79,11 @@ Code was 9.07/91.58 greedy and 9.04/92.56 sampled, hitting the output cap. These
 are one attempt per cell, not representative averages. Every pair matched
 token-for-token. No new kernel or arithmetic implementation is introduced.
 
+The deployed HTTPS API subsequently passed 13 rollout checks with admission and
+vision enabled. Its fresh greedy prose/code cells measured 32.73 and 91.52 tok/s
+and matched the earlier target token hashes. See the
+[production receipt](../../benchmarks/arete-2026-11-07/production.json).
+
 The opt-in [probe](probe.py) requires an owned isolated loopback gateway and
 identifies only that pane's backend process group for its memory watchdog:
 
