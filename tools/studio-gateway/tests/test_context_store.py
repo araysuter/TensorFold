@@ -8,6 +8,31 @@ from gateway import ContextStore, GatewayError, Workspace
 
 
 class ContextStoreTests(unittest.TestCase):
+    def test_global_lru_removes_old_files_but_preserves_recent_and_active(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ContextStore(Path(root))
+            rows = []
+            for index in range(6):
+                row = store.select("swift" if index % 2 else "ornith", str(index % 3), {}, str(index))
+                row.path.write_bytes(b"synthetic saved state")
+                row.saved = True
+                row.touched = index
+                rows.append(row)
+            rows[0].touched = 10
+            store.prune(rows[1])
+            self.assertEqual({r.id for r in store.rows.values()}, {rows[i].id for i in (0, 1, 4, 5)})
+            self.assertEqual(set(Path(root).glob("*.tfs")), {rows[i].path for i in (0, 1, 4, 5)})
+
+    def test_zero_retention_keeps_only_ram_owner_until_unload(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ContextStore(Path(root), 0)
+            active = store.select("swift", "owner", {}, "active")
+            store.select("ornith", "owner", {}, "old")
+            store.prune(active)
+            self.assertEqual(list(store.rows.values()), [active])
+            store.prune()
+            self.assertEqual(store.rows, {})
+
     def test_identifiers_are_scoped_to_both_model_and_credential_identity(self):
         with tempfile.TemporaryDirectory() as root:
             store = ContextStore(Path(root))

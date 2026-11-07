@@ -16,12 +16,14 @@ starts the requested engine. Requests queue while another request or a model
 switch is in progress. Streaming replies hold their place in the queue until
 they finish or disconnect. The gateway does not load both models concurrently.
 
-Each model has one active conversation and up to four parked conversations on
-SSD. The context window is configured as 131,072 total input-plus-output tokens.
+The shared LRU retains up to four conversations total across all models and API
+keys, including the active conversation and its saved copy. The context window
+is configured as 131,072 total input-plus-output tokens.
 After 30 minutes without a request, the gateway parks the active conversation
 and releases the model process. The next request loads the selected model and
 restores its conversation. Cold requests therefore include model-loading and
 state-restoration time.
+
 
 ## Native runtime requirement
 

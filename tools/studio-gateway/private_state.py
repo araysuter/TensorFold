@@ -175,8 +175,8 @@ class Conversation:
 class ContextStore:
     """No transcripts: only opaque affinity hashes and complete native snapshots.
 
-    There are at most four parked conversations per model, plus its most recent
-    active conversation (which can also be on SSD while the model is idle).
+    The retention limit is shared by all models and credentials, including the
+    active conversation; ownership and model identity remain isolated.
     """
     def __init__(self, root: Path, max_parked: int = 4):
         self.root, self.max_parked = root, max_parked
@@ -234,9 +234,10 @@ class ContextStore:
         selected.touched = time.monotonic()
         return selected
 
-    def prune(self, model: str, protected: Conversation | None = None):
-        candidates = sorted((row for row in self.rows.values() if row.model == model), key=lambda row: row.touched)
-        while len(candidates) > self.max_parked + 1:
+    def prune(self, protected: Conversation | None = None):
+        candidates = sorted(self.rows.values(), key=lambda row: row.touched)
+        limit = max(self.max_parked, int(protected is not None))
+        while len(candidates) > limit:
             row = next((entry for entry in candidates if entry is not protected), None)
             if row is None:
                 break

@@ -20,7 +20,7 @@ existing native engines and matching drafters.
 The [Studio gateway](tools/studio-gateway/README.md) exposes Swift-1.5, our
 smallest Ornith-1.5-122B quant and the optional Ripple MLX profile through one API. It loads **one model and
 its DFlash2 drafter at a time**, keeps the most recently used conversation in
-RAM, and parks up to four additional conversations per model on SSD. After
+RAM, and retains up to four conversations total across all models and API keys. After
 30 minutes idle, it saves the conversation and unloads the engine. Temporary
 conversation state is cleared when the gateway shuts down; model weights stay
 on SSD. A cold request includes model-loading and conversation-restoration time.
