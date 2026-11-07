@@ -18,12 +18,18 @@ existing native engines and matching drafters.
 ## Models through one Studio API
 
 The [Studio gateway](tools/studio-gateway/README.md) exposes Swift-1.5, our
-smallest Ornith-1.5-122B quant and the optional Ripple MLX profile through one API. It loads **one model and
+smallest Ornith-1.5-122B quant, [Arete-27B MLX 5-bit](tools/arete/README.md),
+and the optional Ripple MLX profile through one API. It loads **one model and
 its DFlash2 drafter at a time**, keeps the most recently used conversation in
 RAM, and retains up to four conversations total across all models and API keys. After
 30 minutes idle, it saves the conversation and unloads the engine. Temporary
 conversation state is cleared when the gateway shuts down; model weights stay
 on SSD. A cold request includes model-loading and conversation-restoration time.
+
+Swift, Ornith and Arete have [native image profiles](tools/studio-gateway/VISION.md).
+Ripple has no trained vision encoder and remains text-only. The gateway checks
+RAM headroom before admitting a model request and returns HTTP 503 when another
+task leaves insufficient space for the configured working budget and host reserve.
 
 For a 64 GiB Studio, **start with Swift-1.5**: it scored higher across the full
 test and used less reasoning to solve matched questions. Choose Ornith mixed
