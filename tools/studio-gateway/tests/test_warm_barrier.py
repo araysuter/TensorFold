@@ -1,5 +1,6 @@
 """An in-flight canonical warm pass must not force an avoidable cold prefill."""
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
@@ -24,6 +25,7 @@ class WarmBarrierTests(unittest.TestCase):
                 wanted = Conversation("swift", "synthetic-owner", "synthetic-context",
                                       Path("/not/written.tfs"), dirty=True)
                 manager = object.__new__(ModelManager)
+                manager.config = SimpleNamespace(memory_reserve_gib=6)
                 manager.active = wanted
                 manager.backend = Mock()
                 manager.backend.model = model
