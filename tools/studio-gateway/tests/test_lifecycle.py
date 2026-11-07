@@ -53,13 +53,15 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(status, 200, raw)
             self.assertEqual(json.loads(raw)["fixture_previous_context"], "owner-data")
 
-    def test_lru_bound_is_four_parked_plus_one_active_per_model(self):
+    def test_lru_bound_is_four_total_across_models_and_credentials(self):
         with gateway() as server:
-            for index in range(6):
-                self.assertEqual(server.completion(_headers=context(f"context-{index}"),
-                    fixture_marker=str(index))[0], 200)
-            self.assertLessEqual(len(list(server.state.rglob("*.tfs"))), 5)
-            status, _, raw = server.completion(_headers=context("context-0"))
+            for index in range(10):
+                self.assertEqual(server.completion(model="swift" if index % 2 else "ornith",
+                    _key=OWNER_KEY if index % 3 else FRIEND_KEY,
+                    _headers=context(f"context-{index}"), fixture_marker=str(index))[0], 200)
+                self.assertLessEqual(len(list(server.state.rglob("*.tfs"))), 4)
+                self.assertLessEqual(len(server.server.manager.contexts.rows), 4)
+            status, _, raw = server.completion(model="ornith", _key=FRIEND_KEY, _headers=context("context-0"))
             self.assertEqual(status, 200, raw)
             self.assertIsNone(json.loads(raw)["fixture_previous_context"])
 

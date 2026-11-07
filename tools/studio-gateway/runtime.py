@@ -310,6 +310,7 @@ class ModelManager:
             if self.backend is backend:
                 self.backend = None
         self.active = None
+        self.contexts.prune()
 
     @contextlib.contextmanager
     def lease(self, model_id: str, owner: str, payload: dict | None = None,
@@ -325,9 +326,9 @@ class ModelManager:
                 self._activate(model, wanted, payload or {}, request_path, cancel)
             except BaseException:
                 self.contexts.discard_unused(wanted, self.active)
-                self.contexts.prune(model.id, self.active)
+                self.contexts.prune(self.active)
                 raise
-            self.contexts.prune(model.id, self.active)
+            self.contexts.prune(self.active)
             yield self.backend
 
     def _activate(self, model: ModelConfig, wanted: Conversation, payload: dict,
