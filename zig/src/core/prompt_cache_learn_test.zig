@@ -23,6 +23,7 @@ test "a learned harness state outlives its store: a fresh session on a new one r
     {
         var im = try imprint.Imprint.open(gpa, root, 3, 1 << 30);
         defer im.deinit();
+        im.admission.floor = 1 << 20;
         {
             var f: Fake = .{ .gpa = gpa };
             var s = Store.init(gpa, f.learned(), rules, 1 << 20);
@@ -34,6 +35,7 @@ test "a learned harness state outlives its store: a fresh session on a new one r
         }
         var again = try imprint.Imprint.open(gpa, root, 3, 1 << 30); // a new server reads the index back
         defer again.deinit();
+        again.admission.floor = 1 << 20;
         var f: Fake = .{ .gpa = gpa };
         var s = Store.init(gpa, f.learned(), rules, 1 << 20);
         defer s.deinit();
@@ -58,6 +60,7 @@ test "past the learned-state cap the least recently used state is forgotten, and
     const two = [_]u32{ 8, 8, 8, 8, 8, 8 };
     var im = try imprint.Imprint.open(gpa, root, 3, 440); // One state plus conservative index/header allowance fits.
     defer im.deinit();
+    im.admission.floor = 1 << 20;
     var f: Fake = .{ .gpa = gpa };
     var s = Store.init(gpa, f.learned(), rules, 1 << 20);
     defer s.deinit();
@@ -94,6 +97,7 @@ test "learned states are prompt arithmetic: a request that decodes rows below on
     const harness = [_]u32{ 7, 7, 7, 7, 7, 7 };
     var im = try imprint.Imprint.open(gpa, root, 3, 1 << 30);
     defer im.deinit();
+    im.admission.floor = 1 << 20;
     {
         var f: Fake = .{ .gpa = gpa };
         var s = Store.init(gpa, f.learned(), rules, 1 << 20);
@@ -290,4 +294,44 @@ test "under-cap disk pressure selects the same LRU victim before either half is 
     try std.testing.expectEqual(@as(usize, 1), fake.writes);
     try std.testing.expectEqual(@as(usize, 1), fake.disk_peer_writes);
     try std.testing.expect(!fake.disk_reserved);
+}
+
+test "a refused learned state ends the retry: the pass from the start, one failure, no recall loop" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var root_buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-refuse-{d}", .{platform.c.getpid()});
+    defer rmTree(root);
+    const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 };
+    const harness = [_]u32{ 7, 7, 7, 7, 7, 7 }; // shared by every session: a state at 5 reads it all (lookahead 1)
+    const key = imprint.Imprint.keyOf(&harness);
+    {
+        var im = try imprint.Imprint.open(gpa, root, 3, 1 << 30);
+        defer im.deinit();
+        im.admission.floor = 1 << 20;
+        {
+            var f: Fake = .{ .gpa = gpa };
+            var s = Store.init(gpa, f.learned(), rules, 1 << 20);
+            defer s.deinit();
+            s.imprint = &im;
+            const first = harness ++ [_]u32{ 1, 2, 9 };
+            try std.testing.expectEqual(fresh(&first), f.pass(&s, &first, try s.begin(a, &first, 8, &.{5}, &.{}, null, &.{})));
+            try std.testing.expect(im.has(key));
+        }
+        var again = try imprint.Imprint.open(gpa, root, 3, 1 << 30); // a new server reads the index back
+        defer again.deinit();
+        again.admission.floor = 1 << 20;
+        var f: Fake = .{ .gpa = gpa, .refuse_at = 5 }; // the one learned state is refused every time
+        var s = Store.init(gpa, f.learned(), rules, 1 << 20);
+        defer s.deinit();
+        s.imprint = &again;
+        const second = harness ++ [_]u32{ 3, 4, 9 };
+        const p = try s.begin(a, &second, 8, &.{5}, &.{}, null, &.{});
+        try std.testing.expectEqual(@as(u32, 0), p.from); // the pass from the start
+        try std.testing.expectEqual(@as(u64, 1), s.counts.failed); // one failure, the one state: no recall loop
+        try std.testing.expectEqual(@as(usize, 0), s.entries.items.len); // the refused state is gone, not re-read
+        try std.testing.expectEqual(fresh(&second), f.pass(&s, &second, p));
+    }
 }

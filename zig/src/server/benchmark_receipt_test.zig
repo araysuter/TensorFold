@@ -48,6 +48,7 @@ pub fn legacy(a: std.mem.Allocator) !json.Value {
 pub fn asLegacy(a: std.mem.Allocator, v: json.Value) !json.Value {
     try v.get("suite").?.object.put(a, "id", .{ .string = suite.legacy_id });
     try v.get("suite").?.object.put(a, "sha256", .{ .string = suite.legacy_sha256_hex });
+    _ = v.get("settings").?.object.orderedRemove("kv_cache");
     for (v.get("samples").?.array) |sample| {
         _ = sample.object.orderedRemove("finish_reason");
         _ = sample.object.orderedRemove("route");
@@ -69,7 +70,7 @@ test "the receipt built from the golden facts equals the golden canonical bytes"
     defer arena.deinit();
     const a = arena.allocator();
     const bytes = try std.mem.concat(a, u8, &.{ try receipt.canonical(a, try valid(a)), "\n" });
-    try std.testing.expectEqual(@as(usize, 1588), bytes.len);
+    try std.testing.expectEqual(@as(usize, 1604), bytes.len);
     try std.testing.expectEqualStrings(golden, bytes);
 }
 
@@ -91,7 +92,7 @@ test "the parsed golden writes back byte for byte, and previews as json.dumps(in
     try std.testing.expectEqualStrings(golden[0 .. golden.len - 1], try receipt.canonical(a, v));
     var out: std.Io.Writer.Allocating = .init(a);
     try receipt.preview(&out.writer, v);
-    try std.testing.expectEqual(@as(usize, 2147), out.written().len);
+    try std.testing.expectEqual(@as(usize, 2169), out.written().len);
     try std.testing.expectEqualStrings(golden_preview, out.written());
 }
 
@@ -294,6 +295,7 @@ test "a rocm receipt on linux saves but never publishes; rocm on macos fails bot
 }
 
 test "a receipt path is checked before a run: a directory name is refused, its directory is made, a file fits, nothing is left" {
+    try @import("test_permissions.zig").skipIfRoot();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -322,7 +324,6 @@ test "a receipt path is checked before a run: a directory name is refused, its d
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "Could not save the benchmark receipt to {s}", .{named}), problem);
     }
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, try std.fs.path.join(a, &.{ root, "unmade" }), .{}));
-    if (std.c.geteuid() == 0) return;
     const locked = try std.fs.path.join(a, &.{ root, "locked" });
     try cwd.createDirPath(io, locked);
     try cwd.setFilePermissions(io, locked, .fromMode(0o500), .{});
@@ -357,10 +358,46 @@ test "issue 969 v2: legacy receipts retain v1 completion and ranking partitions"
     try set(a, v, &.{ "suite", "id" }, "\"community-v1\"");
     try std.testing.expect(!check.receipt(v, .save, now_ms, &why));
     try set(a, v, &.{ "suite", "sha256" }, "\"" ++ suite.legacy_sha256_hex ++ "\"");
+    try set(a, v, &.{ "settings", "kv_cache" }, null);
     for ([_][]const u8{ "0", "1" }) |i| {
         try set(a, v, &.{ "samples", i, "finish_reason" }, null);
         try set(a, v, &.{ "samples", i, "route" }, null);
     }
     try std.testing.expect(!check.receipt(v, .save, now_ms, &why));
     try std.testing.expect(std.mem.indexOf(u8, why, "protocol-complete") != null);
+}
+
+test "the receipt names the cache format a managed run used and leaves an attached run's unknown" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: []const u8 = "";
+    const attached = try valid(a);
+    try std.testing.expect(attached.get("settings").?.get("kv_cache").? == .null);
+    try std.testing.expect(check.receipt(attached, .save, now_ms, &why));
+    try set(a, attached, &.{ "settings", "kv_cache" }, "\"bf16\"");
+    try std.testing.expect(!check.receipt(attached, .save, now_ms, &why));
+    try std.testing.expect(std.mem.startsWith(u8, why, "settings.kv_cache"));
+    const managed = try valid(a);
+    try set(a, managed, &.{ "settings", "managed" }, "true");
+    try std.testing.expect(!check.receipt(managed, .save, now_ms, &why));
+    try std.testing.expect(std.mem.startsWith(u8, why, "settings.kv_cache"));
+    try set(a, managed, &.{ "settings", "kv_cache" }, "\"fp8\"");
+    try std.testing.expect(check.receipt(managed, .save, now_ms, &why));
+    try set(a, managed, &.{ "settings", "kv_cache" }, "\"fp4\"");
+    try std.testing.expect(!check.receipt(managed, .save, now_ms, &why));
+    try std.testing.expect(std.mem.startsWith(u8, why, "settings.kv_cache"));
+}
+
+test "thinking benchmark: server-default samples save locally and cannot publish" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const value = try valid(a);
+    try value.get("settings").?.object.put(a, "thinking_mode", .{ .string = "server_default" });
+    var why: []const u8 = "";
+    try std.testing.expect(check.receipt(value, .save, now_ms, &why));
+    try std.testing.expect(!check.receipt(value, .publish, now_ms, &why));
+    try std.testing.expectEqualStrings(check.thinking_local, why);
+    for (try suite.receiptCells(a, value)) |cell| try std.testing.expect(!cell.protocol_complete);
 }

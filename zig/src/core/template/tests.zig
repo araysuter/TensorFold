@@ -2,6 +2,10 @@
 const std = @import("std");
 const template = @import("template.zig");
 
+test {
+    _ = @import("concat_test.zig");
+}
+
 const Outcome = struct { text: ?[]const u8, raised: ?[]const u8 };
 
 fn render(source: []const u8, vars: []const u8, diag: *template.Diag) ![]u8 {
@@ -199,4 +203,31 @@ test "appending to a long string in a namespace stays linear in memory" {
     fba.reset();
     const out2 = try template.renderChat(fba.allocator(), tilde, parsed.value.object.get("messages").?, .null, parsed.value, false, null);
     try std.testing.expectEqualStrings(first, out2);
+}
+
+test "a render leaves only its text and spans in the caller's allocator" {
+    const a = std.testing.allocator;
+    var data = std.heap.ArenaAllocator.init(a);
+    defer data.deinit();
+    const d = data.allocator();
+    var messages = std.json.Array.init(d);
+    var want: std.ArrayList(u8) = .empty;
+    for (0..64) |i| {
+        const role = if (i % 2 == 0) "user" else "assistant";
+        const body = try d.alloc(u8, 64 << 10);
+        @memset(body, 'a' + @as(u8, @intCast(i % 26)));
+        var m: std.json.ObjectMap = .empty;
+        try m.put(d, "role", .{ .string = role });
+        try m.put(d, "content", .{ .string = body });
+        try messages.append(.{ .object = m });
+        try want.print(d, "<{s}>{s}", .{ role, body });
+    }
+    var t = try template.compile(a, "{% for m in messages %}<{{ m.role }}>{{ m.content | trim }}{% endfor %}", null);
+    defer t.deinit();
+    const budget = try a.alloc(u8, want.items.len * 5 / 2);
+    defer a.free(budget);
+    var fba = std.heap.FixedBufferAllocator.init(budget);
+    const out = try template.renderProvenance(fba.allocator(), &t, .{ .array = messages }, .null, .null, false, null);
+    try std.testing.expectEqualStrings(want.items, out.s);
+    try std.testing.expect(fba.end_index <= out.s.len + (out.spans.len + 1) * @sizeOf(template.Span));
 }

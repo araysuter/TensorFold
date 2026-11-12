@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "suite": "studio-gateway-real-idle-resume",
+  "status": "passed",
+  "samples": [
+    {
+      "stage": "idle_seed",
+      "model": "swift-1.5",
+      "request_sha256": "d0c8c69156d793b3e0e43064e5ff4f463830191948c399fc2729aac6124ac1d2",
+      "semantic_request_sha256": "78f3e743035b6be97d7d51909286428057d771048ac53d7b5b624dcabe516137",
+      "token_sha256": "8a7439c495bc1164178f6c9bb03de2bf1651d32c06762419b4bcb6cf1207b12e",
+      "context_status": "cold",
+      "cached_tokens": 0,
+      "wall_seconds": 8.754,
+      "max_tokens": 64,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 25,
+      "completion_tokens": 2,
+      "time_to_first_token": 0.044666375,
+      "prefill_seconds": 0.043717,
+      "tokens_per_second": 14.403056190254231,
+      "seconds": 0.069429709
+    },
+    {
+      "stage": "idle_restored_followup",
+      "model": "swift-1.5",
+      "request_sha256": "5dc3f7a718cc89fe8250f2c99b9bed10af1c542478c5b0f8e0e99eb511444a9f",
+      "semantic_request_sha256": "8c86fa592daa6956a630d5294a11acd5038636aba48b3a028ca3d56bdf884377",
+      "token_sha256": "d9b6459e8ec5007ddc3e8c96af1d148bac8d8c07b80d0cd5cd1c71c954430fb2",
+      "context_status": "resumed",
+      "cached_tokens": 31,
+      "wall_seconds": 5.1588,
+      "max_tokens": 64,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 55,
+      "completion_tokens": 5,
+      "time_to_first_token": 0.062231583,
+      "prefill_seconds": 0.061882459,
+      "tokens_per_second": 78.44008862710294,
+      "seconds": 0.050994333
+    }
+  ],
+  "idle": {
+    "model_unloaded": true,
+    "busy": false,
+    "loaded_models": 0,
+    "seconds_after_seed": 4.4976,
+    "health_polls": 14,
+    "probe_authenticated": false,
+    "configured_idle_seconds": 2
+  },
+  "checks": [
+    {
+      "name": "idle_unload_without_metadata_pinning",
+      "passed": true
+    },
+    {
+      "name": "both_models_available_while_unloaded",
+      "passed": true
+    },
+    {
+      "name": "idle_full_state_resume_with_drafter",
+      "passed": true
+    }
+  ],
+  "native_binary_sha256": "a3bbc06661eb375a33cf2e0e0de261d8875c85f657636dafa82430c18a445bb8",
+  "gateway_modules_sha256": {
+    "config.py": "dc419152cda8cbcca802bb4bf25e93656629627c6c396cf8c32109820109825c",
+    "errors.py": "7c58761d992329afeba950f54fbc4b8c518d7a605c0508149e24257d130043e0",
+    "gateway.py": "75fdf32a33114be7e479a48e8c7c45d338315f0a1ffda805d590bbe2be1f7b30",
+    "private_state.py": "7f72d71ec31e4c29d79d2fa6a964d9989e35032422e5a0a047bc34f5832f4cd9",
+    "runtime.py": "818639718469f044f19ea18e661bc3b2e96664cd4e14f85bbc53de5c851a9832",
+    "stats.py": "8298e4464f5298f9acac6cbee6c1a94af7a29977575d3a6fafd607ea3b3784af"
+  },
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "gpu_cores": 40,
+    "unified_memory_gib": 64,
+    "operating_system": "macOS 27.0.1"
+  },
+  "scope": "Short synthetic real-model correctness and lifecycle checks; rates on tiny replies are not representative performance benchmarks."
+}

@@ -1,0 +1,295 @@
+{
+  "schema_version": 1,
+  "suite": "single-trial-synthetic-context-capacity",
+  "status": "passed",
+  "models": [
+    {
+      "model": "swift-1.5",
+      "status": "passed",
+      "target_prompt_tokens": 130944,
+      "synthetic_prompt_sha256": "f1bbbee01b9ad49d85fb0a16bd91a4f7aab5af2093fdcf566cd8b718ca0c4976",
+      "saved_tokens": 130950,
+      "snapshot_bytes": 8841264808,
+      "save_seconds": 2.769016958074644,
+      "memory_before": {
+        "context_window": 131072,
+        "process": {
+          "physical_footprint_bytes": 28101604504,
+          "lifetime_peak_physical_footprint_bytes": 28429366496
+        },
+        "device": {
+          "active_bytes": 28101604504,
+          "cache_bytes": 0,
+          "peak_bytes": 28101604504
+        }
+      },
+      "memory_at_capacity": {
+        "context_window": 131072,
+        "process": {
+          "physical_footprint_bytes": 36830016808,
+          "lifetime_peak_physical_footprint_bytes": 45699839248
+        },
+        "device": {
+          "active_bytes": 36830016808,
+          "cache_bytes": 0,
+          "peak_bytes": 41090954512
+        }
+      },
+      "memory_after_restore": {
+        "context_window": 131072,
+        "process": {
+          "physical_footprint_bytes": 36862555456,
+          "lifetime_peak_physical_footprint_bytes": 37287163128
+        },
+        "device": {
+          "active_bytes": 36862555456,
+          "cache_bytes": 0,
+          "peak_bytes": 36865111288
+        }
+      },
+      "request_sha256": "b26052b8ce60496c40a5ce313d72fcec993a297a3a1fa68b737a744a17557417"
+    },
+    {
+      "model": "ornith-1.5-122b-mixed-2bit",
+      "status": "passed",
+      "target_prompt_tokens": 130944,
+      "synthetic_prompt_sha256": "f1bbbee01b9ad49d85fb0a16bd91a4f7aab5af2093fdcf566cd8b718ca0c4976",
+      "saved_tokens": 130950,
+      "snapshot_bytes": 3473063592,
+      "save_seconds": 2.104522458044812,
+      "memory_before": {
+        "context_window": 131072,
+        "process": {
+          "physical_footprint_bytes": 47282829264,
+          "lifetime_peak_physical_footprint_bytes": 47517087792
+        },
+        "device": {
+          "active_bytes": 47282829264,
+          "cache_bytes": 0,
+          "peak_bytes": 47282829264
+        }
+      },
+      "memory_at_capacity": {
+        "context_window": 131072,
+        "process": {
+          "physical_footprint_bytes": 50651412576,
+          "lifetime_peak_physical_footprint_bytes": 51827898440
+        },
+        "device": {
+          "active_bytes": 50651412576,
+          "cache_bytes": 0,
+          "peak_bytes": 50675972216
+        }
+      },
+      "memory_after_restore": {
+        "context_window": 131072,
+        "process": {
+          "physical_footprint_bytes": 50681903152,
+          "lifetime_peak_physical_footprint_bytes": 51323418648
+        },
+        "device": {
+          "active_bytes": 50681903152,
+          "cache_bytes": 0,
+          "peak_bytes": 50681903152
+        }
+      },
+      "request_sha256": "1b93128ffd7f134c8a34282788fe0d2d0377d3b11481942052c73a39b5c48bc0"
+    }
+  ],
+  "quality_benchmark": false,
+  "samples": [
+    {
+      "stage": "capacity_bootstrap",
+      "model": "swift-1.5",
+      "request_sha256": "d10a50f3c33c6b92638136005d9bee4969d3c60a73d8b28dca261979f62be5c4",
+      "semantic_request_sha256": "2e881cabed458c76dccee268df45e147be352a856deb650c5ef8e952de2d4b97",
+      "token_sha256": "9b3560a21927dbfe85843c5ef86796c3b0cd3d80dde20a801eaba58b9caf7a58",
+      "context_status": "cold",
+      "cached_tokens": 0,
+      "wall_seconds": 9.2316,
+      "max_tokens": 64,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 17,
+      "completion_tokens": 2,
+      "time_to_first_token": 0.044068583,
+      "prefill_seconds": 0.043076166,
+      "tokens_per_second": 13.729631645241255,
+      "seconds": 0.072835166
+    },
+    {
+      "stage": "near_128k_cold",
+      "model": "swift-1.5",
+      "request_sha256": "b26052b8ce60496c40a5ce313d72fcec993a297a3a1fa68b737a744a17557417",
+      "semantic_request_sha256": "74a24b24b6d16335854c53e1813022f3c4287590563d0ca72f6722451c85f72f",
+      "token_sha256": "9b3560a21927dbfe85843c5ef86796c3b0cd3d80dde20a801eaba58b9caf7a58",
+      "context_status": "cold",
+      "cached_tokens": 0,
+      "wall_seconds": 259.94,
+      "max_tokens": 8,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 130944,
+      "completion_tokens": 2,
+      "time_to_first_token": 259.498514667,
+      "prefill_seconds": 259.491166583,
+      "tokens_per_second": 3.241203475056306,
+      "seconds": 0.308527375
+    },
+    {
+      "stage": "capacity_swap_away",
+      "model": "ornith-1.5-122b-mixed-2bit",
+      "request_sha256": "f66d69c9683aa1df8d227f454dbf382105eff6c3f585dc7f3fc879d0eceb4556",
+      "semantic_request_sha256": "65b6ee1efb60c8316fd802fc68d0e1ccbd8386d57db4c65188c10baf368c5792",
+      "token_sha256": "9b3560a21927dbfe85843c5ef86796c3b0cd3d80dde20a801eaba58b9caf7a58",
+      "context_status": "cold",
+      "cached_tokens": 0,
+      "wall_seconds": 20.3432,
+      "max_tokens": 64,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 17,
+      "completion_tokens": 2,
+      "time_to_first_token": 0.064203667,
+      "prefill_seconds": 0.062533292,
+      "tokens_per_second": 7.001838857930063,
+      "seconds": 0.142819625
+    },
+    {
+      "stage": "near_128k_ssd_resumed",
+      "model": "swift-1.5",
+      "request_sha256": "29d6b94580c861399e49a7bb8d12b7773dbf537f209618fecc13512ea39e45ad",
+      "semantic_request_sha256": "5b2a7e93c32f80b62dfb8de27f71e716f220c2df5fa158bde8e08907330cfce2",
+      "token_sha256": "9b3560a21927dbfe85843c5ef86796c3b0cd3d80dde20a801eaba58b9caf7a58",
+      "context_status": "resumed",
+      "cached_tokens": 130950,
+      "wall_seconds": 12.2722,
+      "max_tokens": 8,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 130965,
+      "completion_tokens": 2,
+      "time_to_first_token": 0.342049792,
+      "prefill_seconds": 0.337842,
+      "tokens_per_second": 1.573119064952123,
+      "seconds": 0.635679792
+    },
+    {
+      "stage": "capacity_bootstrap",
+      "model": "ornith-1.5-122b-mixed-2bit",
+      "request_sha256": "f66d69c9683aa1df8d227f454dbf382105eff6c3f585dc7f3fc879d0eceb4556",
+      "semantic_request_sha256": "65b6ee1efb60c8316fd802fc68d0e1ccbd8386d57db4c65188c10baf368c5792",
+      "token_sha256": "9b3560a21927dbfe85843c5ef86796c3b0cd3d80dde20a801eaba58b9caf7a58",
+      "context_status": "cold",
+      "cached_tokens": 0,
+      "wall_seconds": 19.1127,
+      "max_tokens": 64,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 17,
+      "completion_tokens": 2,
+      "time_to_first_token": 0.050839958,
+      "prefill_seconds": 0.050606083,
+      "tokens_per_second": 9.105674770337808,
+      "seconds": 0.109821625
+    },
+    {
+      "stage": "near_128k_cold",
+      "model": "ornith-1.5-122b-mixed-2bit",
+      "request_sha256": "1b93128ffd7f134c8a34282788fe0d2d0377d3b11481942052c73a39b5c48bc0",
+      "semantic_request_sha256": "70e9e366ab3109d9880b0e86c69511b00b7ca7e6b8d883a74e9a3360ebda6893",
+      "token_sha256": "9b3560a21927dbfe85843c5ef86796c3b0cd3d80dde20a801eaba58b9caf7a58",
+      "context_status": "cold",
+      "cached_tokens": 0,
+      "wall_seconds": 213.185,
+      "max_tokens": 8,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 130944,
+      "completion_tokens": 2,
+      "time_to_first_token": 212.8212715,
+      "prefill_seconds": 212.812772625,
+      "tokens_per_second": 4.136270832359069,
+      "seconds": 0.241763666
+    },
+    {
+      "stage": "capacity_swap_away",
+      "model": "swift-1.5",
+      "request_sha256": "d10a50f3c33c6b92638136005d9bee4969d3c60a73d8b28dca261979f62be5c4",
+      "semantic_request_sha256": "2e881cabed458c76dccee268df45e147be352a856deb650c5ef8e952de2d4b97",
+      "token_sha256": "9b3560a21927dbfe85843c5ef86796c3b0cd3d80dde20a801eaba58b9caf7a58",
+      "context_status": "cold",
+      "cached_tokens": 0,
+      "wall_seconds": 10.1534,
+      "max_tokens": 64,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 17,
+      "completion_tokens": 2,
+      "time_to_first_token": 0.044064833,
+      "prefill_seconds": 0.043224542,
+      "tokens_per_second": 14.244033598085762,
+      "seconds": 0.070204833
+    },
+    {
+      "stage": "near_128k_ssd_resumed",
+      "model": "ornith-1.5-122b-mixed-2bit",
+      "request_sha256": "852938d3038e1b50cc31edd254a725a71f42b915a500a9b703fe1030615ec1d9",
+      "semantic_request_sha256": "abf491d4c6fa5c039332360be3efa7a1d2d2f04bebd209d4e5943e7c4424cc99",
+      "token_sha256": "9b3560a21927dbfe85843c5ef86796c3b0cd3d80dde20a801eaba58b9caf7a58",
+      "context_status": "resumed",
+      "cached_tokens": 130950,
+      "wall_seconds": 19.2845,
+      "max_tokens": 8,
+      "temperature": 0,
+      "thinking": false,
+      "finish_reason": "stop",
+      "draft_requested": true,
+      "drafts_used": true,
+      "prompt_tokens": 130965,
+      "completion_tokens": 2,
+      "time_to_first_token": 0.640790334,
+      "prefill_seconds": 0.637192958,
+      "tokens_per_second": 1.6325214600047548,
+      "seconds": 0.612549375
+    }
+  ],
+  "native_binary_sha256": "a3bbc06661eb375a33cf2e0e0de261d8875c85f657636dafa82430c18a445bb8",
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "gpu_cores": 40,
+    "unified_memory_gib": 64,
+    "operating_system": "macOS 27.0.1"
+  },
+  "settings": {
+    "context_tokens": 131072,
+    "target_prompt_tokens": 130944,
+    "parallelism": 1,
+    "prompt_rows": 128,
+    "drafter_bits": 4,
+    "swift_prompt_cache_gib": 9,
+    "ornith_prompt_cache_gib": 4
+  },
+  "scope": "One synthetic cold prompt per model, complete-state save, model swap, and SSD resume. This checks capacity and restoration, not quality or representative prompt-processing speed. Short fresh/plain versus restored/drafted exactness is recorded separately."
+}

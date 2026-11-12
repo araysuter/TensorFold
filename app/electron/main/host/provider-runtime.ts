@@ -5,7 +5,8 @@ import { checkClaudeCli } from '../../agent/claude-cli'
 import { defaultCliModels } from '../../agent/cli-models'
 import { builtinClis, cliToolStatuses } from '../../agent/cli-registry'
 import { fetchAiGatewayModels, isAiGatewayProvider } from '../../agent/model-gateway'
-import { fetchLmStudioModels, fetchOllamaModels, fetchOpenAiCompatibleModels, isLmStudioProvider, isOllamaProvider, isOpenRouterProvider } from '../../agent/local-providers'
+import { contextsFromModelsPayload, fetchLmStudioModels, fetchOllamaModels, fetchOpenAiCompatibleModelsDetailed, isLmStudioProvider, isOllamaProvider, isOpenRouterProvider } from '../../agent/local-providers'
+import { hostedContextIdentity, recordHostedContext, recordHostedContexts } from '../../agent/hosted-context'
 import { providerWithAccount, resolveProviderModel, selectProviderAccount } from '../../agent/provider-accounts'
 import { auditPreview, isSecretMask, maskedSecretUrlError } from '../../agent/security'
 import { createProviderFetch } from '../../agent/secure-fetch'
@@ -87,11 +88,16 @@ export function rememberProviderModels(baseProviderId: string, accountId: string
 export async function runtimeProviderWithFreshModels(baseProvider: Provider, accountId?: string | null): Promise<Provider> {
   let provider = runtimeProvider(baseProvider, accountId)
   if (!providerUsesLocalCompatibleModels(provider)) return provider
+  const contextIdentity = hostedContextIdentity(provider)
   try {
-    const models = await fetchOpenAiCompatibleModels(provider.baseUrl, provider.apiKey, 1500)
-    if (models.length) {
-      rememberProviderModels(baseProvider.id, accountId ?? null, models)
-      provider = { ...provider, models }
+    const listed = await fetchOpenAiCompatibleModelsDetailed(provider.baseUrl, provider.apiKey, 1500)
+    if (listed.models.length) {
+      // The provider's own answer carries each model's window (vLLM's max_model_len); keep it,
+      // against the endpoint that answered, so an edited baseUrl or another account cannot
+      // read back a window a different configuration reported.
+      recordHostedContexts(contextIdentity, listed.models, listed.contextTokens)
+      rememberProviderModels(baseProvider.id, accountId ?? null, listed.models)
+      provider = { ...provider, models: listed.models }
     }
   } catch {
     // Keep the saved model list when a local server does not expose /models.
@@ -166,6 +172,7 @@ export async function listProviderModels(provider: Provider): Promise<string[]> 
     if (!tool?.installed) throw new Error(`${effectiveProvider.name || toolId} CLI is not installed. Set a valid binary path in Settings or install it first.`)
     return effectiveProvider.models?.length ? effectiveProvider.models : defaultCliModels(effectiveProvider.transport)
   }
+  const contextIdentity = hostedContextIdentity(effectiveProvider)
   const providerFetch = createProviderFetch(effectiveProvider)
   if (isOpenRouterProvider(effectiveProvider)) return fetchOpenRouterModels(effectiveProvider, providerFetch)
   if (isAiGatewayProvider(effectiveProvider)) return fetchAiGatewayModels(effectiveProvider, providerFetch)
@@ -180,6 +187,8 @@ export async function listProviderModels(provider: Provider): Promise<string[]> 
   const json: any = await readBoundedJsonResponse(res, 'Provider models')
   const data: any[] = json?.data ?? json?.models ?? (Array.isArray(json) ? json : [])
   const ids = data.map((m) => (typeof m === 'string' ? m : m?.id ?? m?.name)).filter(Boolean)
+  const hosted = contextsFromModelsPayload(json)
+  for (const id of ids) if (typeof id === 'string') recordHostedContext(contextIdentity, id, hosted[id.trim()])
   return Array.from(new Set(ids)).sort() as string[]
 }
 

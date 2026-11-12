@@ -13,13 +13,18 @@ const ByteText = struct {
     open_think: bool = false,
 
     fn text(t: *@This()) model_text.Text {
-        return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
+        return .{ .ctx = t, .vtable = &.{ .encode = encode, .encode_masked = masked, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 
     fn encode(_: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
         const ids = try a.alloc(u32, input.len);
         for (input, ids) |byte, *id| id.* = byte;
         return ids;
+    }
+
+    // This fixture maps every byte directly and has no added-token table.
+    fn masked(ctx: *anyopaque, a: Allocator, input: []const u8, _: []const model_text.Span, _: *[]const u8) model_text.Error![]u32 {
+        return encode(ctx, a, input, false);
     }
 
     fn decode(_: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
@@ -44,9 +49,9 @@ const ByteText = struct {
         return &.{};
     }
 
-    fn render(ctx: *anyopaque, a: Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(ctx: *anyopaque, a: Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
         const t: *ByteText = @ptrCast(@alignCast(ctx));
-        return a.dupe(u8, if (t.open_think) "prompt<think>" else "prompt");
+        return .{ .text = try (a.dupe(u8, if (t.open_think) "prompt<think>" else "prompt")) };
     }
 
     fn templateSource(_: *anyopaque) []const u8 {
@@ -241,5 +246,22 @@ test "an engine with no score hook refuses after the checks pass" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectEqualStrings("decision scoring is not supported by this engine yet", try messageOf(srv, arena.allocator(), choice_body));
+    try std.testing.expectEqual(@as(usize, 0), backend.calls);
+}
+
+test "capability audit: decision context errors retain their OpenAI code through the real HTTP route" {
+    var text: ByteText = .{};
+    var backend: Backend = .{ .hooked = true, .window = 4 };
+    const srv = try serve(&text, &backend);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const body = try @import("context_http_fixture.zig").call(srv, arena.allocator(), decisions.post, choice_body);
+    const err = body.get("error").?;
+    const code = err.get("code") orelse return error.MissingContextLengthCode;
+    try std.testing.expectEqualStrings("context_length_exceeded", code.string);
+    try std.testing.expectEqualStrings("invalid_request_error", err.get("type").?.string);
+    try std.testing.expect(err.get("param").? == .null);
+    try std.testing.expectEqualStrings("question 'q': the prompt has 6 tokens, which does not fit the context length of 4 tokens", err.get("message").?.string);
     try std.testing.expectEqual(@as(usize, 0), backend.calls);
 }

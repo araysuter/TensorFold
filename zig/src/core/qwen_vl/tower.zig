@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const frags = @import("../frags.zig");
+const bf16_round = @import("bf16_round");
 const Config = @import("config.zig").Config;
 const grid = @import("grid.zig");
 const wts = @import("weights.zig");
@@ -88,8 +89,16 @@ const Scratch = struct {
 };
 
 /// What a tower for `max_tokens` image tokens a request holds: its weights and its scratch.
+pub const Memory = struct { source: usize, weights: usize, scratch: usize };
+
+pub fn memoryPlan(gpa: std.mem.Allocator, c: Config, max_tokens: u32) !Memory {
+    const weights = try wts.plan(gpa, c);
+    return .{ .source = weights.source, .weights = weights.device, .scratch = Scratch.of(c, @as(usize, max_tokens) * c.merge * c.merge).bytes() };
+}
+
 pub fn planBytes(gpa: std.mem.Allocator, c: Config, max_tokens: u32) !usize {
-    return try wts.bytes(gpa, c) + Scratch.of(c, @as(usize, max_tokens) * c.merge * c.merge).bytes();
+    const memory = try memoryPlan(gpa, c, max_tokens);
+    return std.math.add(usize, memory.weights, memory.scratch);
 }
 
 pub const Tower = struct {
@@ -120,13 +129,17 @@ pub const Tower = struct {
 
     /// Kernels, the checkpoint's tower weights (bf16 as stored) and scratch for images of up to `max_tokens` tokens.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, c: Config, max_tokens: u32) !*Tower {
+        return loadWith(gpa, io, device, dir, c, max_tokens, device);
+    }
+
+    pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, c: Config, max_tokens: u32, factory: anytype) !*Tower {
         const t = try gpa.create(Tower);
         errdefer gpa.destroy(t);
         t.gpa = gpa;
         t.c = c;
         t.k = try Kernels.load(gpa, device);
         errdefer t.k.deinit();
-        t.w = try wts.load(gpa, io, device, dir, c);
+        t.w = try wts.loadWith(gpa, io, factory, dir, c);
         errdefer t.w.deinit(gpa);
         t.inv = try gpa.alloc(f32, c.headDim() / 4);
         errdefer gpa.free(t.inv);
@@ -135,7 +148,7 @@ pub const Tower = struct {
         t.max_patches = @intCast(P);
         const plan = Scratch.of(c, P);
         t.chunk = plan.chunk;
-        t.scratch = try device.buffer(plan.bytes(), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        t.scratch = try factory.buffer(plan.bytes(), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer t.scratch.deinit();
         var at: usize = 0;
         const views = [_]*Ref{ &t.patches, &t.taps, &t.tap_w, &t.cos, &t.sin, &t.x, &t.xn, &t.att, &t.qkv, &t.q, &t.k_, &t.v, &t.s, &t.o, &t.mid };
@@ -305,12 +318,8 @@ pub const Tower = struct {
     }
 };
 
-/// fp32 to bf16, round to nearest even (torch's and MLX's cast).
-pub fn bf16(x: f32) u16 {
-    const b: u32 = @bitCast(x);
-    if (b & 0x7fffffff > 0x7f800000) return @truncate((b >> 16) | 0x40); // NaN stays NaN
-    return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+/// fp32 to bf16, round to nearest even (torch's and MLX's cast); NaN stays NaN.
+pub const bf16 = bf16_round.bits;
 
 test "a 4,096-token tower's scratch, and bf16's rounding" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -323,6 +332,31 @@ test "a 4,096-token tower's scratch, and bf16's rounding" {
     try std.testing.expectEqual(@as(u16, 0x3f80), bf16(1.0));
     try std.testing.expectEqual(@as(u16, 0x3f80), bf16(@bitCast(@as(u32, 0x3f808000)))); // a tie to even, down
     try std.testing.expectEqual(@as(u16, 0x3f82), bf16(@bitCast(@as(u32, 0x3f818000)))); // a tie to even, up
+}
+
+test "tower bf16: the old spelling's bits on every zero, subnormal, infinity, NaN and tie" {
+    const old = struct {
+        /// bf16 as it was spelled before it was core's bits(): the oracle for every input, NaN included.
+        fn spelled(x: f32) u16 {
+            const b: u32 = @bitCast(x);
+            if (b & 0x7fffffff > 0x7f800000) return @truncate((b >> 16) | 0x40);
+            return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = bf16(v);
+            try std.testing.expectEqual(spelled(v), h);
+            if (std.math.isNan(v)) try std.testing.expect(std.math.isNan(bf16_round.value(h)));
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
 }
 
 test "every tower pipeline compiles and loads on this GPU" {

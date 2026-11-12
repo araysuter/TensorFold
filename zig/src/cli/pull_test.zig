@@ -8,51 +8,62 @@ const exlr8_pull = @import("pull_exlr8.zig");
 
 /// A fake hub on 127.0.0.1: revision and tree APIs, ranged resolve endpoints, a body cut once, a repo ignoring ranges.
 const FakeHub = struct {
-    server_fd: std.posix.socket_t,
+    server: std.Io.net.Server,
+    io: std.Io,
+    threaded: *std.Io.Threaded,
     stop: std.atomic.Value(bool) = .init(false),
+    live: std.ArrayList(std.Io.net.Stream) = .empty,
+    live_lock: std.Io.Mutex = .init,
     thread: ?std.Thread = null,
     weight_requests: std.atomic.Value(u32) = .init(0),
     flaky_requests: std.atomic.Value(u32) = .init(0),
     range_starts: std.atomic.Value(u64) = .init(0),
     weights: []const u8,
     config: []const u8,
+    nested: []const u8,
     weights_sha_hex: []const u8,
+    nested_sha_hex: []const u8,
     config_git_hex: [40]u8,
     flaky_git_hex: [40]u8,
     port: u16,
 
     const weights_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/weights.safetensors";
     const config_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/config.json";
+    const nested_path = "/Org/Flash/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1/tensors/model-00001-of-00001.safetensors";
     const flaky_body = "{\"chat_template\": \"{{ messages }}\"}";
     const drafter_config = "{\"model_type\": \"qwen3\", \"architectures\": [\"DFlash2DraftModel\"], \"dflash_config\": {\"block_size\": 8}}";
 
+    var nested_body_storage: [1234]u8 = @splat(0x5A);
+    const nested_body: []const u8 = &nested_body_storage;
+
     fn open() !FakeHub {
-        const posix = std.posix;
-        const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-        if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
-        const fd: posix.socket_t = @intCast(rc);
-        errdefer _ = posix.system.close(fd);
-        const one: c_int = 1;
-        try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one));
-        var addr: posix.sockaddr.in = .{ .family = posix.AF.INET, .port = std.mem.nativeToBig(u16, 0), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
-        if (posix.errno(posix.system.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in))) != .SUCCESS) return error.BindFailed;
-        if (posix.errno(posix.system.listen(fd, 32)) != .SUCCESS) return error.ListenFailed;
-        var bound: posix.sockaddr.in = undefined;
-        var len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        if (posix.errno(posix.system.getsockname(fd, @ptrCast(&bound), &len)) != .SUCCESS) return error.BindFailed;
-        const port = std.mem.bigToNative(u16, bound.port);
+        const threaded = try std.testing.allocator.create(std.Io.Threaded);
+        threaded.* = std.Io.Threaded.init(std.testing.allocator, .{});
+        errdefer std.testing.allocator.destroy(threaded);
+        const io = threaded.io();
+        const loopback: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+        var server = try loopback.listen(io, .{});
+        errdefer server.deinit(io);
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update(weights_body);
         var digest: [32]u8 = undefined;
         hash.final(&digest);
+        var nested_hash = std.crypto.hash.sha2.Sha256.init(.{});
+        nested_hash.update(nested_body);
+        var nested_digest: [32]u8 = undefined;
+        nested_hash.final(&nested_digest);
         return .{
-            .server_fd = fd,
+            .server = server,
+            .io = io,
+            .threaded = threaded,
             .weights = weights_body,
             .config = config_body,
+            .nested = nested_body,
             .weights_sha_hex = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{std.fmt.bytesToHex(digest, .lower)}),
+            .nested_sha_hex = try std.fmt.allocPrint(std.testing.allocator, "{s}", .{std.fmt.bytesToHex(nested_digest, .lower)}),
             .config_git_hex = gitHex(config_body),
             .flaky_git_hex = gitHex(flaky_body),
-            .port = port,
+            .port = server.socket.address.getPort(),
         };
     }
 
@@ -73,43 +84,46 @@ const FakeHub = struct {
         var n: usize = 0;
         defer for (conns[0..n]) |t| t.join();
         while (!fake.stop.load(.acquire)) {
-            var fds = [_]std.posix.pollfd{.{ .fd = fake.server_fd, .events = std.posix.POLL.IN, .revents = 0 }};
-            const ready = std.posix.poll(&fds, 50) catch return;
-            if (ready == 0) continue;
-            const rc = std.posix.system.accept(fake.server_fd, null, null);
-            if (std.posix.errno(rc) != .SUCCESS) return;
-            const conn_fd: std.posix.socket_t = @intCast(rc);
+            const conn = fake.server.accept(fake.io) catch return;
+            if (fake.stop.load(.acquire)) {
+                conn.close(fake.io);
+                return;
+            }
             if (n == conns.len) {
-                _ = std.posix.system.close(conn_fd);
+                conn.close(fake.io);
                 continue;
             }
-            conns[n] = std.Thread.spawn(.{}, handle, .{ fake, conn_fd }) catch {
-                _ = std.posix.system.close(conn_fd);
+            fake.live_lock.lockUncancelable(fake.io);
+            fake.live.append(std.testing.allocator, conn) catch {};
+            fake.live_lock.unlock(fake.io);
+            conns[n] = std.Thread.spawn(.{}, handle, .{ fake, conn }) catch {
+                fake.forget(conn);
+                conn.close(fake.io);
                 continue;
             };
             n += 1;
         }
     }
 
-    fn handle(fake: *FakeHub, fd: std.posix.socket_t) void {
-        defer _ = std.posix.system.close(fd);
+    fn handle(fake: *FakeHub, conn: std.Io.net.Stream) void {
+        defer {
+            fake.forget(conn);
+            conn.close(fake.io);
+        }
         var buf: [8192]u8 = undefined;
         var end: usize = 0;
+        var read_buf: [4096]u8 = undefined;
+        var reader = conn.reader(fake.io, &read_buf);
         while (true) {
             const head_end = std.mem.indexOf(u8, buf[0..end], "\r\n\r\n") orelse {
                 if (end == buf.len) return;
-                var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
-                const ready = std.posix.poll(&fds, 50) catch return;
-                if (ready == 0) {
-                    if (fake.stop.load(.acquire)) return;
-                    continue;
-                }
-                const n = std.posix.read(fd, buf[end..]) catch return;
+                var vecs = [_][]u8{buf[end..]};
+                const n = reader.interface.readVec(&vecs) catch return;
                 if (n == 0) return;
                 end += n;
                 continue;
             };
-            if (!fake.respondOne(fd, buf[0..head_end])) return;
+            if (!fake.respondOne(conn, buf[0..head_end])) return;
             const rest = end - (head_end + 4);
             std.mem.copyForwards(u8, buf[0..rest], buf[head_end + 4 .. end]);
             end = rest;
@@ -117,13 +131,13 @@ const FakeHub = struct {
     }
 
     /// Answers one request; false closes the connection.
-    fn respondOne(fake: *FakeHub, fd: std.posix.socket_t, head: []const u8) bool {
+    fn respondOne(fake: *FakeHub, conn: std.Io.net.Stream, head: []const u8) bool {
         var tree_buf: [256]u8 = undefined;
         const line_end = std.mem.indexOf(u8, head, "\r\n") orelse return false;
         var parts = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
         const method = parts.next() orelse return false;
         if (std.mem.eql(u8, method, "HEAD")) {
-            sendAll(fd, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"); // no redirect: the hub's link is the storage link
+            fake.sendAll(conn, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"); // no redirect: the hub's link is the storage link
             return true;
         }
         if (!std.mem.eql(u8, method, "GET")) return false;
@@ -145,84 +159,86 @@ const FakeHub = struct {
             }
         }
         if (std.mem.eql(u8, path, "/api/models/Org/Flash/revision/main")) {
-            respond(fd, "{\"sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1\"}");
+            fake.respond(conn, "{\"sha\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1\"}");
         } else if (std.mem.eql(u8, path, "/api/models/Org/Whole/revision/main")) {
-            respond(fd, "{\"sha\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2\"}");
+            fake.respond(conn, "{\"sha\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2\"}");
         } else if (std.mem.eql(u8, path, "/api/models/Org/Draft/revision/main")) {
-            respond(fd, "{\"sha\": \"ccccccccccccccccccccccccccccccccccccccc3\"}");
+            fake.respond(conn, "{\"sha\": \"ccccccccccccccccccccccccccccccccccccccc3\"}");
         } else if (std.mem.eql(u8, path, "/api/models/Org/Draft/tree/ccccccccccccccccccccccccccccccccccccccc3")) {
-            respond(fd, "[{\"type\": \"file\", \"path\": \"config.json\", \"size\": 27}]");
+            fake.respond(conn, "[{\"type\": \"file\", \"path\": \"config.json\", \"size\": 27}]");
         } else if (std.mem.eql(u8, path, "/Org/Draft/resolve/ccccccccccccccccccccccccccccccccccccccc3/config.json")) {
-            respond(fd, "{\"model_type\": \"gemma3n\"}");
+            fake.respond(conn, "{\"model_type\": \"gemma3n\"}");
         } else if (std.mem.eql(u8, path, "/api/models/Org/DFlash/revision/main")) {
-            respond(fd, "{\"sha\": \"ddddddddddddddddddddddddddddddddddddddd4\"}");
+            fake.respond(conn, "{\"sha\": \"ddddddddddddddddddddddddddddddddddddddd4\"}");
         } else if (std.mem.eql(u8, path, "/api/models/Org/DFlash/tree/ddddddddddddddddddddddddddddddddddddddd4")) {
-            respond(fd, std.fmt.bufPrint(&tree_buf, "[{{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}]", .{drafter_config.len}) catch return false);
+            fake.respond(conn, std.fmt.bufPrint(&tree_buf, "[{{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}]", .{drafter_config.len}) catch return false);
         } else if (std.mem.eql(u8, path, "/Org/DFlash/resolve/ddddddddddddddddddddddddddddddddddddddd4/config.json")) {
-            respond(fd, drafter_config);
+            fake.respond(conn, drafter_config);
         } else if (std.mem.eql(u8, path, "/api/models/Org/Flash/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1") or std.mem.eql(u8, path, "/api/models/Org/Whole/tree/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2")) {
             // The hub's tree sends LFS oids as bare hex.
-            const tree = std.fmt.allocPrint(std.testing.allocator, "[{{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"1111111111111111111111111111111111111111\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}, {{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"flaky.json\", \"size\": {d}}}]", .{ &fake.config_git_hex, fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len, &fake.flaky_git_hex, flaky_body.len }) catch return false;
+            const tree = std.fmt.allocPrint(std.testing.allocator, "[{{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"1111111111111111111111111111111111111111\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}, {{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"flaky.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"3333333333333333333333333333333333333333\", \"path\": \"tensors/model-00001-of-00001.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}]", .{ &fake.config_git_hex, fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len, &fake.flaky_git_hex, flaky_body.len, fake.nested.len, fake.nested_sha_hex, fake.nested.len }) catch return false;
             defer std.testing.allocator.free(tree);
-            respond(fd, tree);
+            fake.respond(conn, tree);
         } else if (std.mem.eql(u8, path, config_path) or std.mem.eql(u8, path, "/Org/Whole/resolve/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2/config.json")) {
-            respond(fd, fake.config);
+            fake.respond(conn, fake.config);
         } else if (std.mem.endsWith(u8, path, "/flaky.json")) {
             if (fake.flaky_requests.fetchAdd(1, .monotonic) > 0) {
-                respond(fd, flaky_body);
+                fake.respond(conn, flaky_body);
                 return true;
             }
             var head_buf: [128]u8 = undefined; // the first answer stops halfway and drops the connection
-            sendAll(fd, std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{flaky_body.len}) catch return false);
-            sendAll(fd, flaky_body[0 .. flaky_body.len / 2]);
+            fake.sendAll(conn, std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{flaky_body.len}) catch return false);
+            fake.sendAll(conn, flaky_body[0 .. flaky_body.len / 2]);
             return false;
         } else if (std.mem.eql(u8, path, "/Org/Whole/resolve/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2/weights.safetensors")) {
             _ = fake.weight_requests.fetchAdd(1, .monotonic);
-            whole(fd, fake.weights);
+            fake.whole(conn, fake.weights);
+            return false;
+        } else if (std.mem.eql(u8, path, nested_path) or std.mem.eql(u8, path, "/Org/Whole/resolve/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2/tensors/model-00001-of-00001.safetensors")) {
+            fake.whole(conn, fake.nested);
+            return false;
         } else if (std.mem.eql(u8, path, weights_path)) {
             _ = fake.weight_requests.fetchAdd(1, .monotonic);
             const from = range_start orelse {
-                whole(fd, fake.weights);
+                fake.whole(conn, fake.weights);
                 return true;
             };
             fake.range_starts.store(from, .monotonic);
             if (from >= fake.weights.len) {
-                respond(fd, "");
+                fake.respond(conn, "");
                 return true;
             }
             const stop = if (range_end) |last| @min(last + 1, fake.weights.len) else fake.weights.len;
             const body = fake.weights[from..stop];
             var head_buf: [256]u8 = undefined;
             const head_text = std.fmt.bufPrint(&head_buf, "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nContent-Range: bytes {d}-{d}/{d}\r\nConnection: keep-alive\r\n\r\n", .{ body.len, from, stop - 1, fake.weights.len }) catch return false;
-            sendAll(fd, head_text);
-            sendAll(fd, body);
+            fake.sendAll(conn, head_text);
+            fake.sendAll(conn, body);
         } else {
-            respond(fd, "{}");
+            fake.respond(conn, "{}");
         }
         return true;
     }
 
-    fn whole(fd: std.posix.socket_t, body: []const u8) void {
+    fn whole(fake: *FakeHub, conn: std.Io.net.Stream, body: []const u8) void {
         var head_buf: [128]u8 = undefined;
         const head_text = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n", .{body.len}) catch return;
-        sendAll(fd, head_text);
-        sendAll(fd, body);
+        fake.sendAll(conn, head_text);
+        fake.sendAll(conn, body);
     }
 
-    fn respond(fd: std.posix.socket_t, body: []const u8) void {
+    fn respond(fake: *FakeHub, conn: std.Io.net.Stream, body: []const u8) void {
         var head_buf: [128]u8 = undefined;
         const head_text = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n", .{body.len}) catch return;
-        sendAll(fd, head_text);
-        sendAll(fd, body);
+        fake.sendAll(conn, head_text);
+        fake.sendAll(conn, body);
     }
 
-    fn sendAll(fd: std.posix.socket_t, bytes: []const u8) void {
-        var sent: usize = 0;
-        while (sent < bytes.len) {
-            const n = std.posix.system.write(fd, bytes[sent..].ptr, bytes.len - sent);
-            if (std.posix.errno(n) != .SUCCESS) return;
-            sent += @intCast(n);
-        }
+    fn sendAll(fake: *FakeHub, conn: std.Io.net.Stream, bytes: []const u8) void {
+        var buf: [4096]u8 = undefined;
+        var w = conn.writer(fake.io, &buf);
+        w.interface.writeAll(bytes) catch return;
+        w.interface.flush() catch return;
     }
 
     fn start(fake: *FakeHub) void {
@@ -233,11 +249,31 @@ const FakeHub = struct {
         return std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{fake.port});
     }
 
+    fn forget(fake: *FakeHub, conn: std.Io.net.Stream) void {
+        fake.live_lock.lockUncancelable(fake.io);
+        defer fake.live_lock.unlock(fake.io);
+        for (fake.live.items, 0..) |c, i| {
+            if (c.socket.handle == conn.socket.handle) {
+                _ = fake.live.swapRemove(i);
+                return;
+            }
+        }
+    }
+
     fn stopServer(fake: *FakeHub) void {
         fake.stop.store(true, .release);
+        fake.live_lock.lockUncancelable(fake.io);
+        for (fake.live.items) |conn| conn.shutdown(fake.io, .both) catch {};
+        fake.live_lock.unlock(fake.io);
+        // one connection of our own unblocks accept, and is closed on arrival
+        if (fake.server.socket.address.connect(fake.io, .{ .mode = .stream }) catch null) |wake| wake.close(fake.io);
         if (fake.thread) |t| t.join();
-        _ = std.posix.system.close(fake.server_fd);
+        fake.server.deinit(fake.io);
+        fake.live.deinit(std.testing.allocator);
+        fake.threaded.deinit();
+        std.testing.allocator.destroy(fake.threaded);
         std.testing.allocator.free(fake.weights_sha_hex);
+        std.testing.allocator.free(fake.nested_sha_hex);
     }
 };
 
@@ -271,6 +307,11 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
     try std.testing.expectEqualStrings(FakeHub.config_body, config_read);
     const weights_read = try std.Io.Dir.cwd().readFileAlloc(io, weights_link, a, .limited(1 << 20));
     try std.testing.expectEqualSlices(u8, FakeHub.weights_body, weights_read);
+    // A shard in a folder inside the model folder lands as a real subfolder in the snapshot, still a blob link.
+    const nested_link = try std.fs.path.join(a, &.{ snapshot, "tensors/model-00001-of-00001.safetensors" });
+    const nested_read = try std.Io.Dir.cwd().readFileAlloc(io, nested_link, a, .limited(1 << 20));
+    try std.testing.expectEqualSlices(u8, FakeHub.nested_body, nested_read);
+    try std.Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ root, "models--Org--Flash/blobs", fake_hub.nested_sha_hex }), .{});
     const ref = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ root, "models--Org--Flash/refs/main" }), a, .limited(64));
     try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1", std.mem.trim(u8, ref, " \r\n"));
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "weights.safetensors") != null);
@@ -288,6 +329,7 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
     try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &out2.writer, &err_out.writer, &env, root, "Org/Flash"));
     try std.testing.expectEqual(@as(u32, 1), fake_hub.weight_requests.load(.monotonic));
     try std.testing.expect(std.mem.indexOf(u8, out2.written(), "weights.safetensors: cached") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out2.written(), "tensors/model-00001-of-00001.safetensors: cached") != null);
     try std.testing.expect(std.mem.indexOf(u8, out2.written(), "flaky.json: cached") != null);
     try std.testing.expectEqual(@as(u32, 2), fake_hub.flaky_requests.load(.monotonic));
 
@@ -412,7 +454,7 @@ test "an EXLR8 node's whole files land in a relative directory, small files and 
         .{ .path = "config.json", .size = FakeHub.config_body.len, .git_sha1 = git_sha1 },
         .{ .path = "weights.safetensors", .size = FakeHub.weights_body.len, .sha256 = sha256 },
     };
-    var client: std.http.Client = .{ .allocator = a, .io = io };
+    var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
     var out: std.Io.Writer.Allocating = .init(a);
     var err_out: std.Io.Writer.Allocating = .init(a);
@@ -420,4 +462,53 @@ test "an EXLR8 node's whole files land in a relative directory, small files and 
     const cwd = std.Io.Dir.cwd();
     try std.testing.expectEqualStrings(FakeHub.config_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "config.json" }), a, .limited(1 << 20)));
     try std.testing.expectEqualSlices(u8, FakeHub.weights_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "weights.safetensors" }), a, .limited(1 << 20)));
+}
+
+test "security: a hub response cannot write beyond the manifest file size" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var fake = try FakeHub.open();
+    fake.start();
+    defer fake.stopServer();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const url = try std.fmt.allocPrint(a, "{s}{s}", .{ try fake.endpoint(a), FakeHub.weights_path });
+    var client = @import("pull_http.zig").client(a, io);
+    defer client.deinit();
+    var out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectError(error.SizeMismatch, single.downloadRetrying(a, io, &client, &out.writer, url, dir, .{
+        .path = "overflow.bin",
+        .size = 8,
+    }));
+    const partial = try std.fs.path.join(a, &.{ dir, "overflow.bin.incomplete" });
+    const written = single.fileStat(io, partial) catch |err| switch (err) {
+        error.FileNotFound => 0,
+        else => return err,
+    };
+    try std.testing.expect(written <= 8);
+}
+
+test "security: a shard in a folder inside the model folder lands inside the snapshot" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake_hub = FakeHub.open() catch return error.SkipZigTest;
+    fake_hub.start();
+    defer fake_hub.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-nested-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const env = try testEnv(a, try fake_hub.endpoint(a));
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
+    const snapshot = try std.fs.path.join(a, &.{ root, "models--Org--Flash/snapshots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1" });
+    // NVIDIA's own export puts every shard in `tensors/`; the snapshot keeps that folder and still links the blob.
+    const link = try std.fs.path.join(a, &.{ snapshot, "tensors/model-00001-of-00001.safetensors" });
+    const body = try std.Io.Dir.cwd().readFileAlloc(io, link, a, .limited(1 << 20));
+    try std.testing.expectEqualSlices(u8, FakeHub.nested_body, body);
+    try std.Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ root, "models--Org--Flash/blobs", fake_hub.nested_sha_hex }), .{});
 }

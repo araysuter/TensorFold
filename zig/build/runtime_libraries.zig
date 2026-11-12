@@ -1,6 +1,10 @@
 //! Optional runtime refusal and discovery regressions with absent files and a fake loader.
 const std = @import("std");
 pub fn tests(b: *std.Build, all: *std.Build.Step) void {
+    const pictures = b.createModule(.{ .root_source_file = b.path("zig/src/core/picture/picture.zig"), .target = b.graph.host, .link_libc = true });
+    const picture_run = b.addRunArtifact(b.addTest(.{ .root_module = pictures }));
+    picture_run.has_side_effects = true;
+    b.step("test-picture-host", "Image codecs, caller limits and pixel goldens without a GPU").dependOn(&picture_run.step);
     const experimental = b.createModule(.{ .root_source_file = b.path("zig/experimental_family_test.zig"), .target = b.graph.host });
     const policy = b.addRunArtifact(b.addTest(.{ .root_module = experimental }));
     b.step("test-experimental-family-host", "Exact release opt-in policy without model or GPU work").dependOn(&policy.step);
@@ -35,4 +39,30 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     step.dependOn(&check.step);
     all.dependOn(&check.step);
     all.dependOn(&run.step);
+    const grammar_warnings = b.createModule(.{ .root_source_file = b.path("zig/grammar_warning_check.zig"), .target = b.graph.host, .link_libc = true });
+    const grammar_pin = b.addOptions();
+    grammar_pin.addOption([]const u8, "clone", @import("grammar.zig").clone);
+    grammar_warnings.addOptions("grammar_pin", grammar_pin);
+    const grammar_check = b.addRunArtifact(b.addExecutable(.{ .name = "grammar-warning-check", .root_module = grammar_warnings }));
+    b.step("test-grammar-warning-host", "Missing grammar startup warning and successful discovery without real libraries").dependOn(&grammar_check.step);
+    step.dependOn(&grammar_check.step);
+    all.dependOn(&grammar_check.step);
+    const codecs = b.step("test-codec-diagnostics-host", "Pinned codec diagnostics with host libraries that abort on pixel work");
+    for ([_][]const u8{ "missing", "wrong", "symbols", "ready" }) |kind| {
+        const m = b.createModule(.{ .root_source_file = b.path("zig/picture_runtime_host_test.zig"), .target = b.graph.host, .link_libc = true });
+        const options = b.addOptions();
+        options.addOption([]const u8, "kind", kind);
+        m.addOptions("codec_fixture", options);
+        const codec_run = b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"codec diagnostics:"} }));
+        if (std.mem.eql(u8, kind, "missing")) {
+            options.addOption([]const u8, "library", "/__tf_missing_runtime__/codec");
+        } else {
+            const mock = b.createModule(.{ .target = b.graph.host, .link_libc = true });
+            mock.addCSourceFile(.{ .file = b.path("zig/tests/picture_codec_mock.c"), .flags = &.{b.fmt("-DMOCK_{s}=1", .{kind})} });
+            const lib = b.addLibrary(.{ .name = b.fmt("picture-codec-{s}", .{kind}), .linkage = .dynamic, .root_module = mock });
+            options.addOptionPath("library", lib.getEmittedBin());
+        }
+        codecs.dependOn(&codec_run.step);
+        all.dependOn(&codec_run.step);
+    }
 }

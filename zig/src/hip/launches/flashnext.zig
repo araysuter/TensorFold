@@ -3,6 +3,8 @@
 const Launcher = @import("../launches.zig").Launcher;
 const Module = @import("../module.zig").Module;
 const Function = @import("../module.zig").Function;
+const std = @import("std");
+const kernels = @import("../kernels.zig");
 const util = @import("util.zig");
 const S = util.S;
 const P = util.P;
@@ -21,6 +23,8 @@ pub const Fns = struct {
     hc_norm: Function,
     hc_gates: Function,
     rms_wide: Function,
+    rms_wide_waves: Function,
+    rms_wide_apply: Function,
     hc_mix: Function,
     ple_gate: Function,
     ple_conv: Function,
@@ -29,6 +33,7 @@ pub const Fns = struct {
     idx_scores: Function,
     idx_select: Function,
     sparse_parts: [2]Function, // groups of up to 6 and up to 12 query heads
+    sparse_lanes: [2][2]Function, // the same sums from fp16 and bf16 caches, a lane a key and several heads
     sparse_merge: Function,
 
     pub fn load(m: Module) Error!Fns {
@@ -36,6 +41,8 @@ pub const Fns = struct {
             .hc_norm = try m.function("tf_fn_hc_norm"),
             .hc_gates = try m.function("tf_fn_hc_gates"),
             .rms_wide = try m.function("tf_fn_rms_wide"),
+            .rms_wide_waves = try m.function("tf_fn_rms_wide_waves"),
+            .rms_wide_apply = try m.function("tf_fn_rms_wide_apply"),
             .hc_mix = try m.function("tf_fn_hc_mix"),
             .ple_gate = try m.function("tf_fn_ple_gate"),
             .ple_conv = try m.function("tf_fn_ple_conv"),
@@ -44,6 +51,10 @@ pub const Fns = struct {
             .idx_scores = try m.function("tf_fn_idx_scores"),
             .idx_select = try m.function("tf_fn_idx_select"),
             .sparse_parts = .{ try m.function("tf_fn_sparse_parts6"), try m.function("tf_fn_sparse_parts12") },
+            .sparse_lanes = .{
+                .{ try m.function("tf_fn_sparse_lanes6_f16"), try m.function("tf_fn_sparse_lanes6_bf16") },
+                .{ try m.function("tf_fn_sparse_lanes12_f16"), try m.function("tf_fn_sparse_lanes12_bf16") },
+            },
             .sparse_merge = try m.function("tf_fn_sparse_merge"),
         };
     }
@@ -126,12 +137,25 @@ pub fn hcGates(
     try l.flat(l.fnx.hc_gates, @as(i64, rows) * (low + if (inject != null) streams else 0), s, &a);
 }
 
-/// Each of `rows` rows normed over its whole `width` (any width) times the fp32 `scale`.
+/// streams.hpp's split wide norm: bf16 width, a row's waves (scratch floats), apply group, rows it takes on gfx1201.
+pub const wide_width = 10240;
+pub const wide_waves = 8;
+const wide_apply = 64;
+pub const wide_rows = 16;
+const wide_arch = std.mem.eql(u8, kernels.arch, "gfx1201");
+
+/// The split wide norm serves this call: gfx1201, alternates on, bf16 MTP width, scratch, at most wide_rows rows.
+pub fn wideSplit(l: *const Launcher, waves: F, kind: c_int, rows: c_int, width: c_int) bool {
+    return wide_arch and l.fuse and kind == 2 and width == wide_width and waves != null and rows <= wide_rows;
+}
+
+/// Each row normed over its whole `width` times the fp32 `scale`; `waves` scratch lets the split take its bits.
 pub fn rmsWide(
     l: *const Launcher,
     x: C,
     scale: CF,
     y: P,
+    waves: F,
     kind: c_int,
     rows: c_int,
     width: c_int,
@@ -139,6 +163,14 @@ pub fn rmsWide(
     s: S,
 ) Error!void {
     if (rows == 0) return;
+    if (wideSplit(l, waves, kind, rows, width)) {
+        var a: Args = .{};
+        inline for (.{ ad(x), ad(waves) }) |v| try a.add(v);
+        try l.go(l.fnx.rms_wide_waves, dim(wide_waves, rows, 1), dim(32, 1, 1), 0, s, &a);
+        var b: Args = .{};
+        inline for (.{ ad(x), ad(waves), ad(scale), ad(y), width, eps }) |v| try b.add(v);
+        return l.go(l.fnx.rms_wide_apply, dim(rows * (wide_width / wide_apply), 1, 1), dim(wide_apply, 1, 1), 0, s, &b);
+    }
     var a: Args = .{};
     inline for (.{ ad(x), ad(scale), ad(y), kind, width, eps }) |v| try a.add(v);
     try l.go(l.fnx.rms_wide, dim(rows, 1, 1), dim(threads, 1, 1), 0, s, &a);
@@ -404,6 +436,102 @@ pub fn sparseAttention(
     parts: c_int,
     s: S,
 ) Error!void {
+    return sparseWith(
+        .auto,
+        l,
+        q,
+        k,
+        v,
+        cache_kind,
+        ids,
+        id_stride,
+        count,
+        sparse,
+        parts_o,
+        parts_ms,
+        out,
+        rows,
+        heads,
+        kv_heads,
+        dims,
+        cap,
+        scale,
+        parts,
+        s,
+    );
+}
+
+/// `sparseAttention` on the kernel that stages keys as fp32 one tile at a time, for tests of the faster kernel's bits.
+pub fn sparseAttentionScalar(
+    l: *const Launcher,
+    q: CF,
+    k: C,
+    v: C,
+    cache_kind: c_int,
+    ids: CI,
+    id_stride: i64,
+    count: CI,
+    sparse: CI,
+    parts_o: F,
+    parts_ms: F,
+    out: F,
+    rows: c_int,
+    heads: c_int,
+    kv_heads: c_int,
+    dims: c_int,
+    cap: i64,
+    scale: f32,
+    parts: c_int,
+    s: S,
+) Error!void {
+    return sparseWith(
+        .scalar,
+        l,
+        q,
+        k,
+        v,
+        cache_kind,
+        ids,
+        id_stride,
+        count,
+        sparse,
+        parts_o,
+        parts_ms,
+        out,
+        rows,
+        heads,
+        kv_heads,
+        dims,
+        cap,
+        scale,
+        parts,
+        s,
+    );
+}
+
+fn sparseWith(
+    kernel: enum { auto, scalar },
+    l: *const Launcher,
+    q: CF,
+    k: C,
+    v: C,
+    cache_kind: c_int,
+    ids: CI,
+    id_stride: i64,
+    count: CI,
+    sparse: CI,
+    parts_o: F,
+    parts_ms: F,
+    out: F,
+    rows: c_int,
+    heads: c_int,
+    kv_heads: c_int,
+    dims: c_int,
+    cap: i64,
+    scale: f32,
+    parts: c_int,
+    s: S,
+) Error!void {
     if (dims > 256 or @rem(heads, kv_heads) != 0 or @divExact(heads, kv_heads) > 12)
         return util.invalid("sparseAttention");
     var a: Args = .{};
@@ -426,7 +554,28 @@ pub fn sparseAttention(
         parts,
     }) |x| try a.add(x);
     const wide: usize = if (@divExact(heads, kv_heads) <= 6) 0 else 1;
-    try l.go(l.fnx.sparse_parts[wide], dim(kv_heads, rows, parts), dim(256, 1, 1), 0, s, &a);
+    if (kernel == .auto and (cache_kind == 1 or cache_kind == 2) and @rem(dims, 8) == 0) {
+        var c: Args = .{};
+        inline for (.{
+            ad(q),
+            ad(k),
+            ad(v),
+            ad(ids),
+            id_stride,
+            ad(count),
+            ad(sparse),
+            ad(parts_o),
+            ad(parts_ms),
+            heads,
+            kv_heads,
+            dims,
+            cap,
+            scale,
+            parts,
+        }) |x| try c.add(x);
+        const kind: usize = @intCast(cache_kind - 1);
+        try l.go(l.fnx.sparse_lanes[wide][kind], dim(kv_heads, rows, parts), dim(256, 1, 1), 0, s, &c);
+    } else try l.go(l.fnx.sparse_parts[wide], dim(kv_heads, rows, parts), dim(256, 1, 1), 0, s, &a);
     var b: Args = .{};
     inline for (.{ ad(parts_o), ad(parts_ms), ad(out), heads, dims, parts }) |x| try b.add(x);
     try l.go(l.fnx.sparse_merge, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &b);

@@ -3,15 +3,20 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const mm_mod = @import("cuda_mm.zig");
+const index_mod = @import("cuda_index.zig");
 
-/// What the forward's kernels launch from: our glue's functions.
-pub const Set = struct { glue: *const Kernels, mm: ?*const mm_mod.Kernels = null, packs: ?*const mm_mod.Packed = null, prompt: bool = false }; // mm: linears tiled at load
+/// What the forward's kernels launch from: our glue's, glm_mm's when tiled, qlinear's lane for FP8 kinds, copy_rows.
+pub const Set = struct { glue: *const Kernels, index: ?*const index_mod.Kernels = null, mm: ?*const mm_mod.Kernels = null, packs: ?*const mm_mod.Packed = null, prompt: bool = false, linear: cuda.qlinear.Linear = .{}, copy_rows: ?cuda.Function = null };
+
+/// A hidden-size norm's weight: bf16, or float32 (FP4-Local's) read as float32 by the _f32w kernels.
+pub const Norm = union(enum) { bf16: u64, f32: u64 };
 
 /// Our glm_glue.cu's functions.
 pub const Kernels = struct {
     rmsnorm_4096: cuda.Function,
     rmsnorm_1536: cuda.Function,
     rmsnorm_512: cuda.Function,
+    rmsnorm_4096_f32w: cuda.Function,
     residual_add: cuda.Function,
     stream_mean: cuda.Function,
     rank_sum: cuda.Function,
@@ -19,6 +24,7 @@ pub const Kernels = struct {
     combine: cuda.Function,
     slice_sum: cuda.Function,
     top1: cuda.Function,
+    top1_sums: cuda.Function,
     put_words: cuda.Function,
     embed_b16: cuda.Function,
     conv_shift: cuda.Function,
@@ -26,17 +32,19 @@ pub const Kernels = struct {
     swiglu_64: cuda.Function,
     group_sums: cuda.Function,
     topk: cuda.Function,
-    router_part: cuda.Function,
     router_tile: cuda.Function,
     hc_partial: cuda.Function,
     hc_partial8: cuda.Function,
     hc_finish: cuda.Function,
+    hc_finish_f32w: cuda.Function,
     absorb_q: cuda.Function,
     expand_v: cuda.Function,
     lat_write: cuda.Function,
+    lat_write_fp8: cuda.Function,
     index_write: cuda.Function,
     pool_keys: cuda.Function,
     select_rows: cuda.Function,
+    select_rows_wide: cuda.Function,
     bmm_decode: cuda.Function,
     bmm_rows: cuda.Function,
     bmm_tile: cuda.Function,
@@ -47,6 +55,8 @@ pub const Kernels = struct {
     bmm_d64s2: cuda.Function,
     chunks_16: cuda.Function,
     chunks_32: cuda.Function,
+    chunks_16_fp8: cuda.Function,
+    chunks_32_fp8: cuda.Function,
     merge: cuda.Function,
     scores: cuda.Function,
 
@@ -57,6 +67,8 @@ pub const Kernels = struct {
         try k.bmm_tile1.allowDynamicShared(bmm_tile1_smem[1]);
         try k.chunks_16.allowDynamicShared(chunksSmem(16));
         try k.chunks_32.allowDynamicShared(chunksSmem(32));
+        try k.chunks_16_fp8.allowDynamicShared(chunksSmem(16));
+        try k.chunks_32_fp8.allowDynamicShared(chunksSmem(32));
         return k;
     }
 };
@@ -105,6 +117,18 @@ pub fn rmsnorm(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, o
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = warps * 32 } }, stream, &a);
 }
 
+/// rmsnorm by a Norm: a float32 weight (the hidden size) through rmsnorm_4096_f32w, rmsnorm_4096's arithmetic.
+pub fn rmsnormBy(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, n: Norm, out: u64, o_stride: usize, xs: ?u64, eps: f32, rows: usize, d: usize) !void {
+    const g = switch (n) {
+        .bf16 => |w| return rmsnorm(set, stream, x, x_stride, w, out, o_stride, xs, eps, rows, d),
+        .f32 => |g| g,
+    };
+    if (d != 4096) return error.NoRmsnormWidth;
+    var a: cuda.Args = .{};
+    inline for (.{ x, i64of(x_stride), g, out, i64of(o_stride), xs orelse @as(u64, 0), eps, @as(c_int, @intFromBool(xs != null)) }) |v| a.add(v);
+    try cuda.launch.launch(set.glue.rmsnorm_4096_f32w, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
+}
+
 fn cdiv(a: usize, b: usize) u32 {
     return @intCast((a + b - 1) / b);
 }
@@ -129,7 +153,7 @@ pub fn swiglu(set: Set, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: 
 pub const bmm_tile_smem: u32 = 3 * (128 + 64) * 64 * 2;
 /// tf_glm_bmm_tile1's [bf16, fp32 out]: 3 stages of 128 x and 128 w rows, 32 bf16 a row, or the fp32 tile if larger.
 pub const bmm_tile1_smem = [2]u32{ 3 * (128 + 128) * 32 * 2, 128 * (128 + 4) * 4 };
-/// glm_glue_attn.cuh's wide_smem<hb>(): q (hb x 512), two 32-key tiles, p (hb x 32) in bf16, then max/sum scratch.
+/// common/mla.cuh's wide_smem<hb>(): q (hb x 512), two 32-key tiles, p (hb x 32) in bf16, then max/sum scratch.
 pub fn chunksSmem(comptime hb: u32) u32 {
     return (hb * 512 + 2 * 32 * 512 + hb * 32) * 2 + (hb * 4 + 2 * hb) * 4;
 }
@@ -137,15 +161,16 @@ pub fn chunksSmem(comptime hb: u32) u32 {
 /// K slices of the router's dot (glue.ROUTER_KS): fixed by the shape, as the sliced and the single pass differ in bits.
 pub const router_ks = 8;
 
-/// glue.router: out [m][ne] fp32 = x . w rows; d a multiple of router_ks x 64: K slices in `part`, added in order.
+/// Shared bytes tf_glm_router_tile stages (common/router_mma.cuh): two stages of 64 rows and 32 experts by 64 + 8.
+pub const router_tile_smem: u32 = 2 * (64 + 32) * (64 + 8) * 2;
+
+/// glue.router: out [m][ne] fp32 = x . w rows; d a multiple of router_ks x 64, rows on 16 bytes; K slices in `part`.
 pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, out: u64, part: u64, m: usize, d: usize, ne: usize) !void {
     if (d % (router_ks * 64) != 0) return error.RouterWidth; // the Python family's single-pass _router: no GLM width
+    if (x % 16 != 0 or x_stride % 8 != 0 or w % 16 != 0) return error.RowShape; // the tiles stage rows by cp.async
     var a: cuda.Args = .{};
     inline for (.{ x, w, part, i64of(m), i64of(x_stride), i64of(d), i64of(ne), @as(c_int, router_ks) }) |v| a.add(v);
-    if (x % 16 == 0 and x_stride % 8 == 0) // rows on 16 bytes: 64-row tiles staged by cp.async (decode's rows past m load as zeros)
-        try cuda.launch.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a)
-    else
-        try cuda.launch.launch(set.glue.router_part, .{ .grid = .{ .x = cdiv(m, 16), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
+    try cuda.launch.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .shared = router_tile_smem }, stream, &a);
     try sliceSum(set, stream, part, out, m * ne, router_ks, true);
 }
 
@@ -173,7 +198,7 @@ pub fn hcPartBytes(rows: usize) usize {
 }
 
 /// glue.hc_pre: streams [rows][s d] -> the collapsed RMS-normed row and its 64-sums `xs`; `post`, `comb` (Sinkhorn).
-pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale: u64, norm_w: u64, out: u64, xs: u64, post: u64, comb: u64, part: u64, eps: f32, hc_eps: f32, iters: usize, rows: usize, d: usize, s: usize) !void {
+pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale: u64, norm: Norm, out: u64, xs: u64, post: u64, comb: u64, part: u64, eps: f32, hc_eps: f32, iters: usize, rows: usize, d: usize, s: usize) !void {
     if (d != 4096 or s != 4) return error.HcShape;
     var a: cuda.Args = .{};
     inline for (.{ x, fn_w, part, i64of(s * d), @as(c_int, hc_blocks) }) |v| a.add(v);
@@ -184,9 +209,13 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
         a.add(i64of(rows));
         try cuda.launch.launch(set.glue.hc_partial, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
     }
+    const f, const w = switch (norm) {
+        .bf16 => |p| .{ set.glue.hc_finish, p },
+        .f32 => |p| .{ set.glue.hc_finish_f32w, p },
+    };
     var b: cuda.Args = .{};
-    inline for (.{ x, part, base, scale, norm_w, out, xs, post, comb, eps, hc_eps, @as(c_int, hc_blocks), cint(iters) }) |v| b.add(v);
-    try cuda.launch.launch(set.glue.hc_finish, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &b);
+    inline for (.{ x, part, base, scale, w, out, xs, post, comb, eps, hc_eps, @as(c_int, hc_blocks), cint(iters) }) |v| b.add(v);
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &b);
 }
 
 /// glue.hc_post: branch = bf16(`g`, rank 0 first); xout[s] = bf16(post[s] branch + sum_t comb[t][s] x[t]); x may alias.

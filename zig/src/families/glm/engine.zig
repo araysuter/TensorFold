@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash on Metal: one greedy reply at a time, the prompt in 16-row windows or tensor-unit chunks, then drafted rounds.
+//! Metal GLM-5.3-Flash: a greedy reply at a time; prompt in 16-row windows or tensor-unit chunks, then drafted rounds.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -39,7 +39,7 @@ pub const Result = struct {
     gap_seconds: f64 = 0, // the GPU idle between consecutive rounds
     copy_rounds: u64 = 0, // rounds whose drafts were copied from earlier in the history, and their drafts kept
     copy_accepted: u64 = 0,
-    // GLM_RANKS=1: rounds by drafts kept m: [m][0] all kept, else the target's place among the head's choices at the miss
+    // GLM_RANKS=1: rounds by drafts kept m: [m][0] all kept, else the target's rank among the head's choices at a miss
     draft_ranks: [st.max_rows][4]u32 = @splat(@splat(0)),
 };
 
@@ -89,11 +89,11 @@ pub const Engine = struct {
     sampling: ?lanes.Sampling = null, // the standalone path's keyed rules (GLM_SAMPLING; the server never sets it)
     rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
-    residency: ?mtl.ResidencySet = null,
+    residency: ?residency.Resident = null,
+    residency_enabled: bool = true,
     vision: ?*vision_mod.Vision = null, // --vision: the image tower
     vision_rows: Ref = undefined, // bf16 [image tokens, hidden]: a prompt's image rows (vision only)
     vision_limits: vision_mod.Limits = .{},
-    keepalive_sets: [1]mtl.ResidencySet = undefined, // the residency set, for the idle keepalive's commit
     keepalive_target: mtl.keepalive.Target = undefined, // the engine's queue, set at load for the server's ticker
     load_seconds: f64 = 0,
     limit: load_plan.Limit = undefined, // the one-Mac load limit, read once at load (stream admission and the cache budget read it)
@@ -102,13 +102,14 @@ pub const Engine = struct {
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
 
-    /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
-    pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
-        return loadWith(gpa, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null);
+    /// Checkpoint `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers; GLM_EP=settings: half the experts.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32) !*Engine {
+        return loadWith(gpa, io, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null, false);
     }
 
     /// `load` with expert parallel over `ep_path`'s link (one Mac when null) and `vision`'s image tower and rows.
-    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits) !*Engine {
+    pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits, defer_residency: bool) !*Engine {
+        const keep_resident = try residency.policy.flag(platform.getenv("GLM_RESIDENCY"));
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
         const pool = mtl.objc.Pool.push();
@@ -117,6 +118,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.ev = 0;
         e.residency = null;
+        e.residency_enabled = keep_resident;
         e.vision = null;
         e.gpu = .{ 0, 0 };
         e.fused_route = if (platform.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
@@ -138,6 +140,7 @@ pub const Engine = struct {
         errdefer e.device.deinit();
         e.queue = try e.device.queue();
         errdefer e.queue.deinit();
+        e.keepalive_target = .{ .queue = e.queue };
         e.event = try e.device.sharedEvent();
         errdefer e.event.deinit();
         const path = try std.fmt.allocPrintSentinel(gpa, "{s}/config.json", .{dir}, 0);
@@ -178,7 +181,7 @@ pub const Engine = struct {
         e.limit = try load_plan.loadLimit(e.device);
         const limit = e.limit.bytes;
         // --vision: the image tower and its rows count against the limit beside the weights and caches
-        const tower = if (vision) |lim| try vision_mod.planBytes(gpa, lim, e.c.hidden) else 0;
+        const tower = if (vision) |lim| vision_mod.planBytes(lim, e.c.hidden) else 0;
         var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
         if (e.c.mtp > 0 and link == null and plan_bytes + tower + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
             var lean = e.c;
@@ -228,12 +231,11 @@ pub const Engine = struct {
             me.rest[0] = @intFromBool(rows);
             me.rest[1] = @intCast(e.c.tp);
             me.rest[2] = @intFromBool(learn); // --learn on both Macs or neither: each holds its half of a learned state
-            e.ep = try ep_mod.Ep.init(gpa, e.device, s, me);
+            e.ep = try ep_mod.Ep.init(gpa, io, e.device, s, me);
         }
         if (vision) |lim| try vision_mod.attach(e, gpa, dir, f.bytes[0..f.size], lim); // --vision: the tower and its rows
         errdefer if (e.vision) |v| v.deinit();
-        residency.wire(e); // GLM_RESIDENCY's opt-in set, then the idle keepalive's target
-        // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step (GLM_NO_WARMUP: skip)
+        // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step
         if (e.pr != null and cap >= 128 and platform.c.getenv("GLM_NO_WARMUP") == null) {
             var ids: [64]u32 = undefined;
             for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i);
@@ -241,6 +243,7 @@ pub const Engine = struct {
             _ = try e.generate(&ids, 2, &.{}, 0, .{ .ctx = &quiet, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled });
         }
         e.load_seconds = @as(f64, @floatFromInt(platform.c.mach_absolute_time() - t0)) / 24e6;
+        if (!defer_residency) residency.wire(e, io);
         return e;
     }
 
@@ -269,10 +272,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         const gpa = e.gpa;
-        if (e.residency) |set| {
-            e.queue.removeResidencySet(set);
-            set.deinit();
-        }
+        residency.drop(e);
         if (e.ep) |ep| ep.deinit(gpa);
         if (e.vision) |v| v.deinit();
         e.ep_arena.deinit();
@@ -452,7 +452,7 @@ pub const Engine = struct {
         var emitted: usize = 1;
         var hist: ?CopyIndex = null; // the prompt and the reply so far: copy drafts' source
         defer if (hist) |*h| h.deinit();
-        // a copy round's window: the most expected tokens a ms against the pair's measured round costs, when that beats an MTP round
+        // copy round window: most expected tokens a ms from the pair's measured round costs, if it beats an MTP round
         var ck: f64 = 0;
         var cr: f64 = 0;
         var mk: f64 = @floatFromInt(d);

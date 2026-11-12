@@ -6,8 +6,8 @@
 #include <math.h>
 #include <stdint.h>
 
-#include "glue_math.cuh"
-#include "qmm_frag.cuh"
+#include "common/glue_math.cuh"
+#include "common/qmm_frag.cuh"
 
 using namespace tf_glue;
 
@@ -18,20 +18,9 @@ constexpr int HD = 256;  // head width the attention tiles are built for
 constexpr int QR = 16;   // query heads a KV head's tile holds (G <= 16, the rest zero)
 
 // A block's fixed-order sum: each warp's butterfly, then the warps' sums in warp order.
-__device__ __forceinline__ float block_sum(float v, float* scratch) {
-    v = warp_sum(v);
-    const int warps = blockDim.x >> 5;
-    if ((threadIdx.x & 31) == 0) scratch[threadIdx.x >> 5] = v;
-    __syncthreads();
-    float total = 0.0f;
-    for (int w = 0; w < warps; ++w) total = __fadd_rn(total, scratch[w]);
-    __syncthreads();
-    return total;
-}
+using tf_common::block_sum_serial;
 
-__device__ __forceinline__ float inv_rms(float ss, int width, float eps) {
-    return __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ss, static_cast<float>(width)), eps)));
-}
+__device__ __forceinline__ float inv_rms(float ss, int n, float eps) { return tf_common::rms_scale(ss, n, eps); }
 
 // Rotate-half RoPE over the first 2 * half features at `pos`: cos and sin of the fp32 angle (full range reduction).
 __device__ __forceinline__ float rope(float xn, float xpn, int d, int half, int pos, const float* __restrict__ inv) {
@@ -42,16 +31,13 @@ __device__ __forceinline__ float rope(float xn, float xpn, int d, int half, int 
     return d < half ? __fsub_rn(__fmul_rn(xn, c), __fmul_rn(xpn, s)) : __fadd_rn(__fmul_rn(xpn, s), __fmul_rn(xn, c));
 }
 
-// ldmatrix .x4 .trans: four 8x8 bf16 tiles of shared memory, each thread's pair down a column (the B layout of rows).
-__device__ __forceinline__ void ldmatrix4t(uint32_t (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"(qmm_frag::smem(p)));
-}
+using qmm_frag::ldmatrix4t;
 
 __device__ __forceinline__ int partner(int d, int half) {
     return d < half ? d + half : (d < 2 * half ? d - half : d);
 }
+
+#include "flashnext_pages.cuh"
 
 }  // namespace fn_attn
 
@@ -64,19 +50,22 @@ __device__ __forceinline__ int media_pos(int pos, int d, int half, const int* ro
 }
 
 // glue._attn_prep (text positions, bf16 cache), program (row, head): heads normed, rounded, roped, rounded, stored.
+template <bool PAGED>
 __device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
                                                                const float* __restrict__ QW, const float* __restrict__ KW,
                                                                const float* __restrict__ IW, const float* __restrict__ INV,
                                                                __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
                                                                __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
                                                                __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
-                                                               int NI, int IHD, int HALF, const int* rope3, int n, int delta) {
+                                                               int NI, int IHD, int HALF, const int* rope3, int n,
+                                                               int delta, const Pg& pg) {
     __shared__ float scratch[32];
     const int r = blockIdx.x, head = blockIdx.y, d = threadIdx.x;
     const int pos = POS0[0] + r;
     const long long row = static_cast<long long>(r) * PW;
     if (head >= NQ + NKV + NI) {
-        if (d < IHD) IKC[static_cast<long long>(pos) * IHD + d] = P[row + NQ * 2 * HD + 2 * NKV * HD + NI * IHD + d];
+        const long long at = PAGED ? page_row(pg, pos, pg.ptok, IHD) : static_cast<long long>(pos) * IHD;
+        if (d < IHD) IKC[at + d] = P[row + NQ * 2 * HD + 2 * NKV * HD + NI * IHD + d];
         return;
     }
     const bool index = head >= NQ + NKV;
@@ -85,7 +74,7 @@ __device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restric
     const long long src = row + (head < NQ ? head * 2 * HD : (head < NQ + NKV ? NQ * 2 * HD + (head - NQ) * HD : NQ * 2 * HD + 2 * NKV * HD + (head - NQ - NKV) * IHD));
     const float* w = head < NQ ? QW : (head < NQ + NKV ? KW : IW);
     const float x = live ? bf(P[src + d]) : 0.0f;
-    const float rinv = inv_rms(block_sum(__fmul_rn(x, x), scratch), width, eps);
+    const float rinv = inv_rms(block_sum_serial(__fmul_rn(x, x), scratch), width, eps);
     if (!live) return;
     const int p = partner(d, HALF);
     const float xn = rbf(__fmul_rn(__fmul_rn(x, rinv), w[d]));
@@ -95,8 +84,9 @@ __device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restric
         Q[(static_cast<long long>(r) * NQ + head) * HD + d] = out;
     } else if (!index) {
         const long long slot = static_cast<long long>(pos) * NKV + head - NQ;
-        KC[slot * HD + d] = out;
-        VC[slot * HD + d] = P[row + NQ * 2 * HD + NKV * HD + (head - NQ) * HD + d];
+        const long long at = PAGED ? page_row(pg, pos, pg.ptok, NKV * HD) + (head - NQ) * HD : slot * HD;
+        KC[at + d] = out;
+        VC[at + d] = P[row + NQ * 2 * HD + NKV * HD + (head - NQ) * HD + d];
     } else {
         IQ[(static_cast<long long>(r) * NI + head - NQ - NKV) * IHD + d] = out;
     }
@@ -109,7 +99,8 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_prep(const __nv_bfloat
                                                                __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
                                                                __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
                                                                int NI, int IHD, int HALF) {
-    fn_attn_prep_body(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, nullptr, 0, 0);
+    fn_attn_prep_body<false>(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, nullptr, 0,
+                             0, Pg{});
 }
 
 extern "C" __global__ void __launch_bounds__(256) fn_attn_prep_media(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
@@ -119,7 +110,30 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_prep_media(const __nv_
                                                                __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
                                                                __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
                                                                int NI, int IHD, int HALF, const int* rope3, int n, int delta) {
-    fn_attn_prep_body(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, rope3, n, delta);
+    fn_attn_prep_body<false>(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, rope3, n,
+                             delta, Pg{});
+}
+
+// fn_attn_prep through a stream's page table: KC, VC and IKC are its arena's slot in page 0.
+extern "C" __global__ void __launch_bounds__(256)
+    fn_attn_prep_paged(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0, const float* __restrict__ QW,
+                       const float* __restrict__ KW, const float* __restrict__ IW, const float* __restrict__ INV,
+                       __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC, __nv_bfloat16* __restrict__ VC,
+                       __nv_bfloat16* __restrict__ IQ, __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ,
+                       int NKV, int NI, int IHD, int HALF, Pg pg) {
+    fn_attn_prep_body<true>(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, nullptr, 0,
+                            0, pg);
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+    fn_attn_prep_media_paged(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
+                             const float* __restrict__ QW, const float* __restrict__ KW, const float* __restrict__ IW,
+                             const float* __restrict__ INV, __nv_bfloat16* __restrict__ Q,
+                             __nv_bfloat16* __restrict__ KC, __nv_bfloat16* __restrict__ VC,
+                             __nv_bfloat16* __restrict__ IQ, __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ,
+                             int NKV, int NI, int IHD, int HALF, const int* rope3, int n, int delta, Pg pg) {
+    fn_attn_prep_body<true>(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, rope3, n,
+                            delta, pg);
 }
 
 // glue._attn_gate, program (row, head) of HD threads: bf16(o / (1 + e^-gate)) and its 32-group sums.
@@ -135,38 +149,60 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_gate(const __nv_bfloat
 }
 
 // attention._pool, a block a completed block of RATIO indexer keys: their mean, rounded, normed and roped at its start.
+template <bool PAGED>
 __device__ __forceinline__ void fn_qsa_pool_body(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
                                                               const int* __restrict__ POS0, const float* __restrict__ W,
                                                               const float* __restrict__ INV, float eps, int R, int DI, int HALF,
-                                                              int RATIO, const int* rope3, int n, int delta) {
+                                                              int RATIO, const int* rope3, int n, int delta,
+                                                              const Pg& pg) {
     __shared__ float scratch[32];
     __shared__ float xs[256];
     const int p0 = POS0[0];
     const int b = p0 / RATIO + blockIdx.x, d = threadIdx.x;
     if (RATIO * b + RATIO > p0 + R) return;
-    float acc = bf(IKC[static_cast<long long>(RATIO) * b * DI + d]);
-    for (int k = 1; k < RATIO; ++k) acc = __fadd_rn(acc, bf(IKC[(static_cast<long long>(RATIO) * b + k) * DI + d]));
+    // the block's keys: rows RATIO * b on, or (PAGED) the same rows of its one page (a page holds whole blocks)
+    const __nv_bfloat16* keys = IKC + (PAGED ? page_row(pg, RATIO * b, pg.ptok, DI) : 0);
+    const long long first = PAGED ? 0 : static_cast<long long>(RATIO) * b;
+    float acc = bf(keys[first * DI + d]);
+    for (int k = 1; k < RATIO; ++k) acc = __fadd_rn(acc, bf(keys[(first + k) * DI + d]));
     const float x = rbf(__fdiv_rn(acc, static_cast<float>(RATIO)));
     xs[d] = x;
-    const float rinv = inv_rms(block_sum(__fmul_rn(x, x), scratch), DI, eps);
+    const float rinv = inv_rms(block_sum_serial(__fmul_rn(x, x), scratch), DI, eps);
     const int p = partner(d, HALF);
     const float xn = rbf(__fmul_rn(__fmul_rn(x, rinv), W[d]));
     const float xpn = rbf(__fmul_rn(__fmul_rn(xs[p], rinv), W[p]));
-    POOLED[static_cast<long long>(b) * DI + d] = __float2bfloat16_rn(rope(xn, xpn, d, HALF, media_pos(RATIO * b, d, HALF, rope3, n, delta), INV));
+    const long long at = PAGED ? page_row(pg, b, pg.ptok / RATIO, DI) : static_cast<long long>(b) * DI;
+    POOLED[at + d] = __float2bfloat16_rn(rope(xn, xpn, d, HALF, media_pos(RATIO * b, d, HALF, rope3, n, delta), INV));
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
                                                               const int* __restrict__ POS0, const float* __restrict__ W,
                                                               const float* __restrict__ INV, float eps, int R, int DI, int HALF,
                                                               int RATIO) {
-    fn_qsa_pool_body(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, nullptr, 0, 0);
+    fn_qsa_pool_body<false>(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, nullptr, 0, 0, Pg{});
 }
 
 extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool_media(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
                                                               const int* __restrict__ POS0, const float* __restrict__ W,
                                                               const float* __restrict__ INV, float eps, int R, int DI, int HALF,
                                                               int RATIO, const int* rope3, int n, int delta) {
-    fn_qsa_pool_body(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, rope3, n, delta);
+    fn_qsa_pool_body<false>(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, rope3, n, delta, Pg{});
+}
+
+// fn_qsa_pool through a stream's page table: IKC and POOLED are its arena's slot in page 0.
+extern "C" __global__ void __launch_bounds__(128)
+    fn_qsa_pool_paged(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
+                      const int* __restrict__ POS0, const float* __restrict__ W, const float* __restrict__ INV,
+                      float eps, int R, int DI, int HALF, int RATIO, Pg pg) {
+    fn_qsa_pool_body<true>(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, nullptr, 0, 0, pg);
+}
+
+extern "C" __global__ void __launch_bounds__(128)
+    fn_qsa_pool_media_paged(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
+                            const int* __restrict__ POS0, const float* __restrict__ W, const float* __restrict__ INV,
+                            float eps, int R, int DI, int HALF, int RATIO, const int* rope3, int n, int delta,
+                            Pg pg) {
+    fn_qsa_pool_body<true>(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, rope3, n, delta, pg);
 }
 
 // attention._scores, program (row, 64 blocks): the heads' sum of relu(q . k) / sqrt(DI), rows past TOP (DI 128).
@@ -204,20 +240,23 @@ extern "C" __global__ void __launch_bounds__(256) fn_qsa_scores(const __nv_bfloa
     }
 }
 
-// attention._chunks, program (row, KV head, chunk): the chunk's keys TK at a time, online softmax, partial o, m, l.
-template <int NB>
+// A row, KV head and chunk: stage its key addresses once a tile, then retain the online softmax and partials.
+template <int NB, bool ONE = false, bool FUSE = false, bool PAGED = false>
 __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
                                             const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
                                             float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
                                             const int* __restrict__ IDS, const int* __restrict__ NKR, const int* __restrict__ SPR,
-                                            int H, int HK, int G, int CH, int NCH, float SCALE, int IDW, int QSA) {
+                                            int H, int HK, int G, int CH, int NCH, float SCALE, int IDW, int QSA,
+                                            Pg pg = {}) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
     typedef __nv_bfloat16 Row[HD + 8];
     Row* qs = reinterpret_cast<Row*>(smem_raw);                  // [QR] the row's query heads
     Row* tiles_kv = qs + QR;                                     // [NB][2][TK] each buffer's keys, then values
-    __nv_bfloat16 (*ps)[TK + 8] = reinterpret_cast<__nv_bfloat16 (*)[TK + 8]>(tiles_kv + NB * 2 * TK);  // [QR] bf16 p
+    // ONE: one [TK] buffer, the tile's keys and then, once the scores are taken, its values (fewer bytes, more blocks)
+    __nv_bfloat16 (*ps)[TK + 8] = reinterpret_cast<__nv_bfloat16 (*)[TK + 8]>(tiles_kv + (ONE ? TK : NB * 2 * TK));
     __shared__ float red_m[4][QR], red_l[4][QR];
     __shared__ int key_ids[NB][TK];
+    __shared__ long long key_at[PAGED ? NB : 1][PAGED ? TK : 1];
     const int r = blockIdx.x, hk = blockIdx.y, c = blockIdx.z;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
     int n = POS0[0] + r + 1;
@@ -226,8 +265,10 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
         sparse = SPR[r] != 0;
         if (sparse) n = NKR[r];
     }
-    const int start = c * CH;
-    if (start >= n) return;
+    // FUSE: one program a row takes every chunk in order and merges them as fn_attn_merge does (no partials)
+    const int c_end = FUSE ? (n + CH - 1) / CH : c + 1;
+    if (c * CH >= n) return;
+    int start = c * CH;
     for (int e = threadIdx.x; e < QR * HD / 8; e += blockDim.x) {
         const int i = e / (HD / 8), v = e % (HD / 8);
         qmm_frag::cp16z(&qs[i][8 * v], Q + (static_cast<long long>(r) * H + hk * G + min(i, G - 1)) * HD + 8 * v, i < G);
@@ -236,7 +277,9 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
     auto load = [&](int t0, int buf) {
         if (threadIdx.x < TK) {
             const int ki = start + t0 + threadIdx.x;
-            key_ids[buf][threadIdx.x] = ki < n ? (sparse ? IDS[static_cast<long long>(r) * IDW + ki] : ki) : -1;
+            const int key = ki < n ? (sparse ? IDS[static_cast<long long>(r) * IDW + ki] : ki) : -1;
+            key_ids[buf][threadIdx.x] = key;
+            if constexpr (PAGED) key_at[buf][threadIdx.x] = page_row(pg, max(key, 0), pg.ptok, static_cast<long long>(HK) * HD) + hk * HD;
         }
         __syncthreads();
         for (int pass = 0; pass < 2; ++pass) {
@@ -244,11 +287,23 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
             Row* dst = tiles_kv + (buf * 2 + pass) * TK;
             for (int e = threadIdx.x; e < TK * HD / 8; e += blockDim.x) {
                 const int k = e / (HD / 8), v = e % (HD / 8), key = key_ids[buf][k];
-                qmm_frag::cp16z(&dst[k][8 * v], src + (static_cast<long long>(max(key, 0)) * HK + hk) * HD + 8 * v, key >= 0);
+                qmm_frag::cp16z(&dst[k][8 * v], src + (PAGED ? key_at[buf][k] : (static_cast<long long>(max(key, 0)) * HK + hk) * HD) + 8 * v, key >= 0);
             }
             qmm_frag::commit();
         }
     };
+    // ONE: the keys (pass 0) or the values (pass 1) of the tile whose ids are in key_ids[0], into the one buffer
+    auto load_one = [&](int pass) {
+        const __nv_bfloat16* src = pass == 0 ? KC : VC;
+        for (int e = threadIdx.x; e < TK * HD / 8; e += blockDim.x) {
+            const int k = e / (HD / 8), v = e % (HD / 8), key = key_ids[0][k];
+            qmm_frag::cp16z(&tiles_kv[k][8 * v], src + (PAGED ? key_at[0][k] : (static_cast<long long>(max(key, 0)) * HK + hk) * HD) + 8 * v, key >= 0);
+        }
+        qmm_frag::commit();
+    };
+    float mm[2] = {-INFINITY, -INFINITY}, ll[2] = {0.0f, 0.0f}, oo[FUSE ? 8 : 1][4] = {};
+    for (int cc = c; cc < c_end; ++cc) {
+    start = cc * CH;
     float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.0f, 0.0f};
     float o[8][4] = {};
     const int tiles = min(n - start, CH);
@@ -256,12 +311,24 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
     for (int t0 = 0, it = 0; t0 < tiles; t0 += TK, ++it) {
         const int buf = NB == 2 ? it & 1 : 0;
         const bool ahead = NB == 2 && t0 + TK < tiles;  // the next tile's loads go out before this tile's math
-        if (NB == 1) load(t0, 0);
-        if (ahead) load(t0 + TK, buf ^ 1);
-        Row* kt = tiles_kv + buf * 2 * TK;
-        Row* vt = kt + TK;
+        if constexpr (ONE) {
+            if (threadIdx.x < TK) {
+                const int ki = start + t0 + threadIdx.x;
+                const int key = ki < n ? (sparse ? IDS[static_cast<long long>(r) * IDW + ki] : ki) : -1;
+                key_ids[0][threadIdx.x] = key;
+                if constexpr (PAGED) key_at[0][threadIdx.x] = page_row(pg, max(key, 0), pg.ptok, static_cast<long long>(HK) * HD) + hk * HD;
+            }
+            __syncthreads();
+            load_one(0);
+        } else {
+            if (NB == 1) load(t0, 0);
+            if (ahead) load(t0 + TK, buf ^ 1);
+        }
+        Row* kt = tiles_kv + (ONE ? 0 : buf * 2 * TK);
+        Row* vt = ONE ? kt : kt + TK;
         const int* keys = key_ids[buf];
-        if (ahead) qmm_frag::wait<3>(); else qmm_frag::wait<1>();
+        if constexpr (ONE) qmm_frag::wait<0>();
+        else if (ahead) qmm_frag::wait<3>(); else qmm_frag::wait<1>();
         __syncthreads();
         constexpr int JT = TK / 32;  // a warp's 8-key tiles
         float s[JT][4] = {};
@@ -277,6 +344,10 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
                 qmm_frag::mma(s[jt], a0, b[0], b[1]);
                 qmm_frag::mma(s[jt], a1, b[2], b[3]);
             }
+        }
+        if constexpr (ONE) {                              // every warp has read the keys: the values take their place
+            __syncthreads();
+            load_one(1);
         }
         float tile_m[2] = {-INFINITY, -INFINITY};
 #pragma unroll
@@ -319,7 +390,7 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
             rows[h] = __fadd_rn(rows[h], __shfl_xor_sync(0xffffffffu, rows[h], 2));
             if (t == 0) red_l[warp][g + 8 * h] = rows[h];
         }
-        if (ahead) qmm_frag::wait<2>(); else qmm_frag::wait<0>();
+        if (ONE) qmm_frag::wait<0>(); else if (ahead) qmm_frag::wait<2>(); else qmm_frag::wait<0>();
         __syncthreads();
 #pragma unroll
         for (int h = 0; h < 2; ++h) {
@@ -345,11 +416,27 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
         }
         __syncthreads();
     }
+    if constexpr (FUSE) {                                  // fn_attn_merge's step for this chunk, element by element
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const bool active = l[h] > 0.0f;
+            const float next = active ? fmaxf(mm[h], m[h]) : mm[h];
+            const float a = active ? (mm[h] == -INFINITY ? 0.0f : tf_exp(__fsub_rn(mm[h], next))) : 1.0f;
+            const float bb = active ? tf_exp(__fsub_rn(m[h], next)) : 0.0f;
+#pragma unroll
+            for (int q = 0; q < 8; ++q)
+#pragma unroll
+                for (int e = 0; e < 2; ++e) oo[FUSE ? q : 0][2 * h + e] = __fmaf_rn(o[q][2 * h + e], bb, __fmul_rn(oo[FUSE ? q : 0][2 * h + e], a));
+            ll[h] = __fmaf_rn(l[h], bb, __fmul_rn(ll[h], a));
+            mm[h] = next;
+        }
+        continue;
+    }
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
         const int i = g + 8 * h;
         if (i >= G) continue;
-        const long long base = (static_cast<long long>(r) * NCH + c) * H + hk * G + i;
+        const long long base = (static_cast<long long>(r) * NCH + cc) * H + hk * G + i;
 #pragma unroll
         for (int q = 0; q < 8; ++q) {
             float2 v = make_float2(o[q][2 * h], o[q][2 * h + 1]);
@@ -358,6 +445,21 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
         if (warp == 0 && t == 0) {
             PM[base] = m[h];
             PL[base] = l[h];
+        }
+    }
+    }
+    if constexpr (FUSE) {                                  // o / l, rounded once, as fn_attn_merge writes OUT
+        __nv_bfloat16* OUT = reinterpret_cast<__nv_bfloat16*>(PO);
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int i = g + 8 * h;
+            if (i >= G) continue;
+            const long long row = (static_cast<long long>(r) * H + hk * G + i) * HD;
+#pragma unroll
+            for (int q = 0; q < 8; ++q)
+#pragma unroll
+                for (int e = 0; e < 2; ++e)
+                    OUT[row + warp * 64 + q * 8 + 2 * t + e] = __float2bfloat16_rn(__fdiv_rn(oo[q][2 * h + e], ll[h]));
         }
     }
 }
@@ -372,6 +474,25 @@ extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks(const __nv_bflo
     attn_chunks<1>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
 }
 
+// attn_chunks on one buffer, a row's chunks merged in place (prompt rows): OUT bf16 in PO's place, no partials.
+extern "C" __global__ void __launch_bounds__(128) fn_attn_fused(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
+                                                                const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
+                                                                float* __restrict__ OUT, const int* __restrict__ IDS, const int* __restrict__ NKR,
+                                                                const int* __restrict__ SPR, int H, int HK, int G, int CH,
+                                                                float SCALE, int IDW, int QSA) {
+    attn_chunks<1, true, true>(Q, KC, VC, POS0, OUT, nullptr, nullptr, IDS, NKR, SPR, H, HK, G, CH, 1, SCALE, IDW, QSA);
+}
+
+// attn_chunks with one buffer, keys then values (17 to 256 rows: prompt chunks and wide decode rounds), the same sums.
+extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_one(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
+                                                                     const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
+                                                                     float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
+                                                                     const int* __restrict__ IDS, const int* __restrict__ NKR,
+                                                                     const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
+                                                                     float SCALE, int IDW, int QSA) {
+    attn_chunks<1, true>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
+}
+
 // attn_chunks with the next tile's loads in flight (a decode round's few rows): the same sums.
 extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_ahead(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
                                                                        const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
@@ -382,12 +503,41 @@ extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_ahead(const __n
     attn_chunks<2>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
 }
 
+// fn_attn_fused, fn_attn_chunks_one and fn_attn_chunks_ahead through a stream's page table: the same sums.
+extern "C" __global__ void __launch_bounds__(128)
+    fn_attn_fused_paged(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
+                        const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0, float* __restrict__ OUT,
+                        const int* __restrict__ IDS, const int* __restrict__ NKR, const int* __restrict__ SPR, int H,
+                        int HK, int G, int CH, float SCALE, int IDW, int QSA, Pg pg) {
+    attn_chunks<1, true, true, true>(Q, KC, VC, POS0, OUT, nullptr, nullptr, IDS, NKR, SPR, H, HK, G, CH, 1, SCALE, IDW,
+                                     QSA, pg);
+}
+
+extern "C" __global__ void __launch_bounds__(128)
+    fn_attn_chunks_one_paged(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
+                             const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0, float* __restrict__ PO,
+                             float* __restrict__ PM, float* __restrict__ PL, const int* __restrict__ IDS,
+                             const int* __restrict__ NKR, const int* __restrict__ SPR, int H, int HK, int G, int CH,
+                             int NCH, float SCALE, int IDW, int QSA, Pg pg) {
+    attn_chunks<1, true, false, true>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA,
+                                      pg);
+}
+
+extern "C" __global__ void __launch_bounds__(128)
+    fn_attn_chunks_ahead_paged(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
+                               const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
+                               float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
+                               const int* __restrict__ IDS, const int* __restrict__ NKR, const int* __restrict__ SPR,
+                               int H, int HK, int G, int CH, int NCH, float SCALE, int IDW, int QSA, Pg pg) {
+    attn_chunks<2, false, false, true>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA,
+                                       pg);
+}
+
 // attention._merge, program (row, head) of HD threads: the head's chunk partials merged in chunk order, o / l.
-extern "C" __global__ void __launch_bounds__(256) fn_attn_merge(const float* __restrict__ PO, const float* __restrict__ PM,
-                                                                const float* __restrict__ PL, const int* __restrict__ POS0,
-                                                                __nv_bfloat16* __restrict__ OUT, const int* __restrict__ NKR,
-                                                                const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
-                                                                int QSA) {
+__device__ __forceinline__ void fn_attn_merge_body(const float* __restrict__ PO, const float* __restrict__ PM,
+                                                   const float* __restrict__ PL, const int* __restrict__ POS0,
+                                                   __nv_bfloat16* __restrict__ OUT, const int* __restrict__ NKR,
+                                                   const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH, int QSA) {
     const int r = blockIdx.x, head = blockIdx.y, d = threadIdx.x;
     int n = POS0[0] + r + 1;
     if (QSA && SPR[r] != 0) n = NKR[r];
@@ -408,3 +558,27 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_merge(const float* __r
         OUT[(static_cast<long long>(r) * H + head) * HD + d] = __float2bfloat16_rn(__fdiv_rn(o, l));
     }
 }
+
+extern "C" __global__ void __launch_bounds__(256) fn_attn_merge(const float* __restrict__ PO, const float* __restrict__ PM,
+                                                                const float* __restrict__ PL, const int* __restrict__ POS0,
+                                                                __nv_bfloat16* __restrict__ OUT, const int* __restrict__ NKR,
+                                                                const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
+                                                                int QSA) {
+    fn_attn_merge_body(PO, PM, PL, POS0, OUT, NKR, SPR, H, HK, G, CH, NCH, QSA);
+}
+
+#include "flashnext_qsa_tile.cuh"
+
+// The indexer scores 8 rows a block, every head, the sums in fn_qsa_scores' order (its bits).
+template __global__ void qsa_tile::scores<8, 4>(const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__,
+    const int* __restrict__, float* __restrict__, int, int, int, int);
+
+// qsa_tile::scores<8, 4> through a stream's page table: POOLED is its arena's slot in page 0, the same sums.
+extern "C" __global__ void __launch_bounds__(256)
+    fn_qsa_scores_paged(const __nv_bfloat16* __restrict__ IQ, const __nv_bfloat16* __restrict__ POOLED,
+                        const int* __restrict__ POS0, float* __restrict__ SC, int NB, int RATIO, int TOP, int rows,
+                        Pg pg) {
+    qsa_tile::scores_body<8, 4, true>(IQ, POOLED, POS0, SC, NB, RATIO, TOP, rows, pg);
+}
+
+#include "flashnext_attn_lanes.cuh"

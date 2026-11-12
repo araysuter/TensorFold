@@ -27,11 +27,14 @@ pub const Pool = struct {
     bufs: [2]?mtl.Buffer = .{ null, null },
     caps: [2]usize = .{ 0, 0 },
     last: usize = 0, // the bytes of the last state saved: the next is about this, a turn or so longer
+    load_limit: u64 = 0,
     max: usize = std.math.maxInt(usize), // the prompt cache's budget: a buffer pads a state only up to it
     follow: ?mtl.ResidencySet.Follow = null, // the host's residency set: a new buffer joins it, a freed one leaves it
 
     /// A new buffer for states, in the host's residency set when it has one.
     fn made(p: *const Pool, device: mtl.Device, cap: usize) !mtl.Buffer {
+        if (p.load_limit != 0 and !@import("flashnext_memory").growingFits(device.allocated(), cap, p.load_limit))
+            return error.FlashNextMemoryShortfall;
         const buf = try device.buffer(cap, fz.opts);
         if (p.follow) |f| f.join(f.ctx, buf);
         return buf;
@@ -187,7 +190,8 @@ fn copy(e: *Engine, buf: mtl.Buffer, at: usize, to_buf: bool, passed: ?Engine.Pa
     var list: [MAX_PARTS]Part = undefined;
     const n = parts(e.m, at, passed, &list);
     const cb = r.queue.commandBuffer();
-    r.enc = cb.compute(.serial);
+    r.begin(cb, .serial);
+    errdefer if (r.fsr != null) r.abort();
     var off: usize = 0;
     for (list[0..n]) |p| {
         if (p.len == 0) continue;

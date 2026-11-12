@@ -1,0 +1,60 @@
+{
+  "status": "passed",
+  "transport": "existing authenticated HTTPS tunnel",
+  "client_user_agent": "TensorFold-Studio-Gateway/1.0",
+  "checks": [
+    {
+      "name": "owner_authenticated_model_discovery",
+      "status": 200
+    },
+    {
+      "name": "friend_authenticated_model_discovery",
+      "status": 200
+    },
+    {
+      "name": "unauthorized_and_internal_routes_refused",
+      "passed": true
+    },
+    {
+      "name": "native_metrics_adapter",
+      "passed": true,
+      "rate_scope": "completed_requests_since_model_load",
+      "memory_fields": [
+        "device_active_bytes",
+        "device_cache_bytes",
+        "device_peak_bytes",
+        "lifetime_peak_physical_footprint_bytes",
+        "memory_cap_bytes",
+        "physical_footprint_bytes",
+        "pinned_memory_bytes",
+        "prompt_cache_budget_bytes",
+        "ram_bytes"
+      ]
+    },
+    {
+      "name": "existing_metrics_collector_receives_native_counters",
+      "passed": true
+    }
+  ],
+  "models": [
+    {
+      "id": "ornith-1.5-122b-mixed-2bit",
+      "generation_status": 200,
+      "drafter": true,
+      "token_sha256": "93def17bbf14ec663ecd18061fa1ebaa5c7171deb4b1c64a16cb6c5e47213173",
+      "seconds": 14.977775749983266,
+      "context_status": "cold"
+    },
+    {
+      "id": "swift-1.5",
+      "generation_status": 200,
+      "drafter": true,
+      "token_sha256": "93def17bbf14ec663ecd18061fa1ebaa5c7171deb4b1c64a16cb6c5e47213173",
+      "seconds": 8.866556917084381,
+      "context_status": "cold"
+    }
+  ],
+  "configured_idle_seconds": 1800,
+  "last_loaded_model": "swift-1.5",
+  "native_model_processes": 1
+}

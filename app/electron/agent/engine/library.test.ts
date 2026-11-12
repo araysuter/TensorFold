@@ -34,7 +34,7 @@ async function cached(cache: string, repo: string, sha: string) {
   for (const name of ['config.json', 'model.safetensors', 'tokenizer.json']) await fs.symlink(path.join(blobs, name), path.join(snapshot, name))
   return snapshot
 }
-const library = (extra: Partial<ConstructorParameters<typeof ModelLibrary>[0]> = {}) => new ModelLibrary({ appHome, env, capabilities: async () => caps, memoryLimitBytes: () => 16 * 1024 ** 3, ...extra })
+const library = (extra: Partial<ConstructorParameters<typeof ModelLibrary>[0]> = {}) => new ModelLibrary({ appHome, env: () => env, capabilities: async () => caps, memoryLimitBytes: () => 16 * 1024 ** 3, ...extra })
 const hash = async (file: string) => createHash('sha256').update(await fs.readFile(file)).digest('hex')
 
 try {
@@ -80,6 +80,12 @@ try {
   await checkpoint(direct)
   const foreign = path.join(modelsDir, 'unsupported')
   await checkpoint(foreign, 'unknown_family')
+  const wrongGeometry = path.join(modelsDir, 'wrong-geometry')
+  await checkpoint(wrongGeometry)
+  await fs.writeFile(path.join(wrongGeometry, 'config.json'), JSON.stringify({ model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768, text_config: { hidden_size: 1024, num_hidden_layers: 24, vocab_size: 151936 } }))
+  const servedGeometry = path.join(modelsDir, 'served-geometry')
+  await checkpoint(servedGeometry)
+  await fs.writeFile(path.join(servedGeometry, 'config.json'), JSON.stringify({ model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 32768, text_config: { hidden_size: 2048, num_hidden_layers: 24, vocab_size: 248320, intermediate_size: 6144, linear_num_key_heads: 16, linear_num_value_heads: 16, linear_key_head_dim: 128, linear_value_head_dim: 128, linear_conv_kernel_dim: 6144, num_attention_heads: 8, num_key_value_heads: 2, head_dim: 256, full_attention_interval: 4 } }))
   const incomplete = path.join(modelsDir, 'incomplete')
   await checkpoint(incomplete)
   await fs.writeFile(path.join(incomplete, 'model.safetensors.index.json'), JSON.stringify({ weight_map: { a: 'model-00001-of-00002.safetensors', b: 'model-00002-of-00002.safetensors' } }))
@@ -99,6 +105,12 @@ try {
   assert.equal(selected.models.filter((model) => model.path === outside || model.path.endsWith('linked-folder')).length, 0, 'directory symlinks are not traversed')
   assert.equal(selected.models.find((model) => model.path === direct)?.loadable, true)
   assert.match(selected.models.find((model) => model.path === foreign)!.reason!, /does not support unknown_family/)
+  const refused = selected.models.find((model) => model.path === wrongGeometry)!
+  assert.equal(refused.loadable, false, 'a checkpoint whose geometry the engine refuses is not offered as ready')
+  assert.equal(refused.complete, true, 'the checkpoint on disk is complete; the engine refuses its geometry')
+  assert.match(refused.reason!, /hidden size is 1024/)
+  assert.match(refused.reason!, /UnsupportedQwenGeometry/)
+  assert.equal(selected.models.find((model) => model.path === servedGeometry)?.loadable, true, 'the geometry the engine serves stays offered')
   assert.equal(selected.models.find((model) => model.path === foreign)?.complete, true)
   assert.match(selected.models.find((model) => model.path === incomplete)!.reason!, /missing.*shards/)
   assert.match(selected.models.find((model) => model.path === invalid)!.reason!, /safetensors/)
@@ -154,6 +166,19 @@ try {
   const lowMemory = library({ memoryLimitBytes: () => 1024 })
   const large = await lowMemory.scan()
   assert.equal(large.models.every((model) => !model.loadable), true)
+
+  // An eligibility refresh re-answers the persisted memory verdict without a rescan, both directions.
+  const memoryEntries = (snap: any) => snap.models.filter((model: any) => model.memoryFloorBytes != null)
+  const raised = await lowMemory.refreshEligibility(() => 16 * 1024 ** 3)
+  assert.ok(memoryEntries(raised).length >= 3, 'the seeded checkpoints carry memory verdicts')
+  assert.equal(memoryEntries(raised).every((model: any) => model.loadable), true, 'a raised limit makes every saved entry selectable without a rescan')
+  assert.equal(memoryEntries(raised).every((model: any) => model.reason === null), true, 'the memory reason clears with the verdict')
+  const lowered = await lowMemory.refreshEligibility(() => 1024)
+  assert.equal(memoryEntries(lowered).every((model: any) => !model.loadable && model.reason === 'This checkpoint needs more model memory than the current hardware allows.'), true, 'removing the raise reverses the verdict again')
+  const escaped = lowered.models.find((model: any) => model.memoryFloorBytes == null)
+  assert.ok(escaped && !escaped.loadable, 'an entry without a memory verdict keeps its own reason through the refresh')
+  const rescan = await lowMemory.scan()
+  assert.deepEqual(rescan.models.map((model: any) => [model.id, model.loadable, model.reason]), lowered.models.map((model: any) => [model.id, model.loadable, model.reason]), 'a later rescan agrees with the refreshed state')
 
   const validRegistry = await fs.readFile(lib.file, 'utf8')
   await fs.writeFile(lib.file, '{')

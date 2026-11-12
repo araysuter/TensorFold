@@ -13,10 +13,14 @@ const elementwise = @import("elementwise.zig");
 const moe = @import("moe.zig");
 const draw = @import("draw.zig");
 const tp = @import("tp.zig");
+pub const mamba = @import("mamba.zig");
+/// The DFlash2 drafter's ops (tap gathers, key ring, dynamic conv, block attention).
+pub const draft = @import("draft.zig");
 
 pub const Kind = types.Kind;
 pub const Error = types.Error;
 pub const Tensor = types.Tensor;
+pub const ConvSplit = recurrence.ConvSplit;
 pub const Affine = types.Affine;
 /// The gated norm's gate: SiLU or sigmoid.
 pub const Gate = norms.Gate;
@@ -32,11 +36,17 @@ pub const Ops = struct {
     prefill: bool = false,
     /// A lane round's forward: decode tiles at any row count, so a row's bits ignore the rows it shares a round with.
     window: bool = false,
+    /// rocBLAS on this stream, for bf16 projections (null: the model has none).
+    blas: ?*const @import("../blas.zig").Blas = null,
 
     pub const project = products.project;
+    pub const projectSilu = products.projectSilu;
     pub const projectGroup = products.projectGroup;
     pub const projectRoutedAct = products.projectRoutedAct;
     pub const projectRouted = products.projectRouted;
+    pub const projectRelu2 = products.projectRelu2;
+    pub const projectRoutedRelu2 = products.projectRoutedRelu2;
+    pub const projectRoutedPlainRelu2 = products.projectRoutedPlainRelu2;
     pub const embedRows = products.embedRows;
     pub const affine = products.affine;
     pub const affineGroup = products.affineGroup;
@@ -44,6 +54,7 @@ pub const Ops = struct {
     pub const affineRouted = products.affineRouted;
     pub const embedAffine = products.embedAffine;
     pub const denseRows = products.denseRows;
+    pub const denseGemm = products.denseGemm;
 
     /// Whether decode.hip's merged launches are on.
     pub fn fused(o: Ops) bool {
@@ -51,6 +62,7 @@ pub const Ops = struct {
     }
 
     pub const attnGate = attention.attnGate;
+    pub const headsRows = attention.headsRows;
     pub const ropePrefill = attention.ropePrefill;
     pub const qkRope = attention.qkRope;
     pub const ropeDecode = attention.ropeDecode;
@@ -72,6 +84,9 @@ pub const Ops = struct {
     pub const rms2 = norms.rms2;
     pub const gnormOut = norms.gnormOut;
     pub const addRms = norms.addRms;
+    pub const residualRms = norms.residualRms;
+    pub const residualMoeRms = norms.residualMoeRms;
+    pub const MoeRows = norms.MoeRows;
     pub const gnormSilu = norms.gnormSilu;
     pub const cast = elementwise.cast;
     pub const siluMul = elementwise.siluMul;
@@ -79,10 +94,12 @@ pub const Ops = struct {
     pub const copyCols = elementwise.copyCols;
     pub const moeTail = moe.moeTail;
     pub const moeRouter = moe.moeRouter;
+    pub const moeRouterRows = moe.moeRouterRows;
     pub const moeSelect = moe.moeSelect;
     pub const moeRoute = moe.moeRoute;
     pub const moeAct = moe.moeAct;
     pub const moeCombine = moe.moeCombine;
+    pub const moeCombineGate = moe.moeCombineGate;
     pub const argmaxRows = draw.argmaxRows;
     pub const topkRows = draw.topkRows;
     pub const tokenProb = draw.tokenProb;
@@ -90,6 +107,12 @@ pub const Ops = struct {
     pub const moeLocalize = tp.moeLocalize;
     pub const moeForeignItems = tp.moeForeignItems;
     pub const moeZeroForeign = tp.moeZeroForeign;
+    pub const mambaConv = mamba.mambaConv;
+    pub const mambaDt = mamba.mambaDt;
+    pub const mambaScan = mamba.mambaScan;
+    pub const mambaGroupNorm = mamba.mambaGroupNorm;
+    pub const mambaMixer = mamba.mambaMixer;
+    pub const mambaWindow = mamba.mambaWindow;
 };
 
 test "dtype numberings of the three kernel families" {
@@ -101,4 +124,5 @@ test "dtype numberings of the three kernel families" {
 
 test "every launch compiles" {
     std.testing.refAllDecls(Ops);
+    std.testing.refAllDecls(draft);
 }

@@ -5,9 +5,12 @@ const Allocator = std.mem.Allocator;
 pub const png = @import("png.zig");
 pub const jpeg = @import("jpeg.zig");
 pub const webp = @import("webp.zig");
+pub const runtime = @import("runtime.zig");
 pub const resample = @import("resample.zig");
 pub const tags = @import("tags.zig");
 pub const identity = @import("identity.zig");
+pub const patches = @import("patches.zig");
+pub const normalize = @import("normalize.zig");
 
 pub const Error = error{ Invalid, Oversized, Animated, CmykJpeg, NoJpegLibrary, JpegLibraryVersion, NoWebpLibrary, WebpLibraryVersion, OutOfMemory };
 
@@ -20,9 +23,21 @@ const bomb_pixels = 89478485;
 
 /// A header's size as 0.6.6 judged it: Pillow's open (no pixels, or past its bomb bound: invalid), then its limits.
 pub fn fits(width: u64, height: u64) error{ Invalid, Oversized }!void {
-    if (width == 0 or height == 0 or width * height > bomb_pixels) return error.Invalid;
-    if (@max(width, height) > max_side or width * height > max_pixels) return error.Oversized;
+    return (Limits{}).fits(width, height);
 }
+
+/// A caller's decoded-image budget, checked before a codec allocates pixel storage.
+pub const Limits = struct {
+    side: u64 = max_side,
+    pixels: u64 = max_pixels,
+
+    pub fn fits(limits: Limits, width: u64, height: u64) error{ Invalid, Oversized }!void {
+        if (limits.side == 0 or limits.pixels == 0 or width == 0 or height == 0) return error.Invalid;
+        const count = std.math.mul(u64, width, height) catch return error.Invalid;
+        if (count > bomb_pixels) return error.Invalid;
+        if (@max(width, height) > limits.side or count > limits.pixels) return error.Oversized;
+    }
+};
 
 /// Decoded samples before orientation: 3 (RGB) or 4 (RGBA) bytes a pixel, and the orientation the tags give.
 pub const Samples = struct {
@@ -57,10 +72,14 @@ pub fn sniff(bytes: []const u8) Format {
 
 /// PNG, JPEG or WebP bytes as 0.6.6 loaded them: decoded, ImageOps.exif_transpose, then any alpha pasted over white.
 pub fn decode(io: std.Io, a: Allocator, bytes: []const u8) Error!Rgb {
+    return decodeWithLimits(io, a, bytes, .{});
+}
+
+pub fn decodeWithLimits(io: std.Io, a: Allocator, bytes: []const u8, limits: Limits) Error!Rgb {
     const s = switch (sniff(bytes)) {
-        .png => try png.decode(a, bytes),
-        .jpeg => try jpeg.decode(io, a, bytes),
-        .webp => try webp.decode(io, a, bytes),
+        .png => try png.decodeWithLimits(a, bytes, limits),
+        .jpeg => try jpeg.decodeWithLimits(io, a, bytes, limits),
+        .webp => try webp.decodeWithLimits(io, a, bytes, limits),
         .unknown => return error.Invalid,
     };
     defer a.free(s.data);
@@ -134,5 +153,8 @@ test {
     _ = resample;
     _ = tags;
     _ = identity;
+    _ = patches;
+    _ = normalize;
+    _ = @import("normalize_test.zig");
     _ = @import("picture_test.zig");
 }

@@ -56,7 +56,7 @@ fn run(queue: mtl.Queue, op: *const attn.Attention, scratch: *attn.Scratch, bind
     try binding.upload(plan, caches);
     const cb = queue.commandBuffer();
     const e = cb.compute(.concurrent);
-    try op.encode(e, scratch, binding, plan, query, key, value, out, caches, gate, false);
+    try op.encode(e, scratch, binding, plan, query, key, value, out, caches, gate, false, false);
     e.end();
     cb.commit();
     cb.wait();
@@ -98,7 +98,7 @@ fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const 
     for (&times) |*t| {
         const cb = queue.commandBuffer();
         const e = cb.compute(.concurrent);
-        for (0..layers) |i| try op.encode(e, &scratch, &bindings[i], plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = value }, .{ .buffer = out }, caches[i .. i + 1], .{ .buffer = raw_gate }, false);
+        for (0..layers) |i| try op.encode(e, &scratch, &bindings[i], plan, .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = value }, .{ .buffer = out }, caches[i .. i + 1], .{ .buffer = raw_gate }, false, false);
         e.end();
         cb.commit();
         cb.wait();
@@ -394,7 +394,7 @@ pub fn main(init: std.process.Init) !void {
     const text = try a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt);
     const library = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer library.deinit();
-    var op = try attn.Attention.init(device, library, true);
+    var op = try attn.Attention.init(device, library);
     defer op.deinit();
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--bench")) {
         var brng = Rng{ .s = 0x1234567 };

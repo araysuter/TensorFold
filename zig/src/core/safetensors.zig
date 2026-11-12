@@ -2,6 +2,13 @@
 
 const std = @import("std");
 const Io = std.Io;
+pub const index = @import("checkpoint_index.zig");
+pub const max_header_bytes = 100_000_000;
+
+pub fn headerSize(header_len: u64, file_size: u64) error{BadSafetensors}!usize {
+    if (file_size < 8 or header_len > max_header_bytes or header_len > file_size - 8) return error.BadSafetensors;
+    return std.math.cast(usize, header_len) orelse error.BadSafetensors;
+}
 
 pub const DType = enum {
     bool,
@@ -54,25 +61,52 @@ pub const Entry = struct {
 
 pub const Header = std.StringArrayHashMapUnmanaged(Entry);
 
-/// The header's entries (names live in `arena`); an entry that breaks the format, runs past `data_len` bytes or has the wrong size is refused.
+/// Header entries (names live in `arena`); an entry breaking the format, past `data_len` bytes or mis-sized is refused.
 pub fn parseHeader(arena: std.mem.Allocator, json: []const u8, data_len: usize) !Header {
     return parseHeaderPrefix(arena, json, data_len, null);
 }
 
 /// Select one tensor namespace before interpreting shapes, so a text engine need not admit a vision tower's layouts.
 pub fn parseHeaderPrefix(arena: std.mem.Allocator, json: []const u8, data_len: usize, prefix: ?[]const u8) !Header {
+    return parseHeaderPrefixes(arena, json, data_len, if (prefix) |p| &.{p} else &.{});
+}
+
+/// Select multiple namespaces in one header parse; an empty list admits every name.
+pub fn parseHeaderPrefixes(arena: std.mem.Allocator, json: []const u8, data_len: usize, prefixes: []const []const u8) !Header {
+    return parseHeaderOptions(arena, json, data_len, .{ .prefixes = prefixes });
+}
+
+pub const ParseOptions = struct {
+    prefixes: []const []const u8 = &.{},
+    /// `omit` leaves an unnamed dtype or a rank past `max_rank` out of the index (Qwen's GPU loader), not refused.
+    unsupported: enum { refuse, omit } = .refuse,
+};
+
+/// `parseHeaderPrefixes` with the unsupported layouts' refusal a choice; every entry kept is checked the same way.
+pub fn parseHeaderOptions(arena: std.mem.Allocator, json: []const u8, data_len: usize, options: ParseOptions) !Header {
+    if (json.len > max_header_bytes) return error.BadSafetensors;
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{});
     if (parsed != .object) return error.BadSafetensors;
     var out: Header = .empty;
     var it = parsed.object.iterator();
     while (it.next()) |kv| {
         if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
-        if (prefix) |p| if (!std.mem.startsWith(u8, kv.key_ptr.*, p)) continue;
+        if (options.prefixes.len > 0) {
+            for (options.prefixes) |p| {
+                if (std.mem.startsWith(u8, kv.key_ptr.*, p)) break;
+            } else continue;
+        }
         if (kv.value_ptr.* != .object) return error.BadSafetensors;
         const o = kv.value_ptr.object;
-        const dtype = DType.parse(str(o.get("dtype")) orelse return error.BadSafetensors) orelse return error.UnsupportedDType;
+        const dtype = DType.parse(str(o.get("dtype")) orelse return error.BadSafetensors) orelse {
+            if (options.unsupported == .omit) continue;
+            return error.UnsupportedDType;
+        };
         const shape = list(o.get("shape")) orelse return error.BadSafetensors;
-        if (shape.len > max_rank) return error.RankTooHigh;
+        if (shape.len > max_rank) {
+            if (options.unsupported == .omit) continue;
+            return error.RankTooHigh;
+        }
         var e: Entry = .{ .dtype = dtype, .rank = @intCast(shape.len), .shape = @splat(1), .begin = 0, .end = 0 };
         var n: usize = dtype.size();
         for (shape, 0..) |d, i| {
@@ -85,6 +119,19 @@ pub fn parseHeaderPrefix(arena: std.mem.Allocator, json: []const u8, data_len: u
         e.end = uint(offs[1]) orelse return error.BadSafetensors;
         if (e.end < e.begin or e.end - e.begin != n or e.end > data_len) return error.BadSafetensors;
         try out.put(arena, kv.key_ptr.*, e);
+    }
+    const ranges = try arena.dupe(Entry, out.values());
+    defer arena.free(ranges);
+    std.mem.sort(Entry, ranges, {}, struct {
+        fn less(_: void, a: Entry, b: Entry) bool {
+            return a.begin < b.begin;
+        }
+    }.less);
+    var end: usize = 0;
+    for (ranges) |e| {
+        if (e.begin == e.end) continue;
+        if (e.begin < end) return error.OverlappingTensors;
+        end = e.end;
     }
     return out;
 }
@@ -130,6 +177,36 @@ pub const Tensor = struct {
     }
 };
 
+/// One file's header read on its own: no mapping, and no tensor byte read or held.
+pub const Metadata = struct {
+    names: Header,
+    data: usize,
+    file_size: usize,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn read(gpa: std.mem.Allocator, io: Io, path: []const u8) !Metadata {
+        const file = try Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        const size = std.math.cast(usize, try file.length(io)) orelse return error.BadSafetensors;
+        var prefix: [8]u8 = undefined;
+        if (try file.readPositionalAll(io, &prefix, 0) != prefix.len) return error.BadSafetensors;
+        const header_len = try headerSize(std.mem.readInt(u64, &prefix, .little), size);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const text = try arena.allocator().alloc(u8, header_len);
+        if (try file.readPositionalAll(io, text, 8) != text.len) return error.BadSafetensors;
+        const names = try parseHeader(arena.allocator(), text, size - 8 - header_len);
+        // the length the ranges were checked against must still hold once the header is read
+        if (try file.length(io) != size) return error.BadSafetensors;
+        return .{ .names = names, .data = 8 + header_len, .file_size = size, .arena = arena };
+    }
+
+    pub fn deinit(self: *Metadata) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
 /// A file mapped read-only with its header indexed.
 pub const File = struct {
     path: [:0]const u8,
@@ -143,35 +220,69 @@ pub const File = struct {
         return openPrefix(gpa, io, path, null);
     }
     pub fn openPrefix(gpa: std.mem.Allocator, io: Io, path: []const u8, prefix: ?[]const u8) !File {
+        return openPrefixes(gpa, io, path, if (prefix) |p| &.{p} else &.{});
+    }
+    /// The file with only names under `prefixes` indexed (an empty list: every name).
+    pub fn openPrefixes(gpa: std.mem.Allocator, io: Io, path: []const u8, prefixes: []const []const u8) !File {
         var file = try Io.Dir.cwd().openFile(io, path, .{});
         errdefer file.close(io);
-        const len: usize = @intCast(try file.length(io));
+        const len = std.math.cast(usize, try file.length(io)) orelse return error.BadSafetensors;
         if (len < 8) return error.BadSafetensors;
         var map = try Io.File.MemoryMap.create(io, file, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
         errdefer map.destroy(io);
-        const header_len: usize = @intCast(std.mem.readInt(u64, map.memory[0..8], .little));
-        if (header_len > len - 8) return error.BadSafetensors;
+        const header_len = try headerSize(std.mem.readInt(u64, map.memory[0..8], .little), len);
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
-        const names = try parseHeaderPrefix(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len, prefix);
+        const names = try parseHeaderPrefixes(arena.allocator(), map.memory[8..][0..header_len], len - 8 - header_len, prefixes);
         const own = try arena.allocator().dupeSentinel(u8, path, 0);
         return .{ .path = own, .file = file, .map = map, .data = 8 + header_len, .names = names, .arena = arena };
     }
 
     pub fn close(self: *File, io: Io) void {
+        self.finish(io, false);
+    }
+
+    /// Only after the last borrowed tensor was copied; unmap first, then best-effort copied-file cache release.
+    pub fn closeCopied(self: *File, io: Io) void {
+        self.finish(io, true);
+    }
+
+    fn finish(self: *File, io: Io, copied: bool) void {
         self.map.destroy(io);
+        if (copied) @import("checkpoint_file_cache.zig").release(self.file.handle);
         self.file.close(io);
         self.arena.deinit();
         self.* = undefined;
     }
 
     /// The file's pages out of the mapping and the page cache (unified memory needs the room); Linux only, refaults.
-    pub fn release(self: *const File) void {
+    pub fn release(self: *const File, scratch: std.mem.Allocator) void {
+        self.releaseExcept(&.{}, scratch);
+    }
+
+    /// `release`, with `keep`'s bytes (parts of this mapping read later) left in the pages they live in.
+    pub fn releaseExcept(self: *const File, keep: []const []const u8, scratch: std.mem.Allocator) void {
         if (@import("builtin").os.tag != .linux) return;
-        const linux = std.os.linux;
         // a map that fell back to a heap copy (no mmap) holds the only bytes: DONTNEED would zero them
-        if (self.map.section != null) _ = linux.madvise(self.map.memory.ptr, self.map.memory.len, linux.MADV.DONTNEED);
-        _ = linux.fadvise(self.file.handle, 0, 0, linux.POSIX_FADV.DONTNEED);
+        const mem = self.map.memory;
+        // page-cache advice goes through checkpoint_drop, which holds it until every TP rank has loaded
+        if (self.map.section == null or keep.len == 0) {
+            if (self.map.section != null) _ = std.os.linux.madvise(mem.ptr, mem.len, std.os.linux.MADV.DONTNEED);
+            @import("checkpoint_drop.zig").drop(self.file);
+            return;
+        }
+        dropExcept(mem.ptr, mem.len, self.file, keep, scratch);
+    }
+
+    /// `bytes` (part of this file's mapping) marked read in no order, e.g. a table's rows; Linux only.
+    pub fn adviseRandom(self: *const File, bytes: []const u8) void {
+        if (@import("builtin").os.tag != .linux or bytes.len == 0) return;
+        // a map that fell back to a heap copy has no file pages to advise
+        if (self.map.section == null) return;
+        const page = std.heap.pageSize();
+        const lo = std.mem.alignBackward(usize, @intFromPtr(bytes.ptr), page);
+        const hi = std.mem.alignForward(usize, @intFromPtr(bytes.ptr) + bytes.len, page);
+        _ = std.os.linux.madvise(@ptrFromInt(lo), hi - lo, std.os.linux.MADV.RANDOM);
     }
 
     pub fn get(self: *const File, name: []const u8) ?Tensor {
@@ -179,6 +290,54 @@ pub const File = struct {
         return .{ .dtype = e.dtype, .rank = e.rank, .shape = e.shape, .bytes = self.map.memory[self.data + e.begin .. self.data + e.end] };
     }
 };
+
+/// A mapped file's pages out of memory and its page cache, except the pages holding `keep`'s bytes.
+fn dropExcept(
+    map: [*]u8,
+    map_len: usize,
+    file: std.Io.File,
+    keep: []const []const u8,
+    scratch: std.mem.Allocator,
+) void {
+    const linux = std.os.linux;
+    const base = @intFromPtr(map);
+    const page = std.heap.pageSize();
+    var spans: [8][2]usize = undefined;
+    const kept = if (keep.len <= spans.len) spans[0..keep.len] else scratch.alloc([2]usize, keep.len) catch {
+        _ = linux.madvise(map, map_len, linux.MADV.DONTNEED);
+        @import("checkpoint_drop.zig").drop(file);
+        return;
+    };
+    defer if (kept.len > spans.len) scratch.free(kept);
+    var n: usize = 0;
+    for (keep) |k| {
+        if (k.len == 0) continue;
+        const lo = @intFromPtr(k.ptr);
+        if (lo < base or lo + k.len > base + map_len) continue;
+        kept[n] = .{
+            std.mem.alignBackward(usize, lo - base, page),
+            @min(map_len, std.mem.alignForward(usize, lo - base + k.len, page)),
+        };
+        n += 1;
+    }
+    std.mem.sort([2]usize, kept[0..n], {}, struct {
+        fn less(_: void, x: [2]usize, y: [2]usize) bool {
+            return x[0] < y[0];
+        }
+    }.less);
+    var at: usize = 0;
+    for (kept[0..n]) |sp| {
+        if (sp[0] > at) gap(map, file, at, sp[0] - at);
+        at = @max(at, sp[1]);
+    }
+    if (at < map_len) gap(map, file, at, map_len - at);
+}
+
+/// One run of a mapped shard's bytes out of memory and the page cache: a later read faults them back in.
+fn gap(map: [*]u8, file: std.Io.File, at: usize, len: usize) void {
+    _ = std.os.linux.madvise(map + at, len, std.os.linux.MADV.DONTNEED);
+    @import("checkpoint_drop.zig").range(file, at, len);
+}
 
 test "header entries" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -289,4 +448,9 @@ test "text namespace filtering skips rank-six vision metadata without hiding inv
     try std.testing.expectEqual(@as(usize, 1), h.count());
     try std.testing.expect(h.contains("language_model.lm_head.weight"));
     try std.testing.expectError(error.BadSafetensors, parseHeaderPrefix(arena.allocator(), json, 25, "language_model."));
+}
+
+test {
+    _ = @import("safetensors_security_test.zig");
+    _ = @import("safetensors_copied_test.zig");
 }

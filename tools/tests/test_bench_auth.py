@@ -84,12 +84,12 @@ class AuthTests(unittest.TestCase):
             with self.subTest(client=module.__name__, extra=extra):
                 code, seen, stdout, stderr, report = self.cli(module, extra=extra)
                 self.assertEqual(code, 0, stderr)
-                self.assertEqual(len(seen), 4 if module is bench_openai else 14)
+                self.assertEqual(len(seen), 5 if module is bench_openai else 15)
                 self.assertTrue(all(req.get_header("Authorization") == "Bearer " + KEY for req in seen))
                 self.assertEqual({req.full_url.rsplit("/v1/", 1)[1] for req in seen},
-                                 {"completions", "chat/completions"})
+                                 {"models", "completions", "chat/completions"})
                 if module is bench_concurrent:
-                    self.assertTrue(any(json.loads(req.data).get("draft") is False for req in seen))
+                    self.assertTrue(any(json.loads(req.data).get("draft") is False for req in seen if req.data))
                 for text in (stdout, stderr, report):
                     self.assertNotIn(KEY, text)
                     self.assertNotIn("Authorization", text)
@@ -132,6 +132,8 @@ class AuthTests(unittest.TestCase):
                     else:
                         self.assertEqual(code, 0)
                         self.assertTrue(all(cell["failed"] == 2 for cell in json.loads(report)["cells"]))
+                if isinstance(error, urllib.error.HTTPError):
+                    error.close()  # an unclosed one warns with its reason text, the key here, when it is collected
 
     def test_stream_error_payload_does_not_expose_credentials(self):
         wire = b"data: " + json.dumps({"error": {"message": KEY}}).encode() + b"\n\n"

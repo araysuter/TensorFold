@@ -1,0 +1,42 @@
+[
+  {
+    "file": "conversion-status.json",
+    "sha256": "3430c4c3146dcd035fd63116821283878406314820a20e55879fa8b5fa74cd50",
+    "bytes": 360
+  },
+  {
+    "file": "ornith-vision-cold-qualification.json",
+    "sha256": "674ec2da7e33adb37d0cc429d12912f260ab550c0316a93b626226f56397dcea",
+    "bytes": 21021
+  },
+  {
+    "file": "ornith-vision-qualification.json",
+    "sha256": "07bdeb64c2103d70f0f28eef0c8fc9fd8dff1a08e9fbedd772fe646631b5549f",
+    "bytes": 234
+  },
+  {
+    "file": "qualification-first.json",
+    "sha256": "68c314e8946d2116c963903313a2e638ead21625da4f0f32ee0cd241e6fe458e",
+    "bytes": 11038
+  },
+  {
+    "file": "qualification-vision-capacity.json",
+    "sha256": "d937efac56ce101435b86a173c5515d37cb7d9396d9f1d75b6648d4cb57dd300",
+    "bytes": 49421
+  },
+  {
+    "file": "qualification-vision.json",
+    "sha256": "2d05faff5d2f2595627b0a66105ff8714674baa318d42860e0e3b6633620d5b8",
+    "bytes": 26141
+  },
+  {
+    "file": "swift-vision-qualification.json",
+    "sha256": "f7ea305eed6e17de1de27615fd80a4dfe596992e70e92fb43473da2892a385d7",
+    "bytes": 20586
+  },
+  {
+    "file": "vlm-execution.json",
+    "sha256": "a68b7803c71a9d12edc71e921024bab8417f9f57f0cce7dd1c4082b37851d2f6",
+    "bytes": 173
+  }
+]

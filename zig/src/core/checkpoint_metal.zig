@@ -3,6 +3,7 @@ const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
 const st = @import("safetensors.zig");
+const file_cache = @import("checkpoint_file_cache.zig");
 
 pub const DType = st.DType;
 
@@ -62,7 +63,7 @@ pub const Checkpoint = struct {
         return self.addFileSplit(device, path, prefix, selected, null);
     }
 
-    /// As addFileSelected; with `later`, the tensors it names stay in the file for `read` and the rest pack into one buffer.
+    /// As addFileSelected; with `later`, its named tensors stay in the file for `read`, the rest pack into one buffer.
     pub fn addFileSplit(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8, selected: ?[]const u8, later: ?Later) !void {
         const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) {
@@ -71,17 +72,20 @@ pub const Checkpoint = struct {
         }
         var held = false;
         defer if (!held) {
+            file_cache.release(fd);
             _ = platform.c.close(fd);
         };
         var head: [8]u8 = undefined;
         try readAll(fd, &head, 0);
-        const header_len = std.mem.readInt(u64, &head, .little);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
+        if (end < 8) return error.BadSafetensors;
+        const file_size = std.math.cast(usize, end) orelse return error.BadSafetensors;
+        const header_len = try st.headerSize(std.mem.readInt(u64, &head, .little), file_size);
         const header = try self.allocator.alloc(u8, header_len);
         defer self.allocator.free(header);
         try readAll(fd, header, 8);
-        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         const data_start = 8 + header_len;
-        const data_len: usize = @as(usize, @intCast(end)) - data_start;
+        const data_len = file_size - data_start;
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -173,7 +177,7 @@ pub const Checkpoint = struct {
         try readInto(fd, dest, d.at + from);
     }
 
-    /// Deferred `name`'s address-only view: its length, unique while the checkpoint lives, unreadable (no memory behind it).
+    /// Deferred `name`'s address-only view: its length, unique for the checkpoint's life, unreadable (no memory).
     pub fn view(self: *Checkpoint, name: []const u8) ![]const u8 {
         const d = self.deferred.get(name) orelse return error.MissingTensor;
         const file = &self.files.items[d.file];
@@ -185,6 +189,7 @@ pub const Checkpoint = struct {
     /// Close the files the deferred tensors live in, once load has read them.
     pub fn closeFiles(self: *Checkpoint) void {
         for (self.files.items) |*file| if (file.fd >= 0) {
+            file_cache.release(file.fd);
             _ = platform.c.close(file.fd);
             file.fd = -1;
         };
@@ -383,6 +388,9 @@ test "full and selected checkpoint views retain data, ownership and relative off
 }
 
 test "a split checkpoint keeps later tensors in the file, packs the rest, and stages the same bytes" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const gpa = std.testing.allocator;
@@ -421,4 +429,10 @@ test "a split checkpoint keeps later tensors in the file, packs the rest, and st
     try std.testing.expect(v.ptr == (try split.view("text.weight")).ptr);
     split.closeFiles();
     try std.testing.expectError(error.ShardClosed, split.read("text.weight", 0, &part));
+    try std.testing.expectEqualSlices(u32, (try full.get("text.weight")).host(u32), w.host(u32));
+    try std.testing.expectEqualSlices(u16, (try full.get("text.scales")).host(u16), (try split.get("text.scales")).host(u16));
+}
+
+test {
+    _ = file_cache;
 }

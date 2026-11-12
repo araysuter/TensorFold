@@ -48,7 +48,7 @@ pub fn decode(comptime Tri: type, o: Ops(Tri), seq: *prompt.Seq, d: *Draft, out:
         const rows = 1 + ch.n;
         const tv = std.Io.Clock.awake.now(o.e.io).toNanoseconds();
         try o.verify(seq, d, ids[0..rows]);
-        try o.draws(d, sm, sampled[0..rows]);
+        try o.draws(d, sm, &.{}, sampled[0..rows]);
         const td = std.Io.Clock.awake.now(o.e.io).toNanoseconds();
         st.verify_ms += @as(f64, @floatFromInt(td - tv)) / 1e6;
         defer st.draft_ms += @as(f64, @floatFromInt(std.Io.Clock.awake.now(o.e.io).toNanoseconds() - td)) / 1e6;
@@ -102,8 +102,8 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
     const h = try Head.init(gpa, io, driver, stream, model_dir);
     defer h.deinit();
     const o: Ops(Tri) = .{ .e = e, .tri = tri, .h = h };
-    const depth = envUsize("TF_FLASHNEXT_DRAFTS", mtp.default_depth);
-    const confidence = envF64("TF_FLASHNEXT_CONFIDENCE", default_confidence);
+    const depth = try @import("sys").environment.read(usize, "TF_FLASHNEXT_DRAFTS", mtp.default_depth);
+    const confidence = try @import("sys").environment.read(f64, "TF_FLASHNEXT_CONFIDENCE", default_confidence);
     const sm: ?Sampling = if (std.c.getenv("TF_FLASHNEXT_SEED")) |seed| .{
         .seed = std.fmt.parseInt(u64, std.mem.span(seed), 10) catch 0,
         .temperature = envF64("TF_FLASHNEXT_TEMPERATURE", 1.0),
@@ -117,7 +117,7 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
         const cap = ids.len + count + max_rows;
         var seq = try e.newSeq(cap);
         defer seq.deinit(gpa);
-        var d = try Draft.init(gpa, driver, stream.*, cap, h.ids.len, e.chunk);
+        var d = try Draft.init(gpa, driver, stream.*, cap, h.ids.len, e.chunk, e.heads);
         defer d.deinit();
         for (0..repeat) |rep| {
             // serial: the plain prompt pass, then one row a forward

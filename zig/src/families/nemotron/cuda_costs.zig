@@ -15,11 +15,7 @@ const regime = cuda.launch.few_rows; // windows past it take the router's and th
 const prefix = 16; // text tokens before the timed windows, at any window width: a window's ms depends on its tokens
 
 // Windows hold this prefix's pending token, then the text's next tokens as drafts, after the head drafts as in a round.
-const text = "The river had been rising for three days, and by the time the ferry stopped running the town had moved its " ++
-    "market up the hill. Children carried baskets of apples past the church while their parents argued about " ++
-    "whether the old bridge would hold. In the workshop behind the bakery, a carpenter measured each plank " ++
-    "twice, wrote the numbers on the wall, and cut slowly.\n\ndef mean(values):\n    total = 0\n    for v in " ++
-    "values:\n        total += v\n    return total / len(values)\n";
+const text = rule.text;
 
 const Timer = struct {
     a: cuda.Event,
@@ -59,9 +55,10 @@ pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_d
     var parts: [2][3][]const u8 = undefined;
     var keys: [2]?[32]u8 = undefined;
     var kept: [2]?core.draft_depth.Costs = @splat(null);
+    const seed = lanes.cost_cache.keySeed(gpa, io, false) catch null;
     for (heads, 0..) |v, i| {
         parts[i] = try keyParts(e, h, v, &name[i], &shape[i]);
-        keys[i] = lanes.cost_cache.key(gpa, io, &parts[i]) catch null;
+        keys[i] = if (seed) |s| s.key(&parts[i]) else null;
         if (keys[i]) |key| kept[i] = lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, key);
     }
     for (kept[0..heads.len]) |k| {

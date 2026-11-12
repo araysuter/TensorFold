@@ -153,7 +153,7 @@ def save(args, rows, batches):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--base-url', default='https://ai-api.ashersuter.com/v1')
+    p.add_argument('--base-url', default='http://127.0.0.1:8080/v1')
     p.add_argument('--model', default='swift-1.5')
     p.add_argument('--api-key-file', help='Optional key file; otherwise securely prompt for the API token')
     p.add_argument('--tokenizer', default='ukisai/Swift-1.5-4bit-MLX')

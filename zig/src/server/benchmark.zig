@@ -15,6 +15,7 @@ const manifest = @import("benchmark_manifest.zig");
 const upload = @import("benchmark_upload.zig");
 const check = @import("benchmark_check.zig");
 const stop = @import("benchmark_stop.zig");
+const drafts = @import("benchmark_drafts.zig");
 const Allocator = std.mem.Allocator;
 const Args = args_mod.Args;
 
@@ -239,7 +240,10 @@ fn show(ctx: *const Context, v: json.Value) !void {
         try say(ctx, "{s:<14} {s:<6} {s:<25} {s:<16} {s}", .{ c.fixture_id, suite.fmtG(&t, c.temperature), rate, ttft, if (c.protocol_complete) "complete" else "custom/incomplete" });
     }
     try say(ctx, "Stream delivery includes transport buffering; it is not an engine token clock.", .{});
-    if (settings.get("managed").? != .bool or !settings.get("managed").?.bool) {
+    const managed = settings.get("managed").? == .bool and settings.get("managed").?.bool;
+    if (managed) if (try unranked(ctx.a, v)) |lacks|
+        try say(ctx, "The board ranks a run that names its GPU, loaded rank count, checkpoint revision and configuration digest; this receipt names no {s}.", .{lacks});
+    if (!managed) {
         const source = json.strOr(v.get("hardware").?.get("source"));
         const version = json.strOr(v.get("runtime").?.get("tensorfold_version"));
         const pinned = settings.get("rank_count").? != .null and v.get("model").?.get("revision").? != .null;
@@ -250,6 +254,20 @@ fn show(ctx: *const Context, v: json.Value) !void {
     }
     if (std.mem.eql(u8, json.strOr(v.get("runtime").?.get("backend")), "rocm"))
         try say(ctx, "This rocm receipt is saved locally; it cannot be published until the board accepts rocm.", .{});
+}
+
+/// What a public managed receipt lacks of the facts the board ranks by (docs/community-benchmarks.md), else null.
+pub fn unranked(a: Allocator, v: json.Value) !?[]const u8 {
+    const m = v.get("model").?;
+    if (m.get("local").? != .bool or m.get("local").?.bool) return null; // a local label is refused before publishing
+    var lacks: std.ArrayList([]const u8) = .empty;
+    if (v.get("settings").?.get("rank_count").? == .null) try lacks.append(a, "loaded rank count");
+    const gpus = v.get("hardware").?.get("gpus").?;
+    if (gpus != .array or gpus.array.len == 0) try lacks.append(a, "GPU");
+    if (m.get("revision").? == .null) try lacks.append(a, "checkpoint revision");
+    if (m.get("config_sha256").? == .null) try lacks.append(a, "configuration digest");
+    if (lacks.items.len == 0) return null;
+    return try std.mem.join(a, ", ", lacks.items);
 }
 
 /// What an engine that cannot sample answers a request with a temperature (server.zig's refusal).
@@ -286,6 +304,16 @@ const Printer = struct {
     }
 };
 
+const hip_drafter = "the HIP engine runs no DFlash2 drafter yet";
+/// Why a ROCm run refuses a named ``--drafter`` before it starts.
+pub const rocm_drafter = "--drafter: " ++ hip_drafter ++ ", so a rocm run takes none; --drafter none runs without it";
+
+/// The drafter ``--drafter auto`` names: the family's own; none under --serial or on rocm (HIP runs no DFlash2 yet).
+pub fn autoDrafter(config: json.Value, backend: []const u8, serial: bool) ?[]const u8 {
+    if (serial or std.mem.eql(u8, backend, "rocm")) return null;
+    return model.knownDrafter(config);
+}
+
 /// A run from checks to receipt: attached or with its own serve child, then the table and the exit code.
 fn run(ctx: *const Context, args: Args) !u8 {
     const a = ctx.a;
@@ -302,9 +330,10 @@ fn run(ctx: *const Context, args: Args) !u8 {
     }
     const run_id = receipt.runId(ctx.io);
     const bench_dir = try std.fs.path.join(a, &.{ ctx.home, ".tensorfold", "benchmarks" });
-    const settings: receipt.Settings = .{ .tokens = @intCast(args.tokens), .repetitions = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .context_tokens = args.context, .managed = args.server == null };
+    const settings: receipt.Settings = .{ .tokens = @intCast(args.tokens), .repetitions = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .context_tokens = args.context, .managed = args.server == null, .kv_cache = if (args.server == null) (args.kv_cache orelse "bf16") else null };
     var facts: struct { model: receipt.Model, hardware: receipt.Hardware, runtime: receipt.Runtime } = undefined;
-    var rank_count: ?u8 = if (args.server == null) 1 else null;
+    var rank_count: ?u8 = null;
+    var group: ?json.Value = null;
     var target: stream.Target = undefined;
     var chat_only = args.chat_only;
     var plan: ?server.Plan = null;
@@ -337,8 +366,9 @@ fn run(ctx: *const Context, args: Args) !u8 {
         } else return fail(ctx, try std.fmt.allocPrint(a, "This build does not serve model_type {s}; tensorfold-native capabilities --json lists what it serves", .{kind}));
         const auto = std.mem.eql(u8, args.drafter, "auto");
         const given = !auto and !std.mem.eql(u8, args.drafter, "none") and args.drafter.len > 0;
+        if (rocm and given) return fail(ctx, rocm_drafter);
         // auto passes the family's own drafter only when serve's cache lookup finds it; nothing is downloaded.
-        const known = if (!args.serial and auto) model.knownDrafter(config.value) else null;
+        const known = if (auto) autoDrafter(config.value, backend, args.serial) else null;
         const drafter = if (args.serial) null else if (given) args.drafter else known;
         var uncached: []const u8 = "";
         var drafter_dir: ?[]const u8 = null;
@@ -362,13 +392,14 @@ fn run(ctx: *const Context, args: Args) !u8 {
             startup_s = server.startupTimeout(bytes);
             if (startup_s > 600) wait = try std.fmt.allocPrint(a, "The server gets up to {d} s to load {d:.0} GB of weights; --startup-timeout sets another limit.", .{ startup_s, @as(f64, @floatFromInt(bytes)) / 1e9 });
         }
-        plan = .{ .exe = ctx.self_exe orelse try std.process.executablePathAlloc(ctx.io, a), .dir = dir, .backend = backend, .tokens = @intCast(args.tokens), .context = args.context, .drafter_dir = drafter_dir, .serial = args.serial };
+        plan = .{ .exe = ctx.self_exe orelse try std.process.executablePathAlloc(ctx.io, a), .dir = dir, .backend = backend, .tokens = @intCast(args.tokens), .context = args.context, .drafter_dir = drafter_dir, .serial = args.serial, .kv_cache = args.kv_cache orelse "bf16" };
         var u: cli.Usage = .{};
         _ = cli.parse(a, (try server.argv(a, plan.?))[2..], &u) catch |e| switch (e) {
             error.Usage => return fail(ctx, try std.fmt.allocPrint(a, "the managed server refuses its flags: {s}", .{u.message})),
             else => |x| return x,
         };
         if (args.serial and given) note = try std.fmt.allocPrint(a, "--serial passes no drafter, so --drafter {s} is not used.", .{args.drafter});
+        if (rocm and auto and !args.serial and model.knownDrafter(config.value) != null) note = "This run passes no drafter: " ++ hip_drafter ++ ".";
         if (known) |k| note = if (drafter_dir != null)
             try std.fmt.allocPrint(a, "This run passes the cached drafter {s}; --drafter none runs without it.", .{k})
         else
@@ -383,17 +414,6 @@ fn run(ctx: *const Context, args: Args) !u8 {
     try say(ctx, "This generates model replies; use Ctrl-C to cancel. Nothing is uploaded unless you publish.", .{});
     if (note) |n| try say(ctx, "{s}", .{n});
     if (wait) |w| try say(ctx, "{s}", .{w});
-    // the attached server's own facts, read once nothing more can refuse the run
-    if (args.server != null) if (try manifest.fetch(a, ctx.io, target.base, backend)) |got| {
-        facts.hardware = got.hardware;
-        facts.runtime = got.runtime;
-        facts.model.revision = got.revision;
-        facts.model.config_sha256 = got.config_sha256;
-        facts.model.tokenizer_sha256 = got.tokenizer_sha256;
-        facts.model.family = got.family;
-        facts.model.quantization = got.quantization;
-        rank_count = got.rank_count;
-    };
     var managed: ?server.Managed = null;
     if (plan) |p| {
         var tail: []const []const u8 = &.{};
@@ -408,6 +428,24 @@ fn run(ctx: *const Context, args: Args) !u8 {
         };
         target = .{ .base = managed.?.base(), .served = server.served_name };
     }
+    // Both attached and managed runs read the loaded server, never client rank or environment hints.
+    if (try manifest.fetch(a, ctx.io, target.base, backend)) |got| {
+        facts.hardware = got.hardware;
+        facts.runtime = got.runtime;
+        if (args.server != null) {
+            facts.model.revision = got.revision;
+            facts.model.config_sha256 = got.config_sha256;
+            facts.model.tokenizer_sha256 = got.tokenizer_sha256;
+            facts.model.family = got.family;
+            facts.model.quantization = got.quantization;
+        }
+        rank_count = got.rank_count;
+        group = got.group;
+    }
+    const thinking = try stream.discoverThinking(a, ctx.io, target);
+    target.thinking_switch = thinking.switchable;
+    target.thinking_applicable = thinking.applicable;
+    try say(ctx, "Chat thinking: {s}", .{if (target.thinking_applicable == false) "not applicable" else if (target.thinking_switch == false) "server default (off unsupported; local only)" else if (target.thinking_switch == true) "off" else "off requested (unverified)"});
     var printer: Printer = .{ .ctx = ctx, .reps = args.reps };
     const samples = stream.run(a, ctx.io, target, .{ .tokens = @intCast(args.tokens), .reps = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .timeout_s = args.timeout, .chat_only = chat_only }, .{ .ctx = &printer, .call = Printer.call, .said = Printer.said }) catch |e| {
         if (managed) |*m| _ = m.stop();
@@ -419,10 +457,18 @@ fn run(ctx: *const Context, args: Args) !u8 {
     const created = receipt.createdAt(std.Io.Clock.real.now(ctx.io).toNanoseconds(), &stamp);
     var recorded = settings;
     recorded.rank_count = rank_count;
+    if (target.thinking_switch == false and target.thinking_applicable != false) recorded.thinking_mode = "server_default";
+    recorded.group = group;
     const v = try receipt.value(a, &run_id, created, facts.model, facts.runtime, facts.hardware, recorded, samples);
     try show(ctx, v);
     if (!try receipt.save(a, ctx.io, v, dest, nowMs(ctx), &problem)) return fail(ctx, problem);
     try say(ctx, "Receipt saved: {s}", .{dest});
+    // whether a drafter ran is the server's counters, kept beside the receipt; the board's receipt has no field for it
+    const passed: ?bool = if (plan) |p| p.drafter_dir != null else null;
+    const counts = try drafts.path(a, dest);
+    const kept = try drafts.value(a, &run_id, std.fs.path.basename(dest), facts.model.drafter_repo_id, passed, samples);
+    if (!try drafts.save(a, ctx.io, kept, counts, &problem)) return fail(ctx, problem);
+    try say(ctx, "{s}", .{try drafts.verdict(a, drafts.totals(samples), passed, counts)});
     if (cleanup) |c| return fail(ctx, c);
     const was_cancelled = stop.requested() != null or for (samples) |s| {
         if (s.error_code == .cancelled) break true;

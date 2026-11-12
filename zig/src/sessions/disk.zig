@@ -24,7 +24,7 @@ pub const Options = struct {
     compat: Digest,
     rank: u32 = 0,
     world: u32 = 1,
-    /// bytes of files the tier keeps (least recently used files without dependents go first)
+    /// Logical charges in split worlds, physical bytes otherwise; this is not a filesystem quota.
     budget: u64 = 64 << 30,
     /// entries shorter than this are dropped, not parked
     min_tokens: u64 = 1024,
@@ -36,6 +36,8 @@ pub const Options = struct {
     lanes: u32 = 4,
     /// delta files a chain may stack before a park writes the entry whole
     max_chain: u32 = 8,
+    /// Disposable serving namespace; persistent callers keep this false.
+    fresh_start: bool = false,
 };
 
 /// A piece of bounded state (rings, carries, taps): small, host bytes.
@@ -63,6 +65,8 @@ pub const WriteSrc = struct {
     /// per family: family-tensor pages of this rank's logical pages [first_page, npages), in logical order
     pages: []const []const u32,
     blobs: []const Blob = &.{},
+    /// Rank-independent bounded-state measure supplied by the store.
+    measure: u64 = 0,
 };
 
 /// One file of a restore: read logical pages [lo, hi) of it into the slot.
@@ -107,6 +111,7 @@ pub const Rec = struct {
     first_page: u32,
     npages: u32,
     size: u64,
+    charge: u64,
     /// files stacked on this one
     refs: u32 = 0,
     /// files under it, this one included
@@ -151,6 +156,7 @@ pub const Disk = struct {
         defer root.close(io);
         const dir = try root.createDirPathOpen(io, sub, .{ .open_options = .{ .iterate = true } });
         errdefer dir.close(io);
+        try @import("disk_namespace.zig").prepare(dir, io, opts.fresh_start);
         d.* = .{ .gpa = gpa, .io = io, .opts = opts, .dir = dir, .staging = try Staging.init(gpa, io, @max(2, opts.staging), up(opts.chunk)), .lanes = undefined };
         errdefer d.staging.deinit();
         d.lanes = try Lanes.start(gpa, io, &d.staging, @max(1, opts.lanes));
@@ -307,7 +313,8 @@ pub const Disk = struct {
         }
         var op = try Op.init(d.gpa, d.io, &d.staging);
         defer op.deinit();
-        errdefer op.wait() catch {};
+        // a failed restore still owns finished reads' staging: give each back, or the next pump waits for it forever
+        errdefer while (op.next()) |j| d.staging.put(j.staging);
         // (segment, chunk) jobs; the pump keeps at most staging - 1 in flight (one buffer for the header path)
         var jobs: std.ArrayList(struct { seg: u32, chunk: u32 }) = .empty;
         defer jobs.deinit(d.gpa);
@@ -397,14 +404,14 @@ pub const Disk = struct {
 
     /// Records a written file in the index (round thread, at the plan's point); its base gains a dependent.
     pub fn register(d: *Disk, src: *const WriteSrc, size: u64) !u32 {
-        const id = try d.add(src.key, src.base, src.tag, src.kind, src.pos, src.first_page, src.npages, size);
+        const id = try d.add(src.key, src.base, src.tag, src.kind, src.pos, src.first_page, src.npages, size, @import("disk_charge.zig").charge(src, d.opts.world, size));
         d.stats.writes += 1;
         d.stats.bytes_written += size;
         return id;
     }
 
-    fn add(d: *Disk, key: Digest, base: ?Digest, tag: u32, kind: u32, pos: u64, first_page: u32, npages: u32, size: u64) !u32 {
-        var r: Rec = .{ .key = key, .tag = tag, .kind = kind, .pos = pos, .first_page = first_page, .npages = npages, .size = size };
+    fn add(d: *Disk, key: Digest, base: ?Digest, tag: u32, kind: u32, pos: u64, first_page: u32, npages: u32, size: u64, charge: u64) !u32 {
+        var r: Rec = .{ .key = key, .tag = tag, .kind = kind, .pos = pos, .first_page = first_page, .npages = npages, .size = size, .charge = charge };
         if (base) |b| {
             const bi = d.by_key.get(b) orelse return error.NoBase;
             r.base = bi;
@@ -418,7 +425,7 @@ pub const Disk = struct {
         if (r.base != none) d.recs.items[r.base].refs += 1;
         d.recs.items[id] = r;
         d.link(id);
-        d.used += size;
+        d.used += charge;
         return id;
     }
 
@@ -437,6 +444,7 @@ pub const Disk = struct {
     /// Indexes the directory on restart: drops .tmp and bad files, checks ids, registers bases before their deltas.
     pub fn scan(d: *Disk, out: *std.ArrayList(Found)) !void {
         if (@import("builtin").os.tag != .linux) return error.UnsupportedPlatform;
+        if (d.opts.world > 1) return error.SplitReconcileUnsupported;
         var it = d.dir.iterate();
         var nb: [48]u8 = undefined;
         while (try it.next(d.io)) |ent| {
@@ -469,7 +477,7 @@ pub const Disk = struct {
                 _ = out.orderedRemove(i);
                 continue;
             }
-            _ = try d.add(f.head.key, base, f.head.tag, f.head.kind, f.head.pos, f.head.first_page, f.head.npages, f.size);
+            _ = try d.add(f.head.key, base, f.head.tag, f.head.kind, f.head.pos, f.head.first_page, f.head.npages, f.size, f.size);
             i += 1;
         }
     }
@@ -486,7 +494,7 @@ pub const Disk = struct {
         var st: linux.Statx = undefined;
         if (linux.errno(linux.statx(f.fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true, .MTIME = true }, &st)) != .SUCCESS or st.size < h.total) return error.Truncated;
         const seg = lay.find(.ids, "ids") orelse return error.BadHeader;
-        if (seg.nbytes % 4 != 0 or seg.nbytes / 4 != h.pos - @as(u64, h.first_page) * h.page) return error.BadHeader;
+        if (seg.nbytes % 4 != 0 or h.pos < @as(u64, h.first_page) * h.page or seg.nbytes / 4 != h.pos - @as(u64, h.first_page) * h.page) return error.BadHeader;
         const ids = try d.gpa.alloc(i32, seg.nbytes / 4);
         errdefer d.gpa.free(ids);
         const sb = try d.staging.get();
@@ -550,7 +558,7 @@ pub const Disk = struct {
         if (r.base != none) d.recs.items[r.base].refs -= 1;
         d.unlink(id);
         _ = d.by_key.remove(key);
-        d.used -= r.size;
+        d.used -= r.charge;
         r.live = false;
         var nb: [48]u8 = undefined;
         _ = linux.unlinkat(d.dir.handle, fileName(key, "tfs", &nb), 0);

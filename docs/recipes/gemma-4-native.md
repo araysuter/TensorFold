@@ -16,6 +16,10 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/gemma-4-31b" --port 888
   --drafter "$HOME/models/gemma-4-31b-dflash"
 ```
 
+`--parallel 4` caps this example at four active requests; additional requests wait for a free slot.
+
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 Without `--drafter` the model decodes plain, at about 51 tokens a second for one stream at short context (mlx-lm 46)
 and 40 at 32k. With z-lab's DFlash drafter
 a stream decodes at 150-190 tokens a second (6-7 accepted tokens a round on chat and code, 10 on copying replies,
@@ -77,8 +81,8 @@ Structured output (`response_format`, `guided_json`, `guided_regex`, `guided_cho
 through `libtfgrammar`, as [structured output](../api.md#structured-output) describes, with drafts on: before each
 verify the `Drafted` wrapper hands the drafter's held drafts to the host, where the grammar cuts the ones it rejects.
 The recipe harness's structured check obeys 18 of 18 (each field greedy, sampled and with thinking), and a bad regex
-gets HTTP 400. Tools are called with `tool_choice: "auto"`; `"required"` and a named function get HTTP 400, as the
-grammar for them reads `<tool_call>` markup and Gemma's template writes `<|tool_call>call:NAME{...}<tool_call|>`. The
+gets HTTP 400. Tools are called with `tool_choice: "auto"`; `"required"` and a named function are enforced through
+the token grammar, which writes Gemma's `<|tool_call>call:NAME{...}<tool_call|>` markup. The
 weights, both scratches and the drafter's and tower's buffers stay in one residency set, which the idle keepalive's
 tick keeps wired: a 1-token request after 2 to 120 idle seconds took 0.10-0.12 s to its first token, where a busy
 server took 0.07 s (ten idle gaps, none slower).
@@ -87,7 +91,7 @@ server took 0.07 s (ten idle gaps, none slower).
 | --- | --- |
 | The pinned 31B 4-bit, M5 Ultra, macOS 27 | Greedy decode, prompts, shared rounds, copy and DFlash drafts and the server, below. |
 | `z-lab/gemma-4-31B-it-DFlash` `eabd6483` | The one drafter admitted: DFlash v1, block 16, six taps, head dim 128. |
-| M1 to M4 | Refused: the lane projection needs M5 tensor units. |
+| M1 to M4 | Served through the row path (the fused lane projection needs M5 tensor units); the drafters refuse. |
 | Images (`--vision`) | PNG and JPEG data URLs, and public HTTPS URLs with `--vision-urls`, below. |
 | Structured output | `response_format` and the `guided_*` fields, drafts on and off, below. |
 | Other widths | MLX affine 2-6 or 8 bits in groups of 64, uniform or per module: [other widths](#other-widths). |
@@ -210,3 +214,6 @@ variant is in `zig/kernels/metal/gemma4/lane_projection.metal`, with host encodi
 Ordinary Gemma lane packing and projections still use the shared lane module. The measurements above are the original
 PR's receipts. They do not qualify the isolated landing tree. Re-run numerical, resource, teacher-forced, draft/plain,
 resumed/fresh, concurrent/solo, vision and performance gates on that tree.
+
+The host attention adjoint and native learner implementation plan are in
+[Gemma Living Weights](gemma4-living-weights.md).

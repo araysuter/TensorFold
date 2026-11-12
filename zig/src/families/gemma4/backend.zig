@@ -21,6 +21,7 @@ pub const Metal = struct {
     /// Prompt chunks' activations: 512 rows on core affine_mm and the tensor-unit attention.
     prompt_scratch: prompt.Scratch,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
+    follow: ?mtl.ResidencySet.Follow = null,
     /// Forwards run on `scratch`: a stream's tapped rows there are current while its tap's gen matches.
     gen: u64 = 0,
     /// A window's forward ms by rows, timed by measure() (the depth rule prices drafts with them); none until then.
@@ -44,6 +45,7 @@ pub const Metal = struct {
     }
 
     pub fn deinit(self: *Metal) void {
+        self.setResident(null);
         var it = self.caches.valueIterator();
         while (it.next()) |cache| {
             cache.*.deinit();
@@ -53,6 +55,28 @@ pub const Metal = struct {
         self.scratch.deinit();
         self.prompt_scratch.deinit();
         self.gpa.destroy(self);
+    }
+
+    pub fn setResident(self: *Metal, hook: ?mtl.ResidencySet.Follow) void {
+        if (self.follow) |f| {
+            mtl.resident.fields.apply(&self.scratch, f, false);
+            mtl.resident.fields.apply(&self.prompt_scratch, f, false);
+        }
+        self.follow = hook;
+        if (hook) |f| {
+            mtl.resident.fields.apply(&self.scratch, f, true);
+            mtl.resident.fields.apply(&self.prompt_scratch, f, true);
+        }
+        var it = self.caches.valueIterator();
+        while (it.next()) |cache| cache.*.setResident(hook);
+    }
+
+    pub fn createCache(self: *Metal, capacity: usize) !*st.Cache {
+        const cache = try self.gpa.create(st.Cache);
+        errdefer self.gpa.destroy(cache);
+        cache.* = try st.Cache.init(self.model.device, self.model.config.geo, capacity);
+        cache.setResident(self.follow);
+        return cache;
     }
 
     /// Every kernel keeps a row's bits at any window width and beside any other stream's rows (tf-gemma4-glue).
@@ -137,8 +161,15 @@ pub const Metal = struct {
         if (self.scratch.taps != null) return if (taps.len == self.model.taps) self.model.setTaps(taps) else error.BadGemmaTaps;
         try self.model.setTaps(taps);
         const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-        self.scratch.taps = try self.model.device.buffer(st.prompt_rows * self.tapBytes(), shared);
-        self.prompt_scratch.taps = try self.model.device.buffer(st.chunk_rows * self.tapBytes(), shared);
+        const decode_taps = try self.model.device.buffer(st.prompt_rows * self.tapBytes(), shared);
+        errdefer decode_taps.deinit();
+        const prompt_taps = try self.model.device.buffer(st.chunk_rows * self.tapBytes(), shared);
+        self.scratch.taps = decode_taps;
+        self.prompt_scratch.taps = prompt_taps;
+        if (self.follow) |f| {
+            f.join(f.ctx, decode_taps);
+            f.join(f.ctx, prompt_taps);
+        }
     }
 
     /// Rows [start, start + count) of the stream's latest tapped rows, on the device.
@@ -155,10 +186,9 @@ pub const Metal = struct {
     fn prefillWith(self: *Metal, stream: *lanes.Stream, sink: ?be.FeatureSink) !void {
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidGemmaPrompt;
-        const cache = try self.gpa.create(st.Cache);
-        errdefer self.gpa.destroy(cache);
         const capacity = @min(self.options.capacity, (ids.len + stream.max_new + st.max_rows + 63) / 64 * 64);
-        cache.* = try st.Cache.init(self.model.device, self.model.config.geo, capacity);
+        const cache = try self.createCache(capacity);
+        errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
         try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
         errdefer _ = self.caches.remove(stream);
@@ -196,11 +226,12 @@ pub const Metal = struct {
                 try k.take(k.ptr, stream, .{ .buffer = @intFromPtr(rows.id), .rows = @intCast(end - at), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, at);
                 if (end == ids.len) { // the prompt's last row, kept for the first draft (another prompt may reuse the scratch)
                     const last = try self.model.device.buffer(width, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-                    cache.last_tap = last;
+                    cache.setLastTap(last);
                     @memcpy(last.slice(u8, width), rows.slice(u8, st.chunk_rows * width)[(end - 1 - at) * width ..][0..width]);
                     cache.tap = .{ .buf = last, .start = ids.len - 1, .rows = 1 };
                 }
             }
+            lanes.prefill_widths.completed(self.gpa, stream, end - at);
             at = end;
             if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(cache.len)) != null) if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(cache.len));
         }
@@ -379,3 +410,19 @@ const shared_widths = [_]usize{ 32, 48, 64, 96, 128 };
 const mask_words = (cfg.vocab + 31) / 32;
 
 const Pick = @import("tree_round_gpu").contract.Pick;
+
+test "zero grant: Gemma Metal assistant and DFlash retain tapped context through a long skip" {
+    var b: Metal = undefined;
+    b.options = .{ .capacity = 512, .streams = 16 };
+    b.timed = 0;
+    b.shared_timed = 0;
+    try lanes.shared_draft_check.check(b.facts(), true);
+}
+
+test "shared head costs: Gemma Metal assistant and DFlash retain costed copy grants" {
+    var b: Metal = undefined;
+    b.options = .{ .capacity = 512, .streams = 16 };
+    b.timed = 0;
+    b.shared_timed = 0;
+    try @import("metal_head_cost_test.zig").check(b.facts());
+}

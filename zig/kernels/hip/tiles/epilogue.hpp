@@ -11,14 +11,6 @@
 namespace tf {
 namespace rocm {
 
-// The product in fp32 at its (row, col) of out, the plan's pair row for a routed item.
-struct F32Out {
-    template <class Args>
-    __device__ static void store(const Args& a, int row, int col, float v) {
-        a.out[out_row(a, row) * a.n + col] = v;
-    }
-};
-
 // A float as the activation type, rounded to nearest even.
 template <typename T>
 __device__ inline typename T::elem narrow(float v) {
@@ -30,6 +22,36 @@ __device__ inline typename T::elem narrow(float v) {
         return __builtin_bit_cast(typename T::elem, static_cast<unsigned short>(bits));
     }
 }
+
+// The product at its (row, col), the plan's pair row for a routed item: rounded to T into out16 when set, else fp32.
+template <typename T>
+struct GemmOut {
+    template <class Args>
+    __device__ static void store(const Args& a, int row, int col, float v) {
+        if (a.out16 != nullptr) {
+            static_cast<typename T::elem*>(static_cast<void*>(a.out16))[out_row(a, row) * a.n + col] = narrow<T>(v);
+        } else {
+            a.out[out_row(a, row) * a.n + col] = v;
+        }
+    }
+};
+
+// A packed gate/up product's pair, as tf_silu_mul over the plain product's two BF16 outputs: g and u rounded as GemmOut
+// rounds them, silu(g) = g / (1 + expf(-g)) rounded, then that times u rounded; act (m, n / 2) at feature f.
+template <typename T>
+struct SiluPairOut {
+    static constexpr bool pairs = true;
+    __device__ static float widen(typename T::elem v) {
+        if constexpr (std::is_same_v<typename T::elem, __half>) return __half2float(v);
+        else return __uint_as_float(static_cast<uint32_t>(__builtin_bit_cast(unsigned short, v)) << 16);
+    }
+    template <class Args>
+    __device__ static void store_pair(const Args& a, int row, int f, float g, float u) {
+        const float gb = widen(narrow<T>(g)), ub = widen(narrow<T>(u));
+        const float s = widen(narrow<T>(gb / (1.0f + expf(-gb))));
+        static_cast<typename T::elem*>(static_cast<void*>(a.out16))[out_row(a, row) * (a.n / 2) + f] = narrow<T>(s * ub);
+    }
+};
 
 // A float product rounded to T: FP16 is one rounding of the exact product (fma, zero addend), never fp32 then FP16.
 template <typename T>
@@ -79,6 +101,28 @@ struct StreamSwiglu {
     __device__ static void put(const Args& a, long long row, int col, const float (&v)[CB], int c, int pair_cols, float limit) {
         constexpr int CH = CB / 2;
         static_cast<typename T::elem*>(static_cast<void*>(a.out16))[row * pair_cols + col] = swiglu<T>(v[c], v[c + CH], limit);
+    }
+};
+
+// tf_nemo_relu2 on the sum: relu(the sum rounded to T)^2, the square rounded to fp32 before it is rounded to T.
+template <class T>
+struct StreamRelu2 {
+    static constexpr bool kPair = false;
+
+    template <int CB, class Args>
+    __device__ static void put(const Args& a, long long row, int col, const float (&v)[CB], int c, int, float) {
+        const typename T::elem r = narrow<T>(v[c]);
+        float u;
+        if constexpr (std::is_same_v<typename T::elem, __half>) {
+            u = __half2float(r);
+        } else {
+            u = __uint_as_float(static_cast<uint32_t>(__builtin_bit_cast(unsigned short, r)) << 16);
+        }
+        u = u != u ? u : fmaxf(u, 0.f);  // a NaN stays NaN, as tf_nemo_relu2 keeps it
+        float sq = u * u;
+        // kept apart from the narrowing: fptrunc(fmul) would otherwise become one mixed-precision op
+        asm("" : "+v"(sq));
+        static_cast<typename T::elem*>(static_cast<void*>(a.out16))[row * a.n + col] = narrow<T>(sq);
     }
 };
 

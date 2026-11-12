@@ -11,15 +11,18 @@ const precision = @import("cuda_precision.zig");
 const kl = @import("cuda_kl.zig");
 const shared_checks = @import("cuda_shared_checks.zig");
 const checkpoint_cli = @import("checkpoint_cli");
+const cluster = @import("cluster");
 const lanes_cli = @import("cuda_lanes.zig");
 const segments_cli = @import("cuda_segments.zig");
 const train_check = @import("cuda_train_check.zig");
+const dory_cli = @import("cuda_dory.zig");
 const decode = nemotron.decode;
 
 const usage =
     \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR|native] [--device N]
     \\         [--temperature T] [--top-k K] [--top-p P] [--min-p M] [--seed S]   (temperature 0: greedy)
     \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MSW,LEVEL]   (W window rows: 32 for a latent MoE, else 16)
+    \\         [--loops N]   (a Dory checkpoint: passes over its recurrent block, 1-4; default its n_recurrent_loops)
     \\         [--carveout]   (KV caches in GB10's display memory first; also TF_CUDA_CARVEOUT=1,
     \\         sized by TF_CUDA_CARVEOUT_MIB (default 1792), card TF_DRM_CARD (default /dev/dri/card0))
     \\         [--tokens-file PATH] [--segments N]   (N whole 2048-row prompt chunks a call as staggered segments,
@@ -47,6 +50,9 @@ const usage =
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
     \\                (every prompt through the lane core at once, or one at a time with --solo)
+    \\       tensorfold cluster init|check|status
+    \\       tensorfold serve [MODEL] --cluster FILE
+    \\       tensorfold node --name NAME --cluster FILE
     \\
 ;
 
@@ -62,6 +68,8 @@ pub fn main(init: std.process.Init) !u8 {
         try std.Io.File.stdout().writeStreamingAll(init.io, "tensorfold " ++ @import("build_options").version ++ "\n");
         return 0;
     }
+    // Cluster commands must work without a model load. node joins over MCDMA, through the library each node names.
+    if (args.len >= 2 and cluster.cli.wants(@ptrCast(args[1..]))) return cluster.cli.main(init, args[1..]);
     // The checkpoint commands must work without a model, driver or GPU too.
     if (args.len >= 2 and checkpoint_cli.wants(@ptrCast(args[1..]))) return checkpoint_cli.main(init, args[1..]);
     // A leading flag is not a command: the usage covers it, without touching the GPU.
@@ -132,6 +140,9 @@ pub fn main(init: std.process.Init) !u8 {
             gpa.free(opts.tokens);
             opts.tokens = try segments_cli.readIds(gpa, init.io, value);
             i += 1;
+        } else if (std.mem.eql(u8, a, "--loops")) {
+            opts.loops = try std.fmt.parseInt(usize, value, 10);
+            i += 1;
         } else if (std.mem.eql(u8, a, "--segments")) {
             opts.segments = try std.fmt.parseInt(usize, value, 10);
             i += 1;
@@ -170,9 +181,14 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("RESULT digest {s}\n", .{&std.fmt.bytesToHex(d, .lower)});
         return 0;
     }
+    const settings = @import("sys").environment;
+    if (try settings.refusal(init.arena.allocator(), init.environ_map, .{ .cuda = true, .device = opts.device, .segments = if (opts.segments) |n| @intCast(n) else null, .carveout = opts.carveout })) |why| {
+        std.debug.print("{s}\n", .{why});
+        return 2;
+    }
+    const device = try deviceOrdinal(opts.device, init.environ_map.get("TF_CUDA_DEVICE"));
     var driver = try cuda.Driver.open();
     defer driver.close();
-    const device = try deviceOrdinal(opts.device, init.environ_map.get("TF_CUDA_DEVICE"));
     var ctx = try cuda.Context.init(&driver, @intCast(device));
     defer ctx.deinit();
     const kernels: ?[]const u8 = switch (try cuda.aot.pick(init.arena.allocator(), init.io, opts.kernels orelse init.environ_map.get("TENSORFOLD_CUDA_KERNELS"), try ctx.capability())) {
@@ -183,6 +199,14 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         },
     };
+    if (std.mem.eql(u8, args[1], "run") and dory_cli.wants(gpa, init.io, opts.model)) {
+        const s: ?lanes.Sampling = if (opts.sampling.temperature > 0) opts.sampling else null;
+        return dory_cli.run(gpa, init.io, &ctx, opts.model, .{ .tokens = opts.tokens, .max_tokens = opts.max_tokens, .loops = opts.loops, .context = opts.context, .drafts = opts.drafts, .graphs = opts.graphs, .stop_eos = opts.stop_eos, .sampling = s });
+    }
+    if (opts.loops != null) {
+        std.debug.print("--loops sets a Dory checkpoint's recurrent passes: {s} is not one\n", .{opts.model});
+        return 2;
+    }
     const env = init.environ_map;
     var carve: ?cuda.Carveout = null;
     if (try cuda.carveout.requested(opts.carveout, env.get("TF_CUDA_CARVEOUT"), env.get("TF_CUDA_CARVEOUT_MIB"))) |bytes| {
@@ -202,7 +226,7 @@ pub fn main(init: std.process.Init) !u8 {
     const widths = std.mem.eql(u8, cmd, "widths");
     const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench or widths);
     const sampling: ?lanes.Sampling = if ((std.mem.eql(u8, cmd, "run") or widths) and opts.sampling.temperature > 0) opts.sampling else null;
-    const segments = opts.segments orelse if (init.environ_map.get("TF_CUDA_SEGMENTS")) |v| try std.fmt.parseInt(usize, v, 10) else 1;
+    const segments = opts.segments orelse @as(usize, @intCast((try settings.parse("TF_CUDA_SEGMENTS", init.environ_map.get("TF_CUDA_SEGMENTS"))) orelse 1));
     // a rank past 0 of a tensor-parallel latent MoE holds expert shares and serves rank 0's jobs, whatever the command
     if (init.environ_map.get("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, r, "0")) {
         nemotron.worker.serve(gpa, init.io, &ctx, opts.model, opts.math) catch |err| {
@@ -274,6 +298,7 @@ const Options = struct {
     solo: bool = false,
     costs: ?[]f64 = null,
     segments: ?usize = null,
+    loops: ?usize = null, // a Dory checkpoint's recurrent passes (run only)
     counts: Counts = .{ .items = .{ 1, 2, 3, 4 }, .len = 4 },
     repeat: usize = 3,
     streams: usize = 4,
@@ -297,10 +322,7 @@ fn parseCounts(text: []const u8) !Counts {
 
 /// The GPU ordinal `--device` or `TF_CUDA_DEVICE` picks before an engine loads (PR #354); nothing set means 0.
 fn deviceOrdinal(flag: ?u32, env: ?[]const u8) !u32 {
-    if (flag) |d| return d;
-    const value = env orelse return 0;
-    if (value.len == 0) return 0;
-    return std.fmt.parseInt(u32, value, 10);
+    return @import("sys").environment.device(flag, env);
 }
 
 fn parseFloats(gpa: std.mem.Allocator, text: []const u8) ![]f64 {
@@ -373,5 +395,5 @@ test "the device ordinal comes from --device, then TF_CUDA_DEVICE, else 0" {
     try std.testing.expectEqual(@as(u32, 3), try deviceOrdinal(null, "3"));
     try std.testing.expectEqual(@as(u32, 0), try deviceOrdinal(null, null));
     try std.testing.expectEqual(@as(u32, 0), try deviceOrdinal(null, ""));
-    try std.testing.expectError(error.Overflow, deviceOrdinal(null, "4294967296"));
+    try std.testing.expectError(error.InvalidEnvironment, @import("sys").environment.parse("TF_CUDA_DEVICE", "4294967296"));
 }

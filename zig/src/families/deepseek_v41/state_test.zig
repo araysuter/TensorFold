@@ -1,5 +1,14 @@
 const std = @import("std");
 test {
+    _ = @import("world4_test.zig");
+    _ = @import("prefill_heads_test.zig");
+    _ = @import("world4_plan_test.zig");
+    _ = @import("world3_test.zig");
+    _ = @import("world3_emit_test.zig");
+    _ = @import("emit_pins_test.zig");
+    _ = @import("world4_stage_test.zig");
+}
+test {
     _ = @import("kv_io_test.zig");
     inline for (.{ @import("forward.zig").Forward, @import("run.zig").Runner, @import("graphs.zig").Statics, @import("graphs.zig").EngramStage, @import("cuda_kv.zig").Kv, @import("forward_prefill.zig"), @import("longpf.zig"), @import("ced.zig"), @import("sessions_gpu.zig").Sessions, @import("slots.zig").SlotSet, @import("engine_hooks.zig") }) |m| std.testing.refAllDecls(m);
     _ = @import("kv_state.zig");
@@ -35,4 +44,12 @@ test {
 
 test {
     _ = @import("review_copy_test.zig");
+}
+
+test {
+    _ = @import("issue1205_test.zig");
+}
+
+test {
+    _ = @import("session_budget.zig");
 }

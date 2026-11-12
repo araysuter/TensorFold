@@ -1,5 +1,7 @@
 //! Kolibri-1's dimensions from config.json, and the layouts this engine refuses (FP8 128 x 128, sigmoid routing).
 const std = @import("std");
+const eos_ids = @import("core").tokenizer.eos;
+const rope_config = @import("rope_config");
 
 pub const max_layers = 64;
 pub const max_eos = 4;
@@ -58,7 +60,10 @@ pub const Config = struct {
     pub fn addEos(self: *Config, allocator: std.mem.Allocator, generation: []const u8) !void {
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, generation, .{});
         defer parsed.deinit();
-        if (parsed.value.object.get("eos_token_id")) |v| try eosFrom(self, v);
+        if (parsed.value != .object) return error.BadEos;
+        const ids = try eos_ids.merge(allocator, self.eos[0..self.eos_count], parsed.value, self.vocab);
+        defer allocator.free(ids);
+        try setEos(self, ids);
     }
 
     /// `dir`/config.json, checked for the kernels' shapes, and generation_config.json's end tokens when it is there.
@@ -108,21 +113,11 @@ fn number(v: std.json.Value) !f64 {
     };
 }
 
-/// One end token, or a list of them; null entries are skipped and a token already listed is kept once.
-fn eosFrom(c: *Config, v: std.json.Value) !void {
-    const items: []const std.json.Value = switch (v) {
-        .integer => &.{v},
-        .array => |a| a.items,
-        else => return,
-    };
-    for (items) |x| {
-        if (x != .integer) continue;
-        const t: u32 = @intCast(x.integer);
-        if (c.isEos(t)) continue;
-        if (c.eos_count == max_eos) return error.TooManyEos;
-        c.eos[c.eos_count] = t;
-        c.eos_count += 1;
-    }
+/// Publish validated ids only when the family's fixed storage can hold the complete set.
+fn setEos(c: *Config, ids: []const u32) !void {
+    if (ids.len > max_eos) return error.TooManyEos;
+    @memcpy(c.eos[0..ids.len], ids);
+    c.eos_count = ids.len;
 }
 
 /// config.json's text; a refusal's reason goes to `why`.
@@ -171,11 +166,14 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         why.set("{d} layers; this build holds at most {d}", .{ c.layers, max_layers });
         return error.BadConfig;
     }
-    // rope_parameters.rope_theta wins over the top-level rope_theta, as transformers reads them
+    // rope_parameters.rope_theta wins over the top-level one, as transformers reads them; a non-object is not read
+    const rope = rope_config.params(o) catch null;
     if (o.get("rope_theta")) |v| c.rope_theta = @floatCast(try number(v));
-    if (o.get("rope_parameters")) |v| if (v == .object) if (v.object.get("rope_theta")) |t| {
-        c.rope_theta = @floatCast(try number(t));
-    };
+    if (rope_config.pick(rope, o, "rope_theta", .params)) |t| c.rope_theta = @floatCast(try number(t));
+    if (rope_config.scaled(o, rope)) |key| {
+        why.set("config.json's {s} asks for scaled RoPE (YaRN); Kolibri-1 runs plain RoPE", .{key});
+        return error.UnsupportedRope;
+    }
     const types = o.get("layer_types") orelse {
         why.set("config.json has no layer_types", .{});
         return error.BadConfig;
@@ -193,7 +191,9 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
             return error.UnsupportedLayer;
         }
     }
-    if (o.get("eos_token_id")) |v| try eosFrom(&c, v);
+    const ids = try eos_ids.resolve(allocator, parsed.value, .null, c.vocab);
+    defer allocator.free(ids);
+    try setEos(&c, ids);
     return c;
 }
 
@@ -286,6 +286,25 @@ test "refusals: not kolibri1, other quantization, normalised routing, other laye
     try refused(short, error.BadConfig, "49 layers");
 }
 
+test "scaled RoPE is refused in either form; plain, default and null keep theta and head dim" {
+    const theta = "\"rope_theta\": 10000.0,";
+    const yarn = "{\"rope_type\": \"yarn\", \"rope_theta\": 10000.0, \"factor\": 4.0}";
+    const params = try replaced(theta, "\"rope_parameters\": " ++ yarn ++ ",");
+    defer std.testing.allocator.free(params);
+    try refused(params, error.UnsupportedRope, "rope_parameters.rope_type");
+    const legacy = try replaced(theta, theta ++ " \"rope_scaling\": " ++ yarn ++ ",");
+    defer std.testing.allocator.free(legacy);
+    try refused(legacy, error.UnsupportedRope, "rope_scaling");
+    const plain = try replaced(theta, "\"rope_parameters\": {\"rope_type\": \"default\", \"rope_theta\": 10000.0}, \"rope_scaling\": null,");
+    defer std.testing.allocator.free(plain);
+    for ([_][]const u8{ pinned, plain }) |text| {
+        var why: Why = .{};
+        const c = try parse(std.testing.allocator, text, &why);
+        try std.testing.expectEqual(@as(f32, 10000), c.rope_theta);
+        try std.testing.expectEqual(@as(usize, 128), c.head_dim);
+    }
+}
+
 test "rope_parameters' theta wins, and other shapes are refused before any kernel runs" {
     const rope = try replaced("\"rope_theta\": 10000.0", "\"rope_theta\": 10000.0, \"rope_parameters\": {\"rope_theta\": 5e5}");
     defer std.testing.allocator.free(rope);
@@ -302,4 +321,18 @@ test "rope_parameters' theta wins, and other shapes are refused before any kerne
     var wide = c;
     wide.shared_width = 1024;
     try std.testing.expectError(error.UnsupportedShapes, checkShapes(wide, &why));
+}
+
+test "EOS policy: family EOS uses shared validation and failed merges leave the prior set intact" {
+    var why: Why = .{};
+    var c = try parse(std.testing.allocator, pinned, &why);
+    for ([_][]const u8{ "{\"eos_token_id\":-1}", "{\"eos_token_id\":128000}", "{\"eos_token_id\":[127906,true]}", "null" }) |bad| {
+        try std.testing.expectError(error.BadEos, c.addEos(std.testing.allocator, bad));
+        try std.testing.expectEqual(@as(usize, 1), c.eos_count);
+        try std.testing.expect(c.isEos(127906) and !c.isEos(127901));
+    }
+    try c.addEos(std.testing.allocator, "{\"eos_token_id\":[127906,null,127901]}");
+    try std.testing.expectEqualSlices(u32, &.{ 127906, 127901 }, c.eos[0..c.eos_count]);
+    try std.testing.expectError(error.TooManyEos, c.addEos(std.testing.allocator, "{\"eos_token_id\":[1,2,3,4,5]}"));
+    try std.testing.expectEqualSlices(u32, &.{ 127906, 127901 }, c.eos[0..c.eos_count]);
 }

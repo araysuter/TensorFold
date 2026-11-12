@@ -7,6 +7,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "common/glue_math.cuh"
+
 namespace tf_moe {
 
 constexpr int NT = 256;
@@ -139,6 +141,148 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_warp(const
         wts[r * slots + lane] = __fmul_rn(normalize ? __fdiv_rn(wk, sum) : wk, scale);
     }
     if (shared && lane == 0) pick[r * slots + topk] = ne, wts[r * slots + topk] = 1.f;
+}
+
+// The warp form ranking sigmoid(logit) + bias, logit the `slices` partials [slices, rows, ne] summed in order.
+constexpr int MAXSK = 8; // slices the score form sums
+
+// Group-limited selection: experts outside the `keep` groups of best top-2 sums go to -inf (ties: lower group).
+template <int P, bool HIGH = false>
+__device__ __forceinline__ void keep_groups(float (&v)[P], int lane, int ne, int groups, int keep) {
+    const int gs = ne / groups;
+    float gscore = -INFINITY; // lane g: group g's two best values summed
+    for (int gi = 0; gi < groups; ++gi) {
+        float a = -INFINITY, b = -INFINITY; // this lane's best two in group gi, a >= b
+#pragma unroll
+        for (int j = 0; j < P; ++j) {
+            const int e = lane + 32 * j;
+            if (e < ne && e / gs == gi) {
+                if (v[j] > a) b = a, a = v[j];
+                else if (v[j] > b) b = v[j];
+            }
+        }
+        for (int m = 16; m > 0; m >>= 1) {
+            const float oa = __shfl_xor_sync(0xFFFFFFFFu, a, m), ob = __shfl_xor_sync(0xFFFFFFFFu, b, m);
+            b = fmaxf(fminf(a, oa), fmaxf(b, ob));
+            a = fmaxf(a, oa);
+        }
+        if (lane == gi) gscore = __fadd_rn(a, b);
+    }
+    unsigned kept = 0u;
+    bool live = lane < groups;
+    for (int k = 0; k < keep; ++k) { // the best live group: the largest sum, then the lowest group among equals
+        const unsigned key = live ? ordered(gscore) : 0u;
+        const unsigned top = __reduce_max_sync(0xFFFFFFFFu, key);
+        unsigned id = __reduce_min_sync(0xFFFFFFFFu, live && key == top ? static_cast<unsigned>(lane) : 32u);
+        if constexpr (HIGH) { // the contract's control: the highest group among equals
+            const unsigned hi = __reduce_max_sync(0xFFFFFFFFu, live && key == top ? lane + 1u : 0u);
+            id = hi == 0u ? 32u : hi - 1u;
+        }
+        if (id >= 32u) break;
+        kept |= 1u << id;
+        if (lane == static_cast<int>(id)) live = false;
+    }
+#pragma unroll
+    for (int j = 0; j < P; ++j) {
+        const int e = lane + 32 * j;
+        if (e < ne && !((kept >> (e / gs)) & 1u)) v[j] = -INFINITY;
+    }
+}
+
+// A lane holds experts lane + 32 j, j < P; every slice's and the bias's load issued before the sums.
+template <int P, bool GROUPS = false, bool HIGH = false>
+__device__ __forceinline__ void score_warp(const float* logits, const float* bias, int* pick, float* wts, int rows, int ne,
+                                           int topk, int shared, int normalize, float scale, int slices, int groups = 1,
+                                           int keep = 1) {
+    const int lane = threadIdx.x & 31;
+    const int64_t r = static_cast<int64_t>(blockIdx.x) * 8 + (threadIdx.x >> 5);
+    if (r >= rows) return;
+    const float* lg = logits + r * ne;
+    float v[P], x[P], part[P][MAXSK], b[P];
+#pragma unroll
+    for (int j = 0; j < P; ++j) {
+        const int e = lane + 32 * j;
+        b[j] = e < ne && bias != nullptr ? bias[e] : 0.f;
+#pragma unroll
+        for (int s = 0; s < MAXSK; ++s) part[j][s] = e < ne && s < slices ? lg[static_cast<int64_t>(s) * rows * ne + e] : 0.f;
+    }
+#pragma unroll
+    for (int j = 0; j < P; ++j) {
+        const int e = lane + 32 * j;
+        float l = part[j][0];
+#pragma unroll
+        for (int s = 1; s < MAXSK; ++s)
+            if (s < slices) l = __fadd_rn(l, part[j][s]);
+        x[j] = e < ne ? tf_glue::tf_sigmoid(l) : 0.f;
+        const float vj = __fadd_rn(x[j], b[j]);
+        v[j] = e < ne && vj == vj ? vj : -INFINITY; // a NaN logit is never picked ahead of a number
+    }
+    if constexpr (GROUPS) keep_groups<P, HIGH>(v, lane, ne, groups, keep);
+    const int slots = topk + shared;
+    float xk = 0.f; // lane k's pick's score
+    int pk = 0;     // lane k's pick
+    for (int k = 0; k < topk; ++k) {
+        float bv = -INFINITY;
+        int bi = ne;
+#pragma unroll
+        for (int j = 0; j < P; ++j) {
+            const int e = lane + 32 * j;
+            if (e < ne && beats(v[j], e, bv, bi)) bv = v[j], bi = e;
+        }
+        { // the warp's best: the largest value (redux on an order-keeping key), then the lowest id among equals
+            const unsigned key = ordered(bv);
+            const unsigned top = __reduce_max_sync(0xFFFFFFFFu, key);
+            bi = static_cast<int>(__reduce_min_sync(0xFFFFFFFFu, key == top ? static_cast<unsigned>(bi) : 0xFFFFFFFFu));
+        }
+        float xb = 0.f;
+#pragma unroll
+        for (int j = 0; j < P; ++j)
+            if (lane + 32 * j == bi) v[j] = -INFINITY, xb = x[j];
+        xb = __shfl_sync(0xFFFFFFFFu, xb, bi & 31);
+        if (lane == k) xk = xb, pk = bi;
+    }
+    // the weights in their lanes; the sum in pick order, + 1e-20: picks all underflowed to 0 weigh 0, not NaN
+    float sum = 0.f;
+    for (int k = 0; k < topk; ++k) sum = __fadd_rn(sum, __shfl_sync(0xFFFFFFFFu, xk, k));
+    if (lane < topk) {
+        pick[r * slots + lane] = pk;
+        wts[r * slots + lane] = __fmul_rn(normalize ? __fdiv_rn(xk, __fadd_rn(sum, 1e-20f)) : xk, scale);
+    }
+    if (lane < shared) pick[r * slots + topk + lane] = ne + lane, wts[r * slots + topk + lane] = 1.f;
+}
+
+// Up to 512 experts.
+extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp(const float* logits, const float* bias,
+                                                                                int* pick, float* wts, int rows, int ne,
+                                                                                int topk, int shared, int normalize,
+                                                                                float scale, int slices) {
+    score_warp<PER>(logits, bias, pick, wts, rows, ne, topk, shared, normalize, scale, slices);
+}
+
+// Up to 128 experts (Lightning's): four a lane, so the slices' loads fit in registers beside the rest.
+extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_warp_128(const float* logits, const float* bias,
+                                                                                    int* pick, float* wts, int rows, int ne,
+                                                                                    int topk, int shared, int normalize,
+                                                                                    float scale, int slices) {
+    score_warp<4>(logits, bias, pick, wts, rows, ne, topk, shared, normalize, scale, slices);
+}
+
+// The score form up to 512 experts with group-limited selection: `groups` equal groups, the best `keep` kept (Ling).
+extern "C" __global__ void __launch_bounds__(256) tf_moe_topk_sigmoid_score_groups(const float* logits, const float* bias,
+                                                                                  int* pick, float* wts, int rows, int ne,
+                                                                                  int topk, int shared, int normalize,
+                                                                                  float scale, int slices, int groups,
+                                                                                  int keep) {
+    score_warp<PER, true>(logits, bias, pick, wts, rows, ne, topk, shared, normalize, scale, slices, groups, keep);
+}
+
+// The contract's planted control for the tie rule: tf_moe_topk_sigmoid_score_groups keeping the highest equal group.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_moe_topk_score_groups_high(const float* logits, const float* bias,
+                                                                                    int* pick, float* wts, int rows, int ne,
+                                                                                    int topk, int shared, int normalize,
+                                                                                    float scale, int slices, int groups,
+                                                                                    int keep) {
+    score_warp<PER, true, true>(logits, bias, pick, wts, rows, ne, topk, shared, normalize, scale, slices, groups, keep);
 }
 
 // out[r, d] = sum over the row's slots, in slot order, of w[r, k] * y[r, k, d] (fp32 fma), rounded once to out's kind.

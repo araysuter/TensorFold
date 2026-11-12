@@ -7,13 +7,7 @@
 
 namespace tf_experts_rows {
 
-__device__ __forceinline__ uint4 ld_w(const uint4* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
+__device__ __forceinline__ uint4 ld_w(const uint4* p) { return tf_common::ld_nc(p); }
 
 __device__ __forceinline__ uint4 ld_x(const __nv_bfloat16* p) { return __ldg(reinterpret_cast<const uint4*>(p)); }
 
@@ -138,7 +132,9 @@ __global__ void __launch_bounds__(WARPS * 32)
 }  // namespace tf_experts_rows
 
 // Groups of 32, two row tiles (32 rows) a warp: SwiGLU gate and up together (epilogue 2), down to fp32 (epilogue 0).
-template __global__ void tf_experts_rows::expert_rows<32, 2, 2, 2, 4>(const __nv_bfloat16*, int, int, const uint4*,
-    int, int, const int*, const int*, const int*, void*, int, float);
-template __global__ void tf_experts_rows::expert_rows<32, 1, 0, 2, 4>(const __nv_bfloat16*, int, int, const uint4*,
-    int, int, const int*, const int*, const int*, void*, int, float);
+template __global__ void tf_experts_rows::expert_rows<32, 2, 2, 2, 4>(const __nv_bfloat16* __restrict__, int, int,
+    const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__,
+    void* __restrict__, int, float);
+template __global__ void tf_experts_rows::expert_rows<32, 1, 0, 2, 4>(const __nv_bfloat16* __restrict__, int, int,
+    const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__,
+    void* __restrict__, int, float);

@@ -8,6 +8,10 @@ const model_text = @import("model_text.zig");
 const routes = @import("routes.zig");
 const Conn = @import("http_conn.zig").Conn;
 
+comptime {
+    _ = @import("late_system_retained_test.zig");
+}
+
 const openai_body =
     \\{"model":"m","max_tokens":4,"messages":[{"role":"system","content":"lead"},{"role":"user","content":"hi"},{"role":"system","content":"be brief"},{"role":"assistant","content":"ok"},{"role":"user","content":"go"}]}
 ;
@@ -22,8 +26,8 @@ const misplaced_body =
 ;
 
 /// Drops a system message after the first, so the late-system probe comes back as user.
-const DropLate = struct {
-    fn text(t: *@This()) model_text.Text {
+pub const DropLate = struct {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 
@@ -55,9 +59,9 @@ const DropLate = struct {
         return &.{};
     }
 
-    fn render(_: *anyopaque, a: std.mem.Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(_: *anyopaque, a: std.mem.Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
         var out: std.ArrayList(u8) = .empty;
-        if (messages != .array) return out.items;
+        if (messages != .array) return .{ .text = (out.items) };
         var first = true;
         for (messages.array) |m| {
             const role = textOf(m, "role");
@@ -70,7 +74,7 @@ const DropLate = struct {
                 try out.append(a, '\n');
             }
         }
-        return out.items;
+        return .{ .text = (out.items) };
     }
 
     fn templateSource(_: *anyopaque) []const u8 {
@@ -78,13 +82,13 @@ const DropLate = struct {
     }
 };
 
-fn textOf(v: json.Value, key: []const u8) []const u8 {
+pub fn textOf(v: json.Value, key: []const u8) []const u8 {
     const x = v.get(key) orelse return "";
     return if (x == .string) x.string else "";
 }
 
 /// Copies the prompt the server submits, then finishes at once.
-const Capture = struct {
+pub const Capture = struct {
     prompt: []u32 = &.{},
     background_prompt: []u32 = &.{},
     background_born: u32 = 0,
@@ -92,7 +96,7 @@ const Capture = struct {
     warm_turns: bool = false,
     telemetry: []const u8 = "", // the finished event's drafter counters
 
-    fn engine(e: *@This()) api.Engine {
+    pub fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
 
@@ -137,7 +141,7 @@ const Capture = struct {
 
 const Reply = struct { status: u16, body: []u8 };
 
-fn exchange(srv: *server.Server, path: []const u8, body: []const u8) !Reply {
+pub fn exchange(srv: *server.Server, path: []const u8, body: []const u8) !Reply {
     return exchangeAs(srv, "POST", path, body);
 }
 
@@ -197,7 +201,7 @@ fn promptText(ids: []const u32) ![]u8 {
     return text;
 }
 
-test "/v1/imprint: without --learn-conversations each route refuses and names the flag; with it, the engine answers" {
+test "/v1/imprint: disabled routes name both disk-cache spellings; enabled routes reach the engine" {
     var text: DropLate = .{};
     var backend: Capture = .{};
     defer std.testing.allocator.free(backend.prompt);
@@ -208,7 +212,7 @@ test "/v1/imprint: without --learn-conversations each route refuses and names th
     }, null);
     defer srv.deinit();
     const go = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]}";
-    const off = "saved conversations are off: start the server with --learn-conversations";
+    const off = "saved conversations are off: start the server with --prompt-cache-disk DIR (or --learn-conversations)";
     const routes_ = [_][2][]const u8{
         .{ "POST", "/v1/imprint/resume" },
         .{ "POST", "/v1/imprint/load" },
@@ -273,7 +277,7 @@ const prose_call = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}
 const prose_reply = "Before.\n" ++ prose_call ++ "\nAfter.";
 const retained_prose = "Before.\n\nAfter.";
 const chat_tools = "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}]";
-const prose_chat = "{\"model\":\"m\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]," ++ chat_tools;
+pub const prose_chat = "{\"model\":\"m\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]," ++ chat_tools;
 
 // Route adapters return prose and one call; warming submits both to the engine.
 test "tool reply prose survives whole chat, Messages and Responses and their warm prompts" {
@@ -464,6 +468,7 @@ test "GET and DELETE /v1/recall: 404 without a record, its state, emptied, and 4
     const opts: api.recall_store.Options = .{ .dir = dir, .cap_bytes = 64 << 20 };
     const w = (try Store.open(std.testing.allocator, std.testing.io, id, opts, &problem, arena.allocator())).?;
     defer w.close();
+    w.admission.floor = 0;
     var prompt: [200]u32 = undefined;
     for (&prompt, 0..) |*t, i| t.* = @intCast((i * 13) % 1000);
     w.readPrompt(&prompt, 0);
@@ -487,4 +492,61 @@ test "GET and DELETE /v1/recall: 404 without a record, its state, emptied, and 4
     defer std.testing.allocator.free(refused.body);
     try std.testing.expectEqual(@as(u16, 409), refused.status);
     try std.testing.expect(std.mem.indexOf(u8, refused.body, "reads the record only") != null);
+}
+
+fn unofferedVisible(streaming: bool) !void {
+    const raw_call = "<tool_call>{\"name\":\"not_offered\",\"arguments\":{}}</tool_call>";
+    var text: DropLate = .{};
+    var backend: Capture = .{ .reply = raw_call };
+    defer std.testing.allocator.free(backend.prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = try std.mem.concat(a, u8, &.{ prose_chat, if (streaming) ",\"parallel_tool_calls\":false,\"stream\":true}" else ",\"parallel_tool_calls\":false,\"stream\":false}" });
+    const got = try exchange(srv, "/v1/chat/completions", body);
+    defer std.testing.allocator.free(got.body);
+    try std.testing.expectEqual(@as(u16, 200), got.status);
+    if (!streaming) {
+        const choice = (try json.parse(a, got.body)).ok.get("choices").?.array[0];
+        const message = choice.get("message").?;
+        try std.testing.expectEqualStrings(raw_call, message.get("content").?.string);
+        try std.testing.expect(message.get("tool_calls") == null);
+        try std.testing.expectEqualStrings("stop", choice.get("finish_reason").?.string);
+        return;
+    }
+    var content: std.ArrayList(u8) = .empty;
+    var finished = false;
+    var lines = std.mem.splitScalar(u8, got.body, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "data: ")) continue;
+        const data = std.mem.trim(u8, line[6..], "\r");
+        if (std.mem.eql(u8, data, "[DONE]")) continue;
+        const payload = (try json.parse(a, data)).ok;
+        for (payload.get("choices").?.array) |choice| {
+            const delta = choice.get("delta").?;
+            if (delta.get("content")) |part| try content.appendSlice(a, part.string);
+            try std.testing.expect(delta.get("tool_calls") == null);
+            if (choice.get("finish_reason")) |reason| if (reason == .string) {
+                try std.testing.expectEqualStrings("stop", reason.string);
+                finished = true;
+            };
+        }
+    }
+    try std.testing.expectEqualStrings(raw_call, content.items);
+    try std.testing.expect(finished);
+}
+
+test "tool visibility HTTP: whole replies retain an unoffered call" {
+    try unofferedVisible(false);
+}
+
+test "tool visibility HTTP: streamed replies retain an unoffered call" {
+    try unofferedVisible(true);
 }

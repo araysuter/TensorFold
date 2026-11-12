@@ -60,6 +60,7 @@ pub const Forward = struct {
     slot: u32 = 0, // the bound sequence's lesson latch slot, which a window's rows read
     untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught sequences', else all
     segs: []const Seg = &.{}, // a window's sequences, as windowSegs runs them
+    unread: bool = false, // nothing reads this prompt chunk's rows: it stops at its last state write
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
     tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
     vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
@@ -77,6 +78,7 @@ pub const Forward = struct {
                 .s = ops.s,
                 .emb = &ops.k.emb,
                 .norms = &ops.k.norms,
+                .moe = &ops.k.moe,
             },
             .max_len = max_len,
             .nch = nch,
@@ -140,7 +142,7 @@ pub const Forward = struct {
     pub fn routedWindow(f: *const Forward, segs: []const Seg) Forward {
         var routed = f.*;
         routed.segs = segs;
-        if (f.c.latent > 0 and (segs.len > 1 or f.tp != null)) routed.side = null;
+        if (f.c.latent > 0 and f.tp != null) routed.side = null;
         routed.untaught = for (segs) |s| {
             if (s.untaught) break true;
         } else false;
@@ -272,13 +274,13 @@ pub const Forward = struct {
         const g = o.grouped();
         const in = f.rowsIn(ex);
         if (prompt) {
-            try g.prompt(o.s, .up, in[0], ex, b.plan, b.act, items, -1);
-            try g.prompt(o.s, .down_bf16, in[1], ex, b.plan, b.ymoe, items, -1);
+            try g.prompt(o.s, .up, in[0], ex, b.plan, b.act, items, pairs, tile, -1);
+            try g.prompt(o.s, .down_bf16, in[1], ex, b.plan, b.ymoe, items, pairs, tile, -1);
             if (f.dump) |d| for ([_][]const u8{ "pick", "act", "ymoe" }, [_]u64{ b.pick, b.act, b.ymoe }, [_]usize{ 4, ex.width * 2, ex.dims * 2 }) |l, p, w| try d.input(o, l, p, pairs * w);
         } else {
-            try g.decode(o.s, .up, in[0], ex, b.plan, b.act, items, -1);
+            try g.decode(o.s, .up, in[0], ex, b.plan, b.act, items, pairs, tile, -1);
             try f.mark(.experts_up);
-            try g.decode(o.s, .down_f32, in[1], ex, b.plan, b.ymoe, items, -1);
+            try g.decode(o.s, .down_f32, in[1], ex, b.plan, b.ymoe, items, pairs, tile, -1);
             try f.mark(.experts_down);
         }
         try f.sharedRest(o, m, rows, !prompt);
@@ -303,12 +305,12 @@ pub const Forward = struct {
         const up_in: cuda.experts.Rows = .{ .x = b.lat, .stride = c.latent, .slots = K };
         const down_in: cuda.experts.Rows = .{ .x = b.act, .stride = ex.width };
         if (prompt) {
-            try g.prompt(o.s, .up, up_in, ex, b.plan, b.act, items, -1);
-            try g.prompt(o.s, .down_f32, down_in, ex, b.plan, b.ymoe, items, -1);
+            try g.prompt(o.s, .up, up_in, ex, b.plan, b.act, items, pairs, tile, -1);
+            try g.prompt(o.s, .down_f32, down_in, ex, b.plan, b.ymoe, items, pairs, tile, -1);
         } else {
-            try g.decode(o.s, .up, up_in, ex, b.plan, b.act, items, -1);
+            try g.decode(o.s, .up, up_in, ex, b.plan, b.act, items, pairs, tile, -1);
             try f.mark(.experts_up);
-            try g.decode(o.s, .down_f32, down_in, ex, b.plan, b.ymoe, items, -1);
+            try g.decode(o.s, .down_f32, down_in, ex, b.plan, b.ymoe, items, pairs, tile, -1);
             try f.mark(.experts_down);
         }
         try o.latentSum(b.ymoe, b.wts, b.comb, rows, K, c.latent);
@@ -320,11 +322,11 @@ pub const Forward = struct {
         const sh_up: cuda.experts.Rows = .{ .x = b.y, .stride = c.hidden, .slots = 1 };
         const sh_down: cuda.experts.Rows = .{ .x = b.act, .stride = sh.width };
         if (prompt) {
-            try g.prompt(o.s, .up, sh_up, sh, b.plan, b.act, items, -1);
-            try g.prompt(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, -1);
+            try g.prompt(o.s, .up, sh_up, sh, b.plan, b.act, items, rows, tile, -1);
+            try g.prompt(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, rows, tile, -1);
         } else {
-            try g.decode(o.s, .up, sh_up, sh, b.plan, b.act, items, -1);
-            try g.decode(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, -1);
+            try g.decode(o.s, .up, sh_up, sh, b.plan, b.act, items, rows, tile, -1);
+            try g.decode(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, rows, tile, -1);
         }
         try o.addBf16(b.delta, b.delta, b.ymoe, true, rows * c.hidden);
         try f.mark(.shared_wait);
@@ -371,8 +373,9 @@ pub const Forward = struct {
         try sd.fork.record(o.s);
         try sd.s.wait(sd.fork);
         const sp = b.sharedPlan(rows);
-        try g.decode(sd.s, .up, in[0], ex, sp, b.act, 2, -1);
-        try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, 2, -1);
+        const pairs = rows * c.slots();
+        try g.decode(sd.s, .up, in[0], ex, sp, b.act, 2, pairs, 16, -1);
+        try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, 2, pairs, 16, -1);
         try f.sharedRest(so, m, rows, true);
         try sd.join.record(sd.s);
         try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);
@@ -380,9 +383,9 @@ pub const Forward = struct {
         try o.planRouted(b.pick, rows, c.slots(), c.top_k, c.experts, 16, b.plan);
         try f.mark(.plan);
         const items = kern.maxItems(rows * c.top_k, c.experts, 16);
-        try g.decode(o.s, .up, in[0], ex, b.plan, b.act, items, -1);
+        try g.decode(o.s, .up, in[0], ex, b.plan, b.act, items, pairs, 16, -1);
         try f.mark(.experts_up);
-        try g.decode(o.s, .down_f32, in[1], ex, b.plan, b.ymoe, items, -1);
+        try g.decode(o.s, .down_f32, in[1], ex, b.plan, b.ymoe, items, pairs, 16, -1);
         try f.mark(.experts_down);
         try o.s.wait(sd.join);
         try f.mark(.shared_wait);
@@ -395,9 +398,17 @@ pub const Forward = struct {
         for (0..f.w.blocks.len) |i| {
             try f.chunkPre(&w, i);
             try f.chunkMixer(&w, i);
+            if (f.unread and i == lastState(f.w.blocks)) return;
             try f.chunkPost(&w, i);
         }
         try f.chunkFinish(&w);
+    }
+
+    /// The last block that writes state: every block past it reads and writes its rows alone.
+    fn lastState(blocks: anytype) usize {
+        var i = blocks.len - 1;
+        while (i > 0 and blocks[i].kind == .moe) i -= 1;
+        return i;
     }
 
     /// A chunk's embedding, from p_ids.

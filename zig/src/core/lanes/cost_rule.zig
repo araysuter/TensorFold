@@ -1,6 +1,13 @@
 //! Timings steer windows, never bits; retain each entry's fastest run and retime outliers.
 const std = @import("std");
 
+/// Real text for timing a window: its tokens route as a served reply's do, unlike a looping head chain's.
+pub const text = "The river had been rising for three days, and by the time the ferry stopped running the town had moved its " ++
+    "market up the hill. Children carried baskets of apples past the church while their parents argued about " ++
+    "whether the old bridge would hold. In the workshop behind the bakery, a carpenter measured each plank " ++
+    "twice, wrote the numbers on the wall, and cut slowly.\n\ndef mean(values):\n    total = 0\n    for v in " ++
+    "values:\n        total += v\n    return total / len(values)\n";
+
 /// Timed runs an entry keeps the fastest of, after one untimed.
 pub const reps = 7;
 /// An entry timed more than this fraction under the one before it is noise.
@@ -40,6 +47,19 @@ pub fn drifted(ms: []const f64, reference: []const f64) bool {
 /// Compare a measured cost with its reference without imposing a positive-reference policy.
 pub fn changed(ms: f64, reference: f64) bool {
     return @abs(ms - reference) > drift * reference;
+}
+
+/// A window table's entry from its timed runs: the fastest, so one slow run cannot set the table.
+pub fn keepFastest(runs: []const f64) f64 {
+    var best = std.math.inf(f64);
+    for (runs) |v| best = @min(best, v);
+    return best;
+}
+
+/// A kept table's spot check: one width's quick reading against the stored entry.
+pub fn entryHolds(stored: f64, probed: f64) bool {
+    if (!(stored > 0) or !std.math.isFinite(stored)) return false;
+    return !changed(probed, stored);
 }
 
 /// Whether entries `at` and the head (sampled as `measure` does) time within drift, a drifted reading timed twice.

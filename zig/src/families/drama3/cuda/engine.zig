@@ -6,6 +6,7 @@ const cfg = @import("../config.zig");
 const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
 const fwd = @import("forward.zig");
+const ref_rows = @import("reference_rows.zig");
 const common = @import("../common.zig");
 
 pub const Options = common.Options;
@@ -102,6 +103,7 @@ pub const Engine = struct {
     prompt_rows: usize = 0,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, o: Options) !*Engine {
+        try o.validatePrefill();
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.* = undefined;
@@ -214,6 +216,8 @@ pub const Engine = struct {
         try e.stream.synchronize();
         try e.stream2.synchronize();
         for (e.bufs.items) |*buffer| try buffer.fill8(0xa5, null);
+        // cuMemsetD8 may return before completion; non-blocking streams do not wait for it.
+        try e.driver.synchronize();
     }
 
     fn alloc(e: *Engine, bytes: usize) !u64 {
@@ -349,10 +353,10 @@ pub const Engine = struct {
     /// Run the prompt rows (int32 [n][11]) through the backbone and the tower, leaving the frame step ready.
     pub fn prefill(e: *Engine, rows: []const [W]i32, probe: ?Probe) !void {
         try e.startPrompt(rows);
-        const R = if (probe != null) e.o.max_rows else 1;
+        const R = e.o.max_rows;
         if (probe != null and rows.len > R) return error.ProbeNeedsOneChunk;
         var at: usize = 0;
-        while (at < rows.len) : (at += R) try e.promptChunk(rows.len, at, @min(R, rows.len - at), probe);
+        while (at < rows.len) : (at += R) try e.promptChunk(rows.len, at, e.o.promptRows(rows.len - at), probe);
         try e.finishPrompt(rows);
     }
 
@@ -436,6 +440,64 @@ pub const Engine = struct {
         b.d = &e.driver;
         try b.copyFrom(0, src, bytes, e.stream.handle);
     }
+
+    /// A reference cache entry's device copy of the state after its prompt rows.
+    pub const Saved = Buf;
+
+    /// Device bytes of the state after `rows` prompt rows: both recurrent blocks, then each K and V cache's rows.
+    pub fn referenceBytes(e: *const Engine, rows: usize) usize {
+        var caches: [ref_caches]u64 = undefined;
+        return ref_rows.bytes(e.referenceLive(&caches), rows);
+    }
+
+    pub fn allocReference(e: *Engine, bytes: usize) !Saved {
+        return Buf.alloc(&e.driver, bytes);
+    }
+
+    pub fn freeReference(saved: *Saved) void {
+        saved.free();
+    }
+
+    /// The state the prompt's first `rows` rows left (no later row run yet) into `saved`, finished on return.
+    pub fn saveReference(e: *Engine, saved: Saved, rows: usize) !void {
+        try e.moveReference(saved, rows, false);
+    }
+
+    /// After startPrompt: the state saveReference copied, so the next chunk starts at `rows`; later rows are rewritten.
+    pub fn loadReference(e: *Engine, saved: Saved, rows: usize) !void {
+        try e.moveReference(saved, rows, true);
+    }
+
+    const ref_caches = 2 * (cfg.layers + cfg.tower_layers);
+
+    fn referenceLive(e: *const Engine, caches: *[ref_caches]u64) ref_rows.Live {
+        var n: usize = 0;
+        for (0..cfg.layers) |li| if (e.c.full_attention[li]) for (e.kv_bb[li]) |kv| {
+            caches[n] = kv;
+            n += 1;
+        };
+        for (e.kv_tw) |pair| for (pair) |kv| {
+            caches[n] = kv;
+            n += 1;
+        };
+        return .{ .state = e.state_bufs, .state_bytes = e.state_bytes, .caches = caches[0..n] };
+    }
+
+    fn moveReference(e: *Engine, saved: Saved, rows: usize, load: bool) !void {
+        var caches: [ref_caches]u64 = undefined;
+        const live = e.referenceLive(&caches);
+        if (rows == 0 or rows > e.o.max_ctx or saved.len < ref_rows.bytes(live, rows)) return error.BadReferenceRows;
+        errdefer e.stream.synchronize() catch {};
+        _ = try ref_rows.move(DeviceCopy{ .e = e }, live, saved.ptr, rows, load);
+        try e.stream.synchronize();
+    }
+
+    const DeviceCopy = struct {
+        e: *Engine,
+        pub fn copy(d: DeviceCopy, src: u64, dst: u64, n: usize) !void {
+            try d.e.copyRow(src, dst, n);
+        }
+    };
 
     /// Teacher forcing for parity: each pick goes to `picks`, then `frame`'s value (device int32 [11]) replaces it.
     pub const Force = struct { frame: u64, picks: u64 };

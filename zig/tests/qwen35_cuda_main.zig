@@ -1,4 +1,4 @@
-//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|probe|mtp|vision> ...`: rows to compare; usage below.
+//! `tf-qwen35-cuda <model> <step|window|tree|prompt|state|mrope|probe|mtp|vision> ...`: rows to compare; usage below.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -7,19 +7,30 @@ const E = q.engine;
 const vl = core.qwen_vl;
 
 const usage =
-    \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out> [fp8]
+    \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|state|mrope> <ids> <out> [fp8]
     \\       tf-qwen35-cuda <model dir> probe <ids> <layer>: a routed model's routing and rows at that layer
     \\       tf-qwen35-cuda <model dir> mtp <ids> <out>: the MTP drafter's tree regressions after a prompt
     \\       tf-qwen35-cuda <model dir> vision <out dir> <tokens> [--bound MEAN WORST] <picture or NAME.f32@HxW>...
     \\vision prepares each picture with core/qwen_vl under a <tokens> budget and runs the CUDA tower twice: <out dir>
     \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
     \\compared row by row (relative L2, worst and mean); --bound needs every reference and exits 1 past either bound.
-    \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _SHIFT: below.
+    \\state: raw GDN/conv and active KV bytes; TF_Q35_STATE_STEPS=N settles N decode rows first.
+    \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _RESUME_TREE, _SHIFT: below.
     \\TF_Q35_WINDOW=N fixes window/tree width (tree: at least 2); 0 keeps growing widths.
-    \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control]
+    \\       tf-qwen35-cuda <model dir> rows <ids file> <out> [piece] | rows-last <ids file> | rows-cuts <ids file>
+    \\rows: final-norm rows as a readout keeps them (raw bf16); rows-last checks them against .last; rows-cuts reports.
+    \\       tf-qwen35-cuda <model dir> readout <ids file> [streams]: a test readout's rows alone, together, after a cancel
+    \\       tf-qwen35-cuda <model dir> stage <out> [fp8]: a scenario's logits, one engine or a ring of stages (RFC #2005)
+    \\stage: without TF_STAGE_RANK one engine; with TF_STAGE_RANK, _WORLD, _PEERS, _SECRET_FILE and TF_STAGE_LAYOUT
+    \\(first:end a rank, e.g. 0:32,32:64) each process loads its layers only and rank 0 writes <out>. The scenario: a
+    \\two-chunk prompt, greedy steps, a second stream beside it, drafted windows kept short or rolled back.
+    \\       tf-qwen35-cuda <model dir> pipe <out> [fp8]: greedy streams in TF_PIPE_K groups in flight, tokens to <out>
+    \\pipe: TF_PIPE_STREAMS, _K (0: no pipelining), _PROMPT, _TOKENS, _DRAFT (prompt-lookup drafts); TF_STAGE_* as stage.
+    \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control|int8]
     \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
     \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
     \\id; control: bf16 against bf16 whose every other window rotates three positions on (a uniform shift cancels).
+    \\int8: fp8 caches on both sides, the second's prompt chunks through int8 activations (w4a8_prefill.cu).
     \\
 ;
 
@@ -36,6 +47,32 @@ pub fn main(init: std.process.Init) !u8 {
         const bound: ?[2]f64 = if (bounded) .{ try std.fmt.parseFloat(f64, args[6]), try std.fmt.parseFloat(f64, args[7]) } else null;
         return vision(init, a, args[1], args[3], try std.fmt.parseInt(u32, args[4], 10), bound, args[first..]);
     }
+    if (args.len >= 4 and std.mem.eql(u8, args[2], "readout")) {
+        const code = try @import("qwen35_cuda_readout.zig").run(init, a, args);
+        if (code == 2) std.debug.print("{s}", .{usage});
+        return code;
+    }
+    if (args.len >= 4 and std.mem.startsWith(u8, args[2], "rows")) {
+        const code = try @import("qwen35_cuda_rows.zig").run(init, a, args);
+        if (code == 2) std.debug.print("{s}", .{usage});
+        return code;
+    }
+    if (args.len >= 4 and std.mem.eql(u8, args[2], "stage")) {
+        const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
+        if (args.len > 5 or (args.len == 5 and !fp8)) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        return @import("qwen35_stage.zig").run(init, a, args[1], args[3], fp8);
+    }
+    if (args.len >= 4 and std.mem.eql(u8, args[2], "pipe")) {
+        const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
+        if (args.len > 5 or (args.len == 5 and !fp8)) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        return @import("qwen35_pipe.zig").run(init, a, args[1], args[3], fp8);
+    }
     if (args.len >= 3 and std.mem.eql(u8, args[2], "kl")) {
         if (args.len != 7 and args.len != 8) {
             std.debug.print("{s}", .{usage});
@@ -43,7 +80,8 @@ pub fn main(init: std.process.Init) !u8 {
         }
         const skip = try std.fmt.parseInt(usize, args[5], 10);
         const control = args.len == 8 and std.mem.eql(u8, args[7], "control");
-        return kl(init, a, args[1], args[3], args[4], skip, try std.fmt.parseInt(usize, args[6], 10), control);
+        const int8 = args.len == 8 and std.mem.eql(u8, args[7], "int8");
+        return kl(init, a, args[1], args[3], args[4], skip, try std.fmt.parseInt(usize, args[6], 10), control, int8);
     }
     if (args.len != 5 and !(args.len == 6 and std.mem.eql(u8, args[5], "fp8"))) {
         std.debug.print("{s}", .{usage});
@@ -56,7 +94,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6);
+    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6, null);
     defer e.deinit();
     if (std.mem.eql(u8, args[2], "mtp")) return mtpCheck(init.gpa, init.io, e, args[1], ids.items);
     // TF_Q35_PREFILL=N starts the stream after N cycled ids; TF_Q35_BESIDE=N steps an N-token stream beside it
@@ -67,9 +105,10 @@ pub fn main(init: std.process.Init) !u8 {
     try fill(e, &cache, ids.items, prefill);
     // TF_Q35_DELTA=d: the rows after the prefill rotate at position + d, as an image prompt's reply does
     if (std.c.getenv("TF_Q35_DELTA")) |v| cache.delta = try std.fmt.parseInt(i32, std.mem.span(v), 10);
-    // TF_Q35_RESUME=1: the stream goes on from a kept copy of its state, restored into another (poisoned) cache
+    // TF_Q35_RESUME=K: continue from a kept copy at K, restored into another poisoned cache
     const resume_at = try envCount("TF_Q35_RESUME");
-    if (resume_at > 0 and !std.mem.eql(u8, args[2], "prompt") and !std.mem.eql(u8, args[2], "mrope")) try resumeFrom(init.gpa, e, &cache);
+    const state = std.mem.eql(u8, args[2], "state");
+    if (resume_at > 0 and !std.mem.eql(u8, args[2], "prompt") and !state and !std.mem.eql(u8, args[2], "mrope")) try resumeFrom(init.gpa, e, &cache);
     var other = try E.Cache.init(init.gpa, e, 4096 + beside);
     defer other.deinit(init.gpa);
     try fill(e, &other, ids.items, beside);
@@ -104,36 +143,29 @@ pub fn main(init: std.process.Init) !u8 {
         // tree windows of growing widths, junk branches beside the kept true one, whose logits must equal step's bits
         var at: usize = 0;
         var w: usize = if (fixed > 0) @max(2, fixed) else 2;
+        var windows: usize = 0;
+        // TF_Q35_RESUME_TREE=J: a kept copy after window J (rows pending), and the windows after J run again from it
+        const resume_tree = try envCount("TF_Q35_RESUME_TREE");
+        var copy: ?*q.reuse.Copy = null;
+        defer if (copy) |c| q.reuse.dropCopy(e, c);
+        var from: struct { at: usize = 0, w: usize = 0, out: usize = 0 } = .{};
         while (at < ids.items.len) : (w = if (fixed > 0) @max(2, fixed) else w % e.window_rows + 1) {
-            var toks: [E.most_window]u32 = undefined;
-            var parents: [E.most_window]i32 = undefined;
-            var path: [E.most_window]u32 = undefined;
-            toks[0] = ids.items[at];
-            parents[0] = -1;
-            path[0] = 0;
-            var n: usize = 1;
-            var kept: usize = 1;
-            var last: i32 = 0;
-            var depth: usize = 1;
-            while (n + 2 <= w and at + depth < ids.items.len) : (depth += 1) {
-                toks[n] = (ids.items[at + depth] + 7) % @as(u32, @intCast(e.g.vocab));
-                parents[n] = last;
-                toks[n + 1] = ids.items[at + depth];
-                parents[n + 1] = last;
-                path[kept] = @intCast(n + 1);
-                last = @intCast(n + 1);
-                n += 2;
-                kept += 1;
+            if (resume_tree > 0 and windows == resume_tree) {
+                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
+                from = .{ .at = at, .w = w, .out = out.items.len };
             }
-            if (n < w and n >= 3) {
-                toks[n] = 1;
-                parents[n] = 1;
-                n += 1;
-            }
-            try f.run(.{ .cache = &cache, .rows = n, .parents = parents[0..n] }, toks[0..n]);
-            for (path[0..kept]) |r| try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(r)));
-            if (n > 1) try cache.keep(e, path[0..kept]);
-            at += kept;
+            at += try treeWindow(&f, &cache, ids.items, at, w, a, &out);
+            windows += 1;
+        }
+        if (copy) |c| {
+            // restored into this cache with rows pending again: the rerun's logits must equal the first run's
+            try q.reuse.restoreCache(e, &cache, c, &.{});
+            var again: std.ArrayList(u8) = .empty;
+            at = from.at;
+            w = from.w;
+            while (at < ids.items.len) : (w = if (fixed > 0) @max(2, fixed) else w % e.window_rows + 1) at += try treeWindow(&f, &cache, ids.items, at, w, a, &again);
+            if (!std.mem.eql(u8, again.items, out.items[from.out..])) return error.ResumeMismatch;
+            std.debug.print("tree resume after window {d}: the {d} rows from {d} repeat their logits\n", .{ resume_tree, ids.items.len - from.at, from.at });
         }
     } else if (std.mem.eql(u8, args[2], "probe")) {
         // the first id through layers 0..N (N = the out argument): that layer's routing and rows, for a reference
@@ -193,25 +225,73 @@ pub fn main(init: std.process.Init) !u8 {
         const p0 = cache.len;
         var at: usize = 0;
         while (at < n_ids) {
-            const n = @min(E.max_rows, n_ids - at);
+            var n = @min(E.max_rows, n_ids - at);
+            if (resume_at > cache.len and resume_at < cache.len + n) {
+                n = @intCast(resume_at - cache.len);
+            }
             if (table) {
                 // the table's rows are the prompt's from position p0: shift it so row `at` is the cache's next
                 const part: E.Images = .{ .features = im.features, .src = try padded(a, src, p0), .pos = try paddedPos(a, pos, p0, n_ids) };
                 try e.forward(&.{.{ .cache = &cache, .rows = n, .images = &part }}, ids.items[at..][0..n], .last);
             } else try e.forward(&.{.{ .cache = &cache, .rows = n }}, ids.items[at..][0..n], .last);
             at += n;
-            // TF_Q35_RESUME=K in prompt and mrope: the pass goes on from a kept copy at position K
+            // TF_Q35_RESUME=K in prompt, state and mrope: the pass goes on from a kept copy at position K
             if (resume_at > 0 and cache.len == resume_at) try resumeFrom(init.gpa, e, &cache);
         }
-        try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
+        if (state) {
+            const steps = try envCount("TF_Q35_STATE_STEPS");
+            if (steps > 0 and ids.items.len == 0) return error.NoStateTokens;
+            for (0..steps) |i| {
+                const token = [_]u32{ids.items[i % ids.items.len]};
+                try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &token, .logits);
+                try cache.settle(e);
+            }
+            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
+            defer q.reuse.dropCopy(e, copy);
+            try out.appendSlice(a, copy.host.bytes[0..@intCast(copy.len)]);
+        } else try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
     }
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[4], .data = out.items });
     return 0;
 }
 
+/// One tree window of `w` rows at `at`: its true rows' logits onto `out`, their path kept; the rows it keeps.
+fn treeWindow(f: *Fwd, cache: *E.Cache, ids: []const u32, at: usize, w: usize, a: std.mem.Allocator, out: *std.ArrayList(u8)) !usize {
+    const e = f.e;
+    var toks: [E.most_window]u32 = undefined;
+    var parents: [E.most_window]i32 = undefined;
+    var path: [E.most_window]u32 = undefined;
+    toks[0] = ids[at];
+    parents[0] = -1;
+    path[0] = 0;
+    var n: usize = 1;
+    var kept: usize = 1;
+    var last: i32 = 0;
+    var depth: usize = 1;
+    while (n + 2 <= w and at + depth < ids.len) : (depth += 1) {
+        toks[n] = (ids[at + depth] + 7) % @as(u32, @intCast(e.g.vocab));
+        parents[n] = last;
+        toks[n + 1] = ids[at + depth];
+        parents[n + 1] = last;
+        path[kept] = @intCast(n + 1);
+        last = @intCast(n + 1);
+        n += 2;
+        kept += 1;
+    }
+    if (n < w and n >= 3) {
+        toks[n] = 1;
+        parents[n] = 1;
+        n += 1;
+    }
+    try f.run(.{ .cache = cache, .rows = n, .parents = parents[0..n] }, toks[0..n]);
+    for (path[0..kept]) |r| try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(r)));
+    if (n > 1) try cache.keep(e, path[0..kept]);
+    return kept;
+}
+
 /// `cache` replaced by a fresh one, poisoned, that takes a kept copy of its state (cuda_reuse.zig's save and restore).
 fn resumeFrom(gpa: std.mem.Allocator, e: *E.Engine, cache: *E.Cache) !void {
-    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{});
+    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{}, false);
     defer q.reuse.dropCopy(e, copy);
     var fresh = try E.Cache.init(gpa, e, cache.cap);
     errdefer fresh.deinit(gpa);
@@ -338,7 +418,7 @@ fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, out: 
 }
 
 /// bf16 caches against fp8 ones (or a control) on the same ids: each window row's KL and top-1, summed up into `out`.
-fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path: []const u8, out: []const u8, skip: usize, rows: usize, control: bool) !u8 {
+fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path: []const u8, out: []const u8, skip: usize, rows: usize, control: bool, int8: bool) !u8 {
     const io = init.io;
     var ids: std.ArrayList(u32) = .empty;
     var it = std.mem.tokenizeAny(u8, try std.Io.Dir.cwd().readFileAlloc(io, ids_path, a, .limited(64 << 20)), ", \n");
@@ -348,16 +428,23 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const eb = try E.Engine.init(init.gpa, io, &ctx, model, false);
+    const eb = try E.Engine.init(init.gpa, io, &ctx, model, int8, null);
     defer eb.deinit();
-    const e8 = try E.Engine.init(init.gpa, io, &ctx, model, !control);
-    defer e8.deinit();
+    // int8: one engine (two would not fit), fp8 caches, the second cache's prompt chunks through int8 activations
+    const e8 = if (int8) eb else try E.Engine.init(init.gpa, io, &ctx, model, !control, null);
+    defer if (!int8) e8.deinit();
     var cb = try E.Cache.init(init.gpa, eb, skip + rows + 64);
     defer cb.deinit(init.gpa);
     var c8 = try E.Cache.init(init.gpa, e8, skip + rows + 64);
     defer c8.deinit(init.gpa);
+    if (int8) try eb.int8.enable(eb);
+    eb.int8.on = false;
     try fill(eb, &cb, ids.items[0..skip], skip);
+    e8.int8.on = int8;
     try fill(e8, &c8, ids.items[0..skip], skip);
+    e8.int8.on = false;
+    // the first side's logits rows, kept while one engine computes both
+    const kept = try a.alloc(u16, eb.window_rows * eb.g.vocab);
     const kls = try a.alloc(f64, rows);
     var top1: usize = 0;
     var loss: [2]f64 = .{ 0, 0 };
@@ -366,9 +453,10 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
         const n = @min(eb.window_rows, rows - at);
         const w = ids.items[skip + at ..][0..n];
         try eb.forward(&.{.{ .cache = &cb, .rows = n }}, w, .logits);
+        for (0..n) |r| @memcpy(kept[r * eb.g.vocab ..][0..eb.g.vocab], eb.rowLogits(r));
         try e8.forward(&.{.{ .cache = &c8, .rows = n }}, w, .logits);
         for (0..n) |r| {
-            const d = divergence(eb.rowLogits(r), e8.rowLogits(r), ids.items[skip + at + r + 1]);
+            const d = divergence(kept[r * eb.g.vocab ..][0..eb.g.vocab], e8.rowLogits(r), ids.items[skip + at + r + 1]);
             kls[at + r] = d.kl;
             top1 += @intFromBool(d.same_top);
             for (&loss, d.loss) |*l, x| l.* += x;
@@ -380,7 +468,7 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     for (kls) |x| sum += x;
     std.mem.sort(f64, kls, {}, std.sort.asc(f64));
     const nr: f64 = @floatFromInt(rows);
-    const report = try std.fmt.allocPrint(a, "{{\"rows\": {d}, \"skip\": {d}, \"control\": {}, \"kl_mean\": {d:.6}, \"kl_p99\": {d:.6}, \"kl_max\": {d:.6}, \"top1\": {d:.5}, \"loss_bf16\": {d:.5}, \"loss_other\": {d:.5}}}\n", .{ rows, skip, control, sum / nr, kls[(rows * 99) / 100], kls[rows - 1], @as(f64, @floatFromInt(top1)) / nr, loss[0] / nr, loss[1] / nr });
+    const report = try std.fmt.allocPrint(a, "{{\"rows\": {d}, \"skip\": {d}, \"control\": {}, \"int8\": {}, \"kl_mean\": {d:.6}, \"kl_p99\": {d:.6}, \"kl_max\": {d:.6}, \"top1\": {d:.5}, \"loss_bf16\": {d:.5}, \"loss_other\": {d:.5}}}\n", .{ rows, skip, control, int8, sum / nr, kls[(rows * 99) / 100], kls[rows - 1], @as(f64, @floatFromInt(top1)) / nr, loss[0] / nr, loss[1] / nr });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = report });
     std.debug.print("{s}", .{report});
     return 0;

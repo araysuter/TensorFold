@@ -7,6 +7,7 @@ pub const forward = @import("forward.zig");
 pub const mtp = @import("mtp.zig");
 pub const prompt = @import("prompt.zig");
 pub const engine = @import("engine.zig");
+pub const residency = @import("residency.zig");
 pub const ep = @import("ep.zig");
 pub const slots = @import("slots.zig");
 pub const snapshot = @import("snapshot.zig");
@@ -21,6 +22,7 @@ pub const image = @import("image.zig");
 pub const video = @import("video.zig");
 
 test {
+    _ = backend;
     _ = config;
     _ = state;
     _ = ep;
@@ -31,6 +33,7 @@ test {
     _ = @import("../../core/paced_read.zig");
     _ = @import("../../core/copy_index.zig");
     _ = @import("attn_check.zig");
+    _ = @import("eh_check.zig");
     _ = @import("launch_check.zig");
     _ = @import("load_plan.zig");
     _ = @import("page_cache.zig");
@@ -42,7 +45,9 @@ test {
     _ = @import("quant.zig");
     _ = @import("affine.zig");
     _ = @import("names.zig");
+    _ = @import("vision_names.zig");
     _ = @import("weights_test.zig");
+    _ = @import("weights_fix.zig");
     _ = @import("wide.zig");
     _ = vision;
     _ = image;

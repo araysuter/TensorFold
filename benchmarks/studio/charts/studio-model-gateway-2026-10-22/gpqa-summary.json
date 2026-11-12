@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "verified_date": "2026-10-22",
+  "suite": "GPQA Diamond",
+  "source": {
+    "repository": "Idavidrein/gpqa",
+    "revision": "83022cefff930aea54f654c0b282e74b9eeda5c6",
+    "original_questions": 198,
+    "clean_repository": "adamallcock/gpqa-diamond-clean",
+    "clean_revision": "3c0478bb2854a7ce8e8b4606c3717182f03bfeea",
+    "clean_version": "1.2.2",
+    "clean_questions": 189,
+    "prepared_tasks_sha256": "2ab35a0af8a03c59da44353185d272c3817d50ee55e06277fa7d0cde9d32b42d"
+  },
+  "protocol": {
+    "name": "Adaptive output-budget extension, retaining completed answers",
+    "thinking": true,
+    "temperature": 0,
+    "concurrency": 1,
+    "context_tokens": 131072,
+    "output_budgets_tokens": [32768, 65536, 98304],
+    "retry_policy": "Only truncated incorrect responses were retried at a larger budget. Other completed responses were retained. Ornith's 58 unanswered questions at the first pause ran at 65536, then only remaining truncated incorrect responses were retried at 98304.",
+    "grading": "Inspect AI 0.3.282 multiple-choice answer parser; choice shuffle seed 42; missing final answers count as incorrect",
+    "hardware": "Apple M5 Max, 40-core GPU, 64 GiB unified memory",
+    "limitations": [
+      "This is an adaptive evaluation, not a fresh uniform 96K pass or a published provider benchmark reproduction.",
+      "Ornith retained completed answers from its initial Python MLX segment before continuing with native TensorFold and DFlash2. Backends were not controlled across every sample.",
+      "The clean subset excludes nine questions using the versioned external exclusion list; it must not be compared to an original-set score without matching the denominator.",
+      "These are model-quality measurements, not a validation of filling the 128K context window.",
+      "No question text, answer key, sample identifier, reasoning, or response trace is included."
+    ]
+  },
+  "models": [
+    {
+      "id": "swift-1.5",
+      "repository": "ukisai/Swift-1.5-4bit-MLX",
+      "revision": "82276731e47e1db4ac502f24c63cfaf886639be9",
+      "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+      "drafter_revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+      "original": {"correct": 176, "total": 198, "percent": 88.88888888888889, "cutoffs": 1},
+      "clean": {"correct": 175, "total": 189, "percent": 92.5925925925926, "cutoffs": 1},
+      "private_retained_samples_sha256": "9251f287313549b0d05ca378f531230531e5290f9a8748882def0db477b2eae0"
+    },
+    {
+      "id": "ornith-1.5-122b-mixed-2bit",
+      "repository": "araysuter/Ornith-1.5-122B-MLX-mixed-2bit",
+      "base_repository": "ornith-ai/Ornith-1.5-122B",
+      "base_revision_prefix": "dfa07bab",
+      "quantization": "2-bit routed experts, 4-bit shared and dense weights, 8-bit router and shared gates; BF16 norms",
+      "drafter": "incoai/Ornith-1.5-122B-DFlash2",
+      "drafter_revision": "a5ed7396f5f9e5b1abf7ff50b7899a3186961432",
+      "original": {"correct": 159, "total": 198, "percent": 80.3030303030303, "cutoffs": 24},
+      "clean": {"correct": 157, "total": 189, "percent": 83.06878306878306, "cutoffs": 22},
+      "private_retained_samples_sha256": "3b48f631cfff795c7f46dc1dd749abfd38ea65c8b82b432c01fcf7a124ed61a6"
+    }
+  ]
+}

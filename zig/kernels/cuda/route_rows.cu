@@ -6,8 +6,9 @@
 #include <math.h>
 #include <stdint.h>
 
-#include "glue_math.cuh"
-#include "qmm_frag.cuh"
+#include "common/glue_math.cuh"
+#include "common/qmm_frag.cuh"
+#include "common/router_mma.cuh"
 
 using namespace tf_glue;
 
@@ -45,76 +46,25 @@ __device__ __forceinline__ void block_best(float& v, int& i, float (*sv)[NT / 32
 
 using namespace tf_route;
 
-// OUT[m, e] = x[m] . w[e], a warp of 8 experts: one mma chain over K from zero, STAGES of KC staged (D % 16 == 0).
-template <int WARPS, int STAGES, int KC>
-__device__ __forceinline__ void route_logits(const __nv_bfloat16* __restrict__ X, int x_ld, const __nv_bfloat16* __restrict__ W,
-                                             float* __restrict__ OUT, int M, int D, int E) {
-    constexpr int LD = KC + 8, EB = 8 * WARPS, ROWS = 16 + EB;
-    extern __shared__ __align__(16) unsigned char smem_raw[];
-    auto tile = reinterpret_cast<__nv_bfloat16 (*)[ROWS][LD]>(smem_raw);  // [STAGES] 16 input rows, then EB expert rows
-    const int m0 = blockIdx.x * 16, e0 = blockIdx.y * EB;
-    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
-    const int stages = (D + KC - 1) / KC;
-    const int xr = min(16, M - m0);  // input rows past M stay zero: written once, never staged
-    for (int v = threadIdx.x; v < STAGES * (16 - xr) * (KC / 8); v += blockDim.x) {
-        const int per = (16 - xr) * (KC / 8);
-        *reinterpret_cast<uint4*>(&tile[v / per][xr + (v % per) / (KC / 8)][8 * (v % (KC / 8))]) = make_uint4(0, 0, 0, 0);
-    }
-    auto stage = [&](int st) {
-        const int k0 = st * KC, buf = st % STAGES;
-        for (int v = threadIdx.x; v < (xr + EB) * (KC / 8); v += blockDim.x) {
-            const int i = v / (KC / 8), k = k0 + 8 * (v % (KC / 8));
-            const bool x_row = i < xr;
-            const int row = x_row ? i : 16 + i - xr;
-            const int r = x_row ? m0 + i : e0 + i - xr;
-            const bool read = k < D && (x_row || r < E);
-            const __nv_bfloat16* src = x_row ? X + static_cast<long long>(r) * x_ld + (read ? k : 0)
-                                             : W + static_cast<long long>(read ? r : 0) * D + (read ? k : 0);
-            qmm_frag::cp16z(&tile[buf][row][8 * (v % (KC / 8))], src, read);
-        }
-    };
-    float acc[4] = {};
-    for (int st = 0; st < STAGES - 1; ++st) {
-        if (st < stages) stage(st);
-        qmm_frag::commit();
-    }
-    for (int st = 0; st < stages; ++st) {
-        if (st + STAGES - 1 < stages) stage(st + STAGES - 1);
-        qmm_frag::commit();
-        qmm_frag::wait<STAGES - 1>();
-        __syncthreads();
-        const int buf = st % STAGES;
-        const int steps = min(KC, D - st * KC) / 16;
-        for (int kk = 0; kk < steps; ++kk) {
-            uint32_t a[4], b[2];
-            qmm_frag::ldmatrix4(a, &tile[buf][lane % 16][kk * 16 + (lane / 16) * 8]);
-            qmm_frag::ldmatrix2(b, &tile[buf][16 + warp * 8 + lane % 8][kk * 16 + ((lane / 8) % 2) * 8]);
-            qmm_frag::mma(acc, a, b[0], b[1]);
-        }
-        __syncthreads();
-    }
-    const int e = e0 + warp * 8 + 2 * t;
-#pragma unroll
-    for (int h = 0; h < 2; ++h) {
-        const int r = m0 + g + 8 * h;
-        if (r >= M) continue;
-        if (e < E) OUT[static_cast<long long>(r) * E + e] = acc[2 * h];
-        if (e + 1 < E) OUT[static_cast<long long>(r) * E + e + 1] = acc[2 * h + 1];
-    }
-}
-
 // route_logits over 32 experts a block (prompt chunks: the input rows are read once per 32 experts).
 extern "C" __global__ void __launch_bounds__(128) tf_route_logits(const __nv_bfloat16* __restrict__ X, int x_ld,
                                                                   const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
                                                                   int M, int D, int E) {
-    route_logits<4, 2, 128>(X, x_ld, W, OUT, M, D, E);
+    tf_router_mma::logits<4, 2, 128>(X, x_ld, W, OUT, M, D, E);
+}
+
+// route_logits over 128 rows and 64 experts a block, eight warps (from 64 rows), the same sums; EFAST block order.
+extern "C" __global__ void __launch_bounds__(256) tf_route_logits_wide(const __nv_bfloat16* __restrict__ X, int x_ld,
+                                                                       const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
+                                                                       int M, int D, int E) {
+    tf_router_mma::logits<8, 2, 64, 8, true>(X, x_ld, W, OUT, M, D, E);
 }
 
 // route_logits with three stages of 256 in flight (up to 16 rows, where the router rows' reads set its time).
 extern "C" __global__ void __launch_bounds__(128) tf_route_logits_few(const __nv_bfloat16* __restrict__ X, int x_ld,
                                                                      const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
                                                                      int M, int D, int E) {
-    route_logits<4, 3, 256>(X, x_ld, W, OUT, M, D, E);
+    tf_router_mma::logits<4, 3, 256>(X, x_ld, W, OUT, M, D, E);
 }
 
 // A row's TOPK largest of NE logits (lower id on ties), bf16(e^(l_k - l_0) / sum); `shared`: slot TOPK gated by NE.

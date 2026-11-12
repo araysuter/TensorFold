@@ -75,7 +75,7 @@ pub const Rows = struct {
         // dense attention only: the reference stops where the indexer would start choosing
         if (seq.fed + ids.len > weights.dense_nch * 512) return error.UnexpectedTensor;
         try r.grow(e.stream.*, ids.len);
-        var pass = Pass{ .gpa = e.gpa, .io = e.io, .driver = e.driver, .stream = e.stream, .model_dir = e.model_dir, .s = &r.scratch, .table = e.table, .mode = r.mode, .history = &seq.history, .conv = seq.conv, .state = seq.state, .kc = seq.kc, .vc = seq.vc, .ikc = seq.ikc, .tail = seq.tail, .mixer = e.mixer, .head_q = e.head_q, .logits = seq.logits, .plan_fn = r.plan_fn, .up_fn = r.up_fn, .down_fn = r.down_fn };
+        var pass = Pass{ .gpa = e.gpa, .io = e.io, .driver = e.driver, .stream = e.stream, .model_dir = e.model_dir, .s = &r.scratch, .table = e.table, .mode = r.mode, .history = &seq.history, .conv = seq.conv, .state = seq.state, .kc = seq.kc, .vc = seq.vc, .ikc = seq.ikc, .pg = seq.pg(), .tail = seq.tail, .mixer = e.mixer, .head_q = e.head_q, .logits = seq.logits, .plan_fn = r.plan_fn, .up_fn = r.up_fn, .down_fn = r.down_fn };
         @memset(pass.mode, 0);
         for (ids, 0..) |token, t| try embedRow(Tri, &pass, tri, token, pass.s.h.ptr + @as(u64, t) * wide * 2);
         for (e.layers[0..e.n_layers], 0..) |*lw, layer| try runLayer(Tri, &pass, tri, lw, layer, ids, seq.fed);
@@ -99,6 +99,7 @@ const Pass = struct {
     kc: []cuda.DeviceBuffer,
     vc: []cuda.DeviceBuffer,
     ikc: []cuda.DeviceBuffer,
+    pg: @import("cuda_glue.zig").Pg,
     tail: cuda.DeviceBuffer,
     mixer: HcW,
     head_q: Q4,
@@ -137,7 +138,7 @@ fn runLayer(comptime Tri: type, p: *Pass, tri: Tri, lw: *Layer, layer: usize, id
             try step.gdnStep(p.gpa, p.driver, p.stream, p.s, lw.proj, lw.out, p.conv[li], lw.cw.ptr, lw.a_log.ptr, lw.dt.ptr, lw.norm.ptr, &p.state[li]);
         } else {
             const ai = weights.attnIndex(layer);
-            try step.attnStep(Tri, p.driver, p.stream, tri, p.s, lw.proj, lw.out, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, p.kc[ai].ptr, p.vc[ai].ptr, p.ikc[ai].ptr, @intCast(pos0 + t));
+            try step.attnStep(Tri, p.driver, p.stream, tri, p.s, lw.proj, lw.out, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, p.kc[ai].ptr, p.vc[ai].ptr, p.ikc[ai].ptr, @intCast(pos0 + t), p.pg);
         }
         try step.writeback(tri, p.s, h, 4, inj, y, wt);
         try step.readout(tri, p.s, lw.mlp_hc, h, inj);
@@ -193,7 +194,7 @@ pub fn run(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cuda
     if (tokens.len == 0 or new_tokens == 0 or out.len < new_tokens or tokens.len + new_tokens > prompt.max_tokens) return error.UnexpectedTensor;
     var e = try prompt.Engine.init(gpa, io, driver, stream, model_dir);
     defer e.deinit();
-    const by_rows = if (std.c.getenv("TF_FLASHNEXT_PROMPT")) |v| std.mem.eql(u8, std.mem.span(v), "rows") else false;
+    const by_rows = (try @import("sys").environment.read(?u64, "TF_FLASHNEXT_PROMPT", null)) != null;
     var rows: ?Rows = if (by_rows) try Rows.init(gpa, driver, stream) else null;
     defer if (rows) |*r| r.deinit();
     var seq = try e.newSeq(tokens.len + new_tokens);

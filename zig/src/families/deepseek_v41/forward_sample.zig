@@ -19,7 +19,8 @@ pub fn greedy(f: *Forward, out: []u32) !void {
     const r = f.runner;
     const n = out.len;
     const W: usize = f.comm.world();
-    const V: usize = f.cfg.vocab / W;
+    const vocab_part = try @import("partition.zig").share(f.cfg.vocab, f.comm.rank(), W);
+    const V: usize = vocab_part.len;
     // pinned: the logits [n, V], then the pairs [2n] and every rank's [W][2n] (reused, no allocation a window)
     const lb = std.mem.alignForward(usize, 4 * n * V, 8);
     const need = lb + 16 * n * (W + 1);
@@ -37,7 +38,7 @@ pub fn greedy(f: *Forward, out: []u32) !void {
     const dev = f.pick_dev.?;
     const logits = r.addressOf("w.logits") orelse return error.Unbound;
     if (f.grammar) |g| try g.apply(g.ptr, 0, @intCast(n));
-    if (f.greedy_gpu == null) f.greedy_gpu = if (std.c.getenv("TF_DSV41_GREEDY_GPU")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+    if (f.greedy_gpu == null) f.greedy_gpu = try @import("sys").environment.read(bool, "TF_DSV41_GREEDY_GPU", false);
     if (f.greedy_gpu.? and V <= 1 << 16) {
         // the device pick: topk_keys' best column a row, [n] fp32 values + [n] int64 columns back, not logits
         const vals_dev = try f.greedyScratch(r, n);
@@ -49,7 +50,7 @@ pub fn greedy(f: *Forward, out: []u32) !void {
             // the pairs, their exchange and the merge on the device; one copy back (glue.cu pick_*)
             const ids_dev = cols_dev + 8 * n;
             const out_dev = ids_dev + 8 * n;
-            try k.pickPack(vals_dev, cols_dev, n, f.comm.rank() * V, dev.ptr);
+            try k.pickPack(vals_dev, cols_dev, n, vocab_part.lo, dev.ptr);
             try f.comm.allGather(dev.ptr, dev.ptr + 16 * n, 2 * n, .f64, r.stream.handle);
             const chain = if (f.slot.pending) |p| p.n == n and f.ids.len >= n else false;
             const start: i64 = if (f.slot.pending) |p| @intCast(p.start) else 0;
@@ -79,7 +80,7 @@ pub fn greedy(f: *Forward, out: []u32) !void {
         try r.stream.synchronize();
         for (0..n) |row| {
             pairs[2 * row] = vh[row];
-            pairs[2 * row + 1] = @floatFromInt(@as(usize, @intCast(ch[row])) + f.comm.rank() * V);
+            pairs[2 * row + 1] = @floatFromInt(@as(usize, @intCast(ch[row])) + vocab_part.lo);
         }
     } else {
         try r.d.check(r.d.api.cuMemcpyDtoHAsync_v2(host.ptr, logits, 4 * n * V, r.stream.handle), "cuMemcpyDtoHAsync");
@@ -89,7 +90,7 @@ pub fn greedy(f: *Forward, out: []u32) !void {
             const vals = host[row * V ..][0..V];
             const best = argmax(vals);
             pairs[2 * row] = vals[best];
-            pairs[2 * row + 1] = @floatFromInt(best + f.comm.rank() * V);
+            pairs[2 * row + 1] = @floatFromInt(best + vocab_part.lo);
         }
     }
     try dev.uploadAsync(0, std.mem.sliceAsBytes(pairs[0 .. 2 * n]), r.stream.handle);

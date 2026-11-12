@@ -12,10 +12,14 @@ pub const scale_problem = "an n-gram table scale must be one finite, nonzero val
 
 pub fn problemFor(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.FlashNextMemoryShortfall => @import("flashnext_memory").options,
         error.UnsupportedFlashAffineKernel, error.UnsupportedAffineBits, error.UnsupportedAffineGroup, error.UnsupportedAffineMode, error.UnsupportedQuantization => problem,
         error.InvalidAffineShape, error.InvalidAffineRank, error.InvalidAffineStorage, error.InvalidAffineWidth, error.InvalidAffineByteCount, error.UnquantizedAffineTensor, error.ExpertGateUpWidths, error.NgramTableWidths, error.LaneRowsNotFours, error.TooManyLaneMembers => stored_problem,
         error.SpeedUpNeeds6Bit32 => speed_up_problem,
         error.NgramTableScale => scale_problem,
+        error.FsrNeedsSingleMetalDevice => "FSR SSD residency requires one Metal device; --speed-up and TF_FLASHNEXT_TP are unsupported",
+        error.ExpertPoolTooSmall, error.ActiveUnionExceedsPool => "--ssd-experts must hold a complete layer union; raise its GiB budget",
+        error.CacheBypassFailed => "FSR requires F_NOCACHE; the checkpoint could not enable page-cache-bypassing reads",
         else => null,
     };
 }

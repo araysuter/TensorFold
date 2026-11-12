@@ -40,9 +40,8 @@ pub const Options = struct {
     several: bool = false,
 };
 
-fn flag(name: [*:0]const u8) bool {
-    const v = std.c.getenv(name) orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+fn flag(name: [:0]const u8) !bool {
+    return @import("sys").environment.read(bool, name, false);
 }
 
 /// The store's policy from the family's options: an unset residency stays unlimited, as sessions.Policy reads null.
@@ -61,7 +60,7 @@ test "the default session options keep idle chats unlimited; an explicit 0 keeps
 
 pub fn optionsFromEnv() !Options {
     var o: Options = .{};
-    if (std.c.getenv("TF_DSV41_SESSIONS")) |v| o.enabled = !std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "0");
+    o.enabled = try @import("sys").environment.read(bool, "TF_DSV41_SESSIONS", o.enabled);
     if (std.c.getenv("TF_DSV41_SESSION_DISK")) |v| if (std.mem.trim(u8, std.mem.span(v), " ").len > 0) {
         o.disk = std.mem.trim(u8, std.mem.span(v), " ");
     };
@@ -77,9 +76,9 @@ pub fn optionsFromEnv() !Options {
         o.ram_bytes = (try std.fmt.parseInt(u64, std.mem.span(v), 10)) << 20;
     };
     if (std.c.getenv("TF_DSV41_SESSION_STAGING_MIB")) |v| o.staging_mib = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-    o.skip_covered = flag("TF_DSV41_SESSION_SKIP_COVERED");
-    o.delta = flag("TF_DSV41_SESSION_DELTA");
-    o.several = flag("TF_DSV41_SESSION_SLOTS");
+    o.skip_covered = try flag("TF_DSV41_SESSION_SKIP_COVERED");
+    o.delta = try flag("TF_DSV41_SESSION_DELTA");
+    o.several = try flag("TF_DSV41_SESSION_SLOTS");
     return o;
 }
 
@@ -193,7 +192,7 @@ pub const Sessions = struct {
             var full: [32]u8 = undefined;
             h.final(&full);
             // the staging set (TF_DSV41_SESSION_STAGING_MIB) in 8 MiB chunks: a park's or restore's host transient
-            s.disk = try sessions.Disk.open(gpa, io, .{ .root = root, .compat = full[0..16].*, .rank = kx.rank, .world = kx.world, .budget = o.disk_budget, .min_tokens = o.disk_min_tokens, .staging = @max(2, o.staging_mib / 8), .chunk = 8 << 20 });
+            s.disk = try sessions.Disk.open(gpa, io, .{ .root = root, .compat = full[0..16].*, .rank = kx.rank, .world = kx.world, .budget = o.disk_budget, .fresh_start = true, .min_tokens = o.disk_min_tokens, .staging = @max(2, o.staging_mib / 8), .chunk = 8 << 20 });
         }
         errdefer if (s.disk) |dd| dd.close();
         s.store = try Store.init(gpa, io, &kx.pool, kx.dev.store(), s.disk, policy(o));
@@ -227,12 +226,12 @@ pub const Sessions = struct {
         try s.reset();
     }
 
-    fn restoreFn(ptr: *anyopaque, id: u32, ids: []const i64) anyerror!void {
+    fn restoreFn(ptr: *anyopaque, id: u32, want: fwd.Forward.Want, ids: []const i64) anyerror!void {
         const s: *Sessions = @ptrCast(@alignCast(ptr));
         const p = try s.gpa.alloc(u32, ids.len);
         defer s.gpa.free(p);
         for (ids, p) |t, *y| y.* = @intCast(t);
-        _ = try s.restore(id, if (ids.len > 0) p else null);
+        _ = try s.restoreAs(id, want, if (ids.len > 0) p else null);
     }
 
     /// A follower: the leader's admission (forward.zig op_sess_admit: [op, need, n, spilled ids...]).
@@ -305,6 +304,8 @@ pub const Sessions = struct {
     pub fn snapshot(s: *Sessions) !*Snap {
         try s.active();
         const r = s.f.runner;
+        var activity: @import("round_progress.zig").Progress.Scope = if (r.progress) |progress| progress.begin(.snapshot) else .{ .owner = null };
+        defer activity.end();
         try r.stream.synchronize();
         const p = try s.gpa.create(Snap);
         errdefer s.gpa.destroy(p);
@@ -372,7 +373,9 @@ pub const Sessions = struct {
         try s.f.sendSess(.save, 0);
         if (h.items.len == 0) return null;
         const snap = try s.snapshot();
-        const id = s.store.save(s.kx.slot, snap.bounded(), h.items, s.tag(), 0) catch |e| {
+        var bounded = snap.bounded();
+        bounded.logical_bytes = snap.measure;
+        const id = s.store.save(s.kx.slot, bounded, h.items, s.tag(), 0) catch |e| {
             Snap.release(snap);
             return e;
         };
@@ -390,7 +393,9 @@ pub const Sessions = struct {
         try s.f.sendSess(.prompt, 0);
         if (h.items.len == 0) return null;
         const snap = try s.snapshot();
-        const id = s.store.save(s.kx.slot, snap.bounded(), h.items, s.tag(), prompt_kind) catch |e| {
+        var bounded = snap.bounded();
+        bounded.logical_bytes = snap.measure;
+        const id = s.store.save(s.kx.slot, bounded, h.items, s.tag(), prompt_kind) catch |e| {
             Snap.release(snap);
             return e;
         };
@@ -454,8 +459,9 @@ pub const Sessions = struct {
         const n = prompt.len;
         // out of RAM no tokens are indexed: the history is the prompt's prefix
         const ids: ?[]const u32 = if (s.store.entry(h.id).ram) null else prompt[0..@intCast(h.pos)];
-        try s.f.sendRestore(h.id, ids);
-        if (!try s.restore(h.id, ids)) return .{ .damaged = true };
+        const want: fwd.Forward.Want = .{ .pos = h.pos, .key = s.store.entry(h.id).key };
+        try s.f.sendRestore(h.id, want, ids);
+        if (!try s.restoreAs(h.id, want, ids)) return .{ .damaged = true };
         std.log.scoped(.dsv41).info("sessions: slot {d} resumed {d} of {d} prompt tokens from {s}", .{ s.cur(), h.pos, n, if (h.ram) "RAM" else "NVMe" });
         return .{ .at = h.pos };
     }
@@ -485,21 +491,27 @@ pub const Sessions = struct {
 
     /// Entry `id` into the empty slot, agreed (lockstep.zig); false: not back on some rank, so a miss everywhere.
     pub fn restore(s: *Sessions, id: u32, ids: ?[]const u32) !bool {
+        return s.restoreAs(id, null, ids);
+    }
+
+    pub fn restoreAs(s: *Sessions, id: u32, want: ?fwd.Forward.Want, ids: ?[]const u32) !bool {
         if (s.f.slot.pos != 0 or s.kx.slot.len != 0) return error.SlotNotEmpty;
         try s.active();
-        const pos = s.store.entry(id).pos;
+        const pos = if (want) |w| w.pos else s.store.entry(id).pos;
         const g: ?lockstep.Agree = if (s.agreement) |*a| blk: {
             const x = a.agree();
             break :blk .{ .ctx = x.ctx, .all = x.all };
         } else null;
-        if (!try lockstep.agreed(g, s.restoreOn(id, ids), "a session restore", s.f.comm.rank())) {
+        if (!try lockstep.agreed(g, s.restoreOn(id, want, ids), "a session restore", s.f.comm.rank())) {
             try s.kx.truncate(0);
             s.f.slot = .{};
             s.hist[s.cur()].clearRetainingCapacity();
             s.ds_valid[s.cur()] = 0;
             // a cache miss from here: the entry out of RAM and its file deleted, on every rank alike
-            if (s.store.entry(id).ram) try s.store.drop(id);
-            if (s.store.entry(id).live) try s.store.forget(id); // drop removed an entry no file holds
+            if (s.store.index.has(id)) {
+                if (s.store.entry(id).ram) try s.store.drop(id);
+                if (s.store.entry(id).live) try s.store.forget(id);
+            }
             s.stats.damaged += 1;
             if (!quiet) std.log.scoped(.dsv41).warn("sessions: slot {d}: the entry of {d} tokens did not come back; its prompt prefills from 0", .{ s.cur(), pos });
             return false;
@@ -509,7 +521,8 @@ pub const Sessions = struct {
     }
 
     /// This rank's restore of `id`: pages and bounded state (RAM or NVMe), the position, the slot's history.
-    fn restoreOn(s: *Sessions, id: u32, ids: ?[]const u32) !void {
+    fn restoreOn(s: *Sessions, id: u32, want: ?fwd.Forward.Want, ids: ?[]const u32) !void {
+        if (want) |w| try w.check(&s.store.index, id);
         const e = s.store.entry(id);
         const pos = e.pos;
         if (e.ram) {

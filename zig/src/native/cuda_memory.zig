@@ -1,6 +1,7 @@
 //! CUDA memory admission arithmetic, and the host pool read from /proc/meminfo and validated, without a device.
 const cuda = @import("cuda");
 const std = @import("std");
+const parked_pages = @import("parked_pages.zig");
 const gib: f64 = 1 << 30;
 
 /// Bytes of the checkpoint's safetensors (the weight map's files, else the folder's own), near enough to refuse early.
@@ -80,12 +81,33 @@ pub fn meminfo(text: []const u8) ?MemInfo {
     return if (t > 0 and a <= t) .{ .total = t, .available = a } else null;
 }
 
-/// --prompt-cache-gib in pinned host memory (8 GiB unasked), at most half of what /proc/meminfo has available.
-pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64) u64 {
-    const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * (1 << 30)) else 0) else 8 << 30;
+/// MemAvailable plus the free pages parked on the per-CPU lists (`zones`, read after it), at most MemTotal.
+pub fn counting(m: MemInfo, zones: ?[]const u8) MemInfo {
+    const parked = parked_pages.bytes(zones orelse return m, std.heap.pageSize());
+    return .{ .total = m.total, .available = @min(m.total, m.available +| parked) };
+}
+
+/// Pinned host-cache room, after the CUDA streams when memory is unified.
+pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64, room: u64, streams: u64, unified: bool) u64 {
     const text = procText(a, io, "/proc/meminfo") orelse return 0;
-    const m = meminfo(text) orelse return 0;
-    return @min(want, m.available / 2);
+    const zones = procText(a, io, "/proc/zoneinfo");
+    const m = counting(meminfo(text) orelse return 0, zones);
+    return hostCacheBudget(asked, m.available, room, streams, unified);
+}
+
+/// Half the remaining room, with the old default as a floor, never beyond the room.
+pub fn automaticCache(room: u64, minimum: u64) u64 {
+    return @min(room, @max(minimum, room / 2));
+}
+
+/// Unified caches scale after streams; discrete cards retain the 8 GiB host default unless explicitly sized.
+pub fn hostCacheBudget(asked: ?f64, available: u64, room: u64, streams: u64, unified: bool) u64 {
+    const left = if (unified) @min(available -| streams, room -| streams) else available;
+    if (asked) |g| {
+        const want = if (g > 0) std.math.lossyCast(u64, g * (1 << 30)) else 0;
+        return @min(want, available / 2);
+    }
+    return if (unified) automaticCache(left, 8 << 30) else @min(8 << 30, available / 2);
 }
 
 /// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.
@@ -104,6 +126,7 @@ pub const Pool = struct {
     reserve: u64,
     limit: ?u64,
     unified: bool,
+    parked: u64 = 0, // the part of `free` parked on the per-CPU page lists
 
     /// Bytes the engine may still allocate on top of `held`.
     pub fn room(p: Pool, held: u64) u64 {
@@ -159,10 +182,12 @@ pub fn growRoom(room: u64, grows: bool) u64 {
     return if (grows) room else 0;
 }
 
-/// Kept prompt states' budget: --prompt-cache-gib (0: none), else 16 GiB, never past what the streams leave of `room`.
+/// Device cache after the streams: an explicit budget, else half the room with the old 16 GiB floor.
 pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
-    const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * gib) else 0) else 16 << 30;
-    return @min(room -| streams, want);
+    const left = room -| streams;
+    if (asked) |g| return @min(left, if (g > 0) std.math.lossyCast(u64, g * gib) else 0);
+    // A sentinel asks for the historical floor while placement has not counted streams yet.
+    return if (room == std.math.maxInt(u64)) @min(left, 16 << 30) else automaticCache(left, 16 << 30);
 }
 
 /// Linux integrated devices use procfs; Windows retains the unified reserve but reads the CUDA pool.
@@ -216,9 +241,9 @@ test "a family that allocates every stream at open is admitted only the streams 
     try std.testing.expectEqual(@as(u32, 65), try admit(growRoom(g, true), g, 64, 65, true));
 }
 
-test "the prompt cache: 16 GiB unless the flag sizes it, inside what the streams leave" {
+test "the prompt cache: half the streams' room with a floor unless the flag sizes it" {
     const g: u64 = 1 << 30;
-    try std.testing.expectEqual(16 * g, cacheBytes(null, 60 * g, 8 * g));
+    try std.testing.expectEqual(26 * g, cacheBytes(null, 60 * g, 8 * g));
     try std.testing.expectEqual(10 * g, cacheBytes(null, 18 * g, 8 * g)); // the streams' room comes first
     try std.testing.expectEqual(4 * g, cacheBytes(4, 60 * g, 8 * g));
     try std.testing.expectEqual(52 * g, cacheBytes(64, 60 * g, 8 * g));
@@ -260,6 +285,21 @@ test "unified admission refuses missing or malformed host memory" {
     try std.testing.expectEqual(MemInfo{ .total = 131072 * 1024, .available = 65536 * 1024 }, try counts(true, card, "MemTotal: 131072 kB\nMemAvailable: 65536 kB\n"));
 }
 
+test "counting: the per-CPU lists' parked pages raise MemAvailable, at most MemTotal; nothing without them" {
+    const page = std.heap.pageSize();
+    const m: MemInfo = .{ .total = 128 << 30, .available = 96 << 30 };
+    const zones = try std.fmt.allocPrint(std.testing.allocator, "  pagesets\n    cpu: 0\n      count: {d}\n      high_min: 10\n", .{10 + (6 << 30) / page});
+    defer std.testing.allocator.free(zones);
+    try std.testing.expectEqual(MemInfo{ .total = 128 << 30, .available = 102 << 30 }, counting(m, zones));
+    try std.testing.expectEqual(MemInfo{ .total = 128 << 30, .available = 128 << 30 }, counting(.{ .total = 128 << 30, .available = 125 << 30 }, zones));
+    try std.testing.expectEqual(m, counting(m, null));
+    try std.testing.expectEqual(m, counting(m, "  pagesets\n    cpu: 0\n      count: x\n"));
+}
+
+test {
+    _ = parked_pages;
+}
+
 test "memory limit refuses an oversized finite value and the rounded u64 boundary" {
     try std.testing.expectError(error.Invalid, limitBytes("1e300"));
     try std.testing.expectError(error.Invalid, limitBytes("17179869184"));
@@ -273,10 +313,13 @@ pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, prob
     const host_counts = hostCounts(unified, @import("sys").windows);
     const text = if (host_counts) procText(a, io, "/proc/meminfo") else null;
     defer if (text) |bytes| a.free(bytes);
-    const available = counts(host_counts, .{ .total = card.total, .available = card.free }, text) catch {
+    const zones = if (host_counts) procText(a, io, "/proc/zoneinfo") else null;
+    defer if (zones) |bytes| a.free(bytes);
+    const measured = counts(host_counts, .{ .total = card.total, .available = card.free }, text) catch {
         problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
         return null;
     };
+    const available = counting(measured, zones);
     const reserve_text = if (std.c.getenv("TENSORFOLD_MEMORY_RESERVE_GIB")) |p| std.mem.span(p) else null;
     const limit_text = if (std.c.getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) |p| std.mem.span(p) else null;
     const reserve = reserveBytes(reserve_text, available.total, unified) catch {
@@ -287,7 +330,7 @@ pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, prob
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{limit_text orelse ""});
         return null;
     };
-    return .{ .free = available.available, .total = available.total, .reserve = reserve, .limit = limit, .unified = unified };
+    return .{ .free = available.available, .total = available.total, .reserve = reserve, .limit = limit, .unified = unified, .parked = available.available - measured.available };
 }
 
 test "the weights' bytes: each file the weight map names once, under a folder too; without an index the folder's own" {
@@ -352,4 +395,38 @@ test "an index allocation failure is reported instead of counting the flat direc
     var bytes: [0]u8 = .{};
     var fixed = std.heap.FixedBufferAllocator.init(&bytes);
     try std.testing.expectError(error.OutOfMemory, checkedWeightBytes(fixed.allocator(), io, dir));
+}
+
+test "a GB10's /proc files: its lists' parked pages raise MemAvailable and stay under MemTotal" {
+    const m = meminfo(@embedFile("fixtures/gb10_parked/meminfo_draining")) orelse return error.TestUnexpectedResult;
+    const parked = parked_pages.bytes(@embedFile("fixtures/gb10_parked/zoneinfo_draining"), 4096); // GB10's page size
+    try std.testing.expectEqual(@as(u64, 32813016 * 1024), m.available);
+    try std.testing.expect(parked > 0 and m.available + parked < m.total);
+    try std.testing.expect(meminfo(@embedFile("fixtures/gb10_parked/meminfo_at_budget")) != null);
+}
+
+test "CUDA cache default counts streams before taking half the unified room" {
+    const GiB: u64 = 1 << 30;
+    const room = 88 * GiB;
+    const stream_bytes = 6 * GiB;
+    const n = try admit(room, stream_bytes, 0, 8, false);
+    try std.testing.expectEqual(@as(u32, 8), n);
+    try std.testing.expectEqual(@as(u64, 20 * GiB), hostCacheBudget(null, 96 * GiB, room, n * stream_bytes, true));
+    try std.testing.expectEqual(@as(u64, 20 * GiB), cacheBytes(null, room, n * stream_bytes));
+    try std.testing.expectEqual(@as(u64, 8 * GiB), hostCacheBudget(null, 16 * GiB, 16 * GiB, 6 * GiB, true));
+    try std.testing.expectEqual(@as(u64, 4 * GiB), hostCacheBudget(null, 16 * GiB, 8 * GiB, 4 * GiB, true));
+    try std.testing.expectEqual(@as(u64, 0), hostCacheBudget(0, 96 * GiB, room, n * stream_bytes, true));
+    try std.testing.expectEqual(@as(u64, 12 * GiB), hostCacheBudget(12, 96 * GiB, room, n * stream_bytes, true));
+    try std.testing.expectEqual(@as(u64, 12 * GiB), hostCacheBudget(12, 96 * GiB, 8 * GiB, 16 * GiB, true));
+    try std.testing.expectEqual(@as(u64, 8 * GiB), hostCacheBudget(null, 96 * GiB, 2 * GiB, 48 * GiB, false));
+    try std.testing.expectEqual(@as(u64, 0), cacheBytes(0, room, n * stream_bytes));
+    try std.testing.expectEqual(@as(u64, 12 * GiB), cacheBytes(12, room, n * stream_bytes));
+}
+
+test "CUDA cache default on discrete CUDA keeps eight GiB of host snapshots on a large host unless asked" {
+    const GiB: u64 = 1 << 30;
+    try std.testing.expectEqual(@as(u64, 8 * GiB), hostCacheBudget(null, 700 * GiB, 88 * GiB, 56 * GiB, false));
+    try std.testing.expectEqual(@as(u64, 4 * GiB), hostCacheBudget(null, 8 * GiB, 88 * GiB, 56 * GiB, false));
+    try std.testing.expectEqual(@as(u64, 32 * GiB), hostCacheBudget(32, 700 * GiB, 88 * GiB, 56 * GiB, false));
+    try std.testing.expectEqual(@as(u64, 0), hostCacheBudget(0, 700 * GiB, 88 * GiB, 56 * GiB, false));
 }

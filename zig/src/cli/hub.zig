@@ -13,10 +13,16 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "nemotron_h_omni", .title = "Nemotron 3.5 Super VL" },
     .{ .model_type = "qwen4_exp", .title = "Qwen3.8 Flash Next" },
     .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
+    .{ .model_type = "mistral3", .title = "Mistral3 wrapper (LightOnOCR-3-1B only)" },
+    .{ .model_type = "lighton_ocr", .title = "LightOnOCR-3-1B" },
     .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B or Qwen3.8-27B" },
+    .{ .model_type = "qwen3_5_moe", .title = "Qwen3.5-MoE (Ornith-1.5-122B)" },
     .{ .model_type = "gemma4", .title = "Gemma 4 31B" },
     .{ .model_type = "gemma4_unified", .title = "Gemma 4 12B" },
     .{ .model_type = "step5_vl", .title = "Step-5-Preview" },
+    .{ .model_type = "spark2_5", .title = "Spark-X2.6-4B" },
+    .{ .model_type = "minimax_m3_vl", .title = "MiniMax-M3.1-Flash" },
+    .{ .model_type = "llama", .title = "Llama architecture (Nanbeige4.3-33B)" },
     .{ .model_type = "lfm2_moe", .title = "LFM2.5-24B-A2B" },
 };
 
@@ -127,6 +133,71 @@ pub fn modelType(a: Allocator, io: std.Io, dir: []const u8) []const u8 {
     return if (t == .string) t.string else "unknown";
 }
 
+const ConfigDetails = struct { is_bolt: bool, modelopt_formats: ?[]const []const u8 = null };
+
+/// Bolt identity and sorted modelopt algorithms from one config.json read; formats live in the caller's allocator.
+pub fn configDetails(a: Allocator, io: std.Io, dir: []const u8) ConfigDetails {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const temp = arena.allocator();
+    const text = @import("checkpoint_config").optional(temp, io, dir) orelse return .{ .is_bolt = false };
+    var parsed = std.json.parseFromSlice(std.json.Value, temp, text, .{}) catch return .{ .is_bolt = false };
+    defer parsed.deinit();
+    if (parsed.value != .object) return .{ .is_bolt = false };
+    const root = parsed.value.object;
+    const is_bolt = blk: {
+        const model_type = root.get("model_type") orelse break :blk false;
+        if (model_type != .string or !std.mem.eql(u8, model_type.string, "nemotron_h_omni")) break :blk false;
+        const llm = root.get("llm_config") orelse break :blk false;
+        if (llm != .object) break :blk false;
+        const llm_type = llm.object.get("model_type") orelse break :blk false;
+        break :blk llm_type == .string and std.mem.eql(u8, llm_type.string, "nemotron_h_puzzle");
+    };
+    var result: ConfigDetails = .{ .is_bolt = is_bolt };
+    const qc = root.get("quantization_config") orelse return result;
+    if (qc != .object) return result;
+
+    var formats: std.ArrayList([]const u8) = .empty;
+    if (qc.object.get("quantized_layers")) |layers| {
+        if (layers != .object) return result;
+        var it = layers.object.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* != .object) return result;
+            const algorithm = entry.value_ptr.object.get("quant_algo") orelse return result;
+            if (algorithm != .string or algorithm.string.len == 0) return result;
+            var seen = false;
+            for (formats.items) |format| if (std.mem.eql(u8, format, algorithm.string)) {
+                seen = true;
+                break;
+            };
+            if (seen) continue;
+            formats.append(temp, algorithm.string) catch return result;
+        }
+    } else {
+        const algorithm = qc.object.get("quant_algo") orelse return result;
+        if (algorithm != .string or algorithm.string.len == 0) return result;
+        if (std.mem.eql(u8, algorithm.string, "MIXED_PRECISION")) return result;
+        formats.append(temp, algorithm.string) catch return result;
+    }
+    if (formats.items.len == 0) return result;
+    std.mem.sort([]const u8, formats.items, {}, struct {
+        fn lessThan(_: void, left: []const u8, right: []const u8) bool {
+            return std.mem.lessThan(u8, left, right);
+        }
+    }.lessThan);
+
+    const owned = a.alloc([]const u8, formats.items.len) catch return result;
+    for (formats.items, 0..) |format, i| {
+        owned[i] = a.dupe(u8, format) catch {
+            for (owned[0..i]) |copy| a.free(copy);
+            a.free(owned);
+            return result;
+        };
+    }
+    result.modelopt_formats = owned;
+    return result;
+}
+
 /// config.json's quantization: bits and group size, when the checkpoint is MLX-affine quantized.
 pub fn quantization(a: Allocator, io: std.Io, dir: []const u8) ?struct { bits: u64, group: u64 } {
     const text = @import("checkpoint_config").optional(a, io, dir) orelse return null;
@@ -136,7 +207,8 @@ pub fn quantization(a: Allocator, io: std.Io, dir: []const u8) ?struct { bits: u
     const q = parsed.value.object.get("quantization") orelse return null;
     if (q != .object) return null;
     const bits = if (q.object.get("bits")) |b| (if (b == .integer) b.integer else return null) else return null;
-    const group = if (q.object.get("group_size")) |g| (if (g == .integer) g.integer else 32) else 32;
+    const group = if (q.object.get("group_size")) |g| (if (g == .integer) g.integer else return null) else 32;
+    if (bits <= 0 or group <= 0) return null;
     return .{ .bits = @intCast(bits), .group = @intCast(group) };
 }
 
@@ -170,10 +242,34 @@ fn readSmall(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch null;
 }
 
+test "security: negative quantization metadata is refused without a cast trap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    for ([_][]const u8{
+        "{\"quantization\":{\"bits\":-1,\"group_size\":32}}",
+        "{\"quantization\":{\"bits\":4,\"group_size\":-1}}",
+        "{\"quantization\":{\"bits\":0,\"group_size\":32}}",
+        "{\"quantization\":{\"bits\":4,\"group_size\":0}}",
+    }) |data| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = data });
+        try std.testing.expect(quantization(a, io, dir) == null);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"quantization\":{\"bits\":4}}" });
+    const valid = quantization(a, io, dir).?;
+    try std.testing.expectEqual(@as(u64, 4), valid.bits);
+    try std.testing.expectEqual(@as(u64, 32), valid.group);
+}
+
 test "family detection matches the registry and refuses unknown types" {
     try std.testing.expectEqualStrings("Nemotron 3.5 Lightning", family("nemotron_h").?.title);
     try std.testing.expectEqualStrings("Qwen3.8 Flash Next", family("qwen4_exp").?.title);
-    try std.testing.expectEqualStrings("Gemma 4 12B", family("gemma4_unified").?.title);
+    // Every family the linked registry serves resolves; the titles are display names, so only their presence is fixed.
+    for (engines.families) |f| try std.testing.expect(family(f.model_type) != null);
     try std.testing.expect(family("gemma3n") == null);
     try std.testing.expect(family("unknown") == null);
 }
@@ -211,4 +307,18 @@ test "cache layout helpers read a synthetic cache" {
     try std.testing.expect(try cachedSnapshot(a, io, hub, "Org/Bad") == null); // a ref that is not a sha is never joined
     const missing = try cachedSnapshot(a, io, hub, "Org/Other");
     try std.testing.expect(missing == null);
+}
+
+test "a checkpoint's size counts shards in a folder inside it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The publisher's export keeps every shard in `tensors/`, so a walk that stopped at the top level undercounted it.
+    try tmp.dir.createDirPath(io, "tensors");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tensors/model-00001-of-00001.safetensors", .data = "xxxxxxx" });
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectEqual(@as(u64, 9), try sizeOf(gpa, io, dir));
 }

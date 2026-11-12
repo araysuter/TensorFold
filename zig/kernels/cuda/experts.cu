@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/cuda/experts.cu (lines 1-286, comments and ATen includes dropped), checked by zig/tests/cuda/copies.py.
+// Device code of src/tensorfold/cuda/experts.cu (lines 1-286, comments and ATen includes dropped).
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -7,13 +7,7 @@
 
 namespace tf_experts {
 
-__device__ __forceinline__ uint4 ld_w(const uint4* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
+__device__ __forceinline__ uint4 ld_w(const uint4* p) { return tf_common::ld_nc(p); }
 
 __device__ __forceinline__ uint4 ld_x(const __nv_bfloat16* p) { return __ldg(reinterpret_cast<const uint4*>(p)); }
 
@@ -228,8 +222,36 @@ __global__ void __launch_bounds__(PLAN_THREADS)
   }
 }
 
+// plan_kernel over the first *rows rows' pairs (per a row): a captured bucket's padding rows get no items.
 __global__ void __launch_bounds__(PLAN_THREADS)
-    plan_rank(const int* __restrict__ picks, int P, int E, int* __restrict__ rank, int* __restrict__ hist) {
+    plan_rows(const int* __restrict__ picks, int P, int E, int T, int* __restrict__ members,
+              int* __restrict__ items, int* __restrict__ counts, const int* __restrict__ rows, int per) {
+  P = min(P, *rows * per);
+  __shared__ int pk[PSMALL];
+  __shared__ int cnt[EMAX];
+  __shared__ int off[EMAX];
+  const int tid = threadIdx.x;
+  for (int e = tid; e < EMAX; e += PLAN_THREADS) cnt[e] = 0;
+  __syncthreads();
+  for (int p = tid; p < P; p += PLAN_THREADS) {
+    const int e = picks[p];
+    pk[p] = e;
+    atomicAdd(&cnt[e], 1);
+  }
+  __syncthreads();
+  const int o = place_items(tid < E ? cnt[tid] : 0, E, T, items, counts);
+  if (tid < E) off[tid] = o;
+  __syncthreads();
+  for (int p = tid; p < P; p += PLAN_THREADS) {
+    const int e = pk[p];
+    int rank = 0;
+    for (int q = 0; q < p; ++q) rank += pk[q] == e;
+    members[off[e] + rank] = p;
+  }
+}
+
+__device__ __forceinline__ void rank_pairs(const int* __restrict__ picks, int P, int E, int* __restrict__ rank,
+                                           int* __restrict__ hist) {
   __shared__ int cnt[EMAX];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   for (int e = tid; e < E; e += PLAN_THREADS) cnt[e] = 0;
@@ -249,6 +271,18 @@ __global__ void __launch_bounds__(PLAN_THREADS)
     __syncthreads();
   }
   for (int x = tid; x < E; x += PLAN_THREADS) hist[(size_t)blockIdx.x * E + x] = cnt[x];
+}
+
+__global__ void __launch_bounds__(PLAN_THREADS)
+    plan_rank(const int* __restrict__ picks, int P, int E, int* __restrict__ rank, int* __restrict__ hist) {
+  rank_pairs(picks, P, E, rank, hist);
+}
+
+// plan_rank over the first *rows rows' pairs (per a row): a captured bucket's padding pairs count nowhere.
+__global__ void __launch_bounds__(PLAN_THREADS)
+    plan_rank_rows(const int* __restrict__ picks, int P, int E, int* __restrict__ rank, int* __restrict__ hist,
+                   const int* __restrict__ rows, int per) {
+  rank_pairs(picks, min(P, *rows * per), E, rank, hist);
 }
 
 __global__ void __launch_bounds__(PLAN_THREADS)
@@ -273,6 +307,14 @@ __global__ void plan_scatter(const int* __restrict__ picks, int P, int E, const 
   if (p < P) members[hist[(size_t)(p / PLAN_THREADS) * E + picks[p]] + rank[p]] = p;
 }
 
+// plan_scatter over the first *rows rows' pairs (per a row).
+__global__ void plan_scatter_rows(const int* __restrict__ picks, int P, int E, const int* __restrict__ rank,
+                                  const int* __restrict__ hist, int* __restrict__ members, const int* __restrict__ rows,
+                                  int per) {
+  const int p = blockIdx.x * blockDim.x + threadIdx.x;
+  if (p < min(P, *rows * per)) members[hist[(size_t)(p / PLAN_THREADS) * E + picks[p]] + rank[p]] = p;
+}
+
 } // namespace tf_experts
 
 // Decode form for groups of 64: up with relu^2 (epilogue 1), down to fp32 (epilogue 0).
@@ -281,10 +323,12 @@ __global__ void plan_scatter(const int* __restrict__ picks, int P, int E, const 
 TF_EXPERT(1)
 TF_EXPERT(0)
 // Groups of 32: SwiGLU gate and up together (epilogue 2), and the down projection to fp32.
-template __global__ void tf_experts::expert_kernel<32, 2, 2, 2, 4>(const __nv_bfloat16*, \
-    int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);
-template __global__ void tf_experts::expert_kernel<32, 1, 0, 2, 4>(const __nv_bfloat16*, \
-    int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);
+template __global__ void tf_experts::expert_kernel<32, 2, 2, 2, 4>(const __nv_bfloat16* __restrict__, int, int, \
+    const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, \
+    void* __restrict__, int, float);
+template __global__ void tf_experts::expert_kernel<32, 1, 0, 2, 4>(const __nv_bfloat16* __restrict__, int, int, \
+    const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, \
+    void* __restrict__, int, float);
 
 // Pair form: gate and up blocks interleaved per group (M = 2), SwiGLU in the epilogue (2) as fp8/nvfp4's up does.
 #define TF_EXPERT_PAIR(EPI) template __global__ void tf_experts::expert_kernel<64, 2, EPI, 2, 4>(const __nv_bfloat16* __restrict__,     int, int, const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float);

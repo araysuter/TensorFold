@@ -1,8 +1,8 @@
-//! The decode attention before M5: generated kernels rewritten to read the simdgroup-matrix result layout, checked first.
+//! Decode attention before M5: generated kernels rewritten to read the simdgroup-matrix result layout, checked first.
 const std = @import("std");
 const mtl = @import("metal");
 
-/// A lane's results of a 16 x N op: rows fm and fm + 8 take the two halves, columns fn + (i & 1) + 8 ((i >> 1) % (N / 8)).
+/// A lane's results of a 16 x N op: rows fm and fm + 8 take the halves, columns fn + (i & 1) + 8 ((i >> 1) % (N / 8)).
 const rewrites = [_][2][]const u8{
     .{ "  const short fn = ((qid & 2) | (lane & 1)) * 4;\n", "  const short fn = ((lane & 8) >> 1) | ((lane & 1) << 1);\n" },
     .{
@@ -22,8 +22,8 @@ const rewrites = [_][2][]const u8{
     },
 };
 
-/// A generated attention source with its result indexing in the simdgroup-matrix layout; the caller frees it.
-pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
+/// The captured source with pre-M5 result indexing, before optional register-array loop hints.
+pub fn layout(a: std.mem.Allocator, source: []const u8) ![]u8 {
     var text = try a.dupe(u8, source);
     errdefer a.free(text);
     for (rewrites) |r| {
@@ -35,8 +35,32 @@ pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
     return text;
 }
 
+/// Existing callers, including paged attention, keep the original layout adaptation.
+pub const rewrite = layout;
+
+/// The measured M3 path; other pre-M5 chips retain their original resource use and layout rewrite.
+pub fn forGeneration(a: std.mem.Allocator, generation: u32, source: []const u8) ![]u8 {
+    return if (generation == 15) unroll(a, source) else layout(a, source);
+}
+
+/// Keep the fixed cooperative-tensor elements in registers; each element keeps its original arithmetic.
+pub fn unroll(a: std.mem.Allocator, source: []const u8) ![]u8 {
+    var text = try layout(a, source);
+    errdefer a.free(text);
+    inline for (.{
+        "  for (int i = 0; i < 64; i++) { Olo[i] = 0.0f; }",
+        "    for (int i = 0; i < 64; i++) { const float f = (i & (D / 4)) ? f1 : f0; Olo[i] *= f; }",
+    }) |loop| {
+        if (std.mem.count(u8, text, loop) != 1) return error.AttentionSource;
+        const next = try std.mem.replaceOwned(u8, a, text, loop, "  #pragma clang loop unroll(full)\n" ++ loop);
+        a.free(text);
+        text = next;
+    }
+    return text;
+}
+
 /// The attention's score (16 x 64) and output (16 x 128) results, and the tree tail's (16 x 32, threadgroup operands).
-const check_source =
+pub const check_source =
     \\#include <metal_stdlib>
     \\#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
     \\using namespace metal;
@@ -85,7 +109,7 @@ const check_source =
     \\}
 ;
 
-/// The layout the rewrite reads, checked on this GPU: error.AttentionLayout when its tensor ops lay results out otherwise.
+/// Layout the rewrite reads, checked on this GPU: error.AttentionLayout if its tensor ops lay results out otherwise.
 pub fn check(device: mtl.Device, queue: mtl.Queue) !void {
     const lib = try mtl.Library.fromSource(device, check_source, mtl.CompileOptions.mlx());
     defer lib.deinit();
@@ -118,9 +142,13 @@ test "the rewrite finds every line it changes once in a generated attention kern
     const sources = @import("kernel_sources");
     inline for (sources.nemotron.all) |k| {
         if (comptime std.mem.startsWith(u8, k.key, "attn_partial")) {
-            const text = try rewrite(std.testing.allocator, k.source);
+            const text = try unroll(std.testing.allocator, k.source);
             defer std.testing.allocator.free(text);
             try std.testing.expect(std.mem.indexOf(u8, text, "(i & 4)") == null);
+            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "#pragma clang loop unroll(full)"));
+            const before = try layout(std.testing.allocator, k.source);
+            defer std.testing.allocator.free(before);
+            try std.testing.expect(std.mem.indexOf(u8, before, "#pragma clang loop unroll(full)") == null);
         }
     }
 }

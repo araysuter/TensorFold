@@ -80,8 +80,9 @@ pub const Scratch = struct {
     up: Buffer,
     upr: Buffer,
     sh: Buffer,
+    attention_pick: Buffer,
 
-    fn init(device: mtl.Device, c: cfg.Config, rows: usize) !Scratch {
+    pub fn init(device: mtl.Device, c: cfg.Config, rows: usize) !Scratch {
         @setEvalBranchQuota(20000);
         const d = c.hidden;
         const xd = c.inner();
@@ -107,6 +108,7 @@ pub const Scratch = struct {
             .{ "rowids", pairs * 4 },                              .{ "inv", pairs * 4 },                              .{ "xr", pairs * d * 2 },
             .{ "y1", pairs * c.expert_width * 2 },                 .{ "y1r", pairs * c.expert_width * 2 },             .{ "y2", pairs * d * 2 },
             .{ "up", rows * c.shared_width * 2 },                  .{ "upr", rows * c.shared_width * 2 },              .{ "sh", rows * d * 2 },
+            .{ "attention_pick", 64 },
         };
         var s: Scratch = undefined;
         var made: usize = 0;
@@ -117,10 +119,11 @@ pub const Scratch = struct {
             @field(s, f[0]) = try device.buffer(@max(f[1], 64), opts);
             made += 1;
         }
+        @memset(s.attention_pick.slice(u32, 16), 0);
         return s;
     }
 
-    fn deinit(self: *Scratch) void {
+    pub fn deinit(self: *Scratch) void {
         inline for (@typeInfo(Scratch).@"struct".field_names) |name| @field(self, name).deinit();
     }
 };

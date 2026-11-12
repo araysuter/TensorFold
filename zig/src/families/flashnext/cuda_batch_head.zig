@@ -1,5 +1,6 @@
 //! The shared batched head and last-row write-back, split without changing launch arguments.
 const std = @import("std");
+const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const batch = @import("cuda_batch.zig");
 const HcKeep = batch.HcKeep;
@@ -24,13 +25,23 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
         .all => {
             try self.writeback(0, n);
             try self.copy(self.hooks.streams, s.h, n * wide * 2);
+            var row0: usize = 0;
+            for (self.lanes) |l| {
+                try self.copy(l.streams, s.h + row0 * wide * 2, l.rows * wide * 2);
+                row0 += l.rows;
+            }
             try self.readoutKeep(self.m.mixer, 0, n, mixer_keep);
             const out = if (self.hooks.logits_out != 0) self.hooks.logits_out else return error.UnexpectedTensor;
             try self.projectHead(out, n);
+            row0 = 0;
+            for (self.lanes) |l| {
+                try self.copy(l.logits, out + row0 * vocab * 2, l.rows * vocab * 2);
+                row0 += l.rows;
+            }
             if (logits_host) |lh| {
                 try self.complete();
                 const d = self.stream.d;
-                try d.check(d.api.cuMemcpyDtoH_v2(lh.ptr, out + (n - 1) * vocab * 2, vocab * 2), "cuMemcpyDtoH");
+                try cuda.memory.download(d, out + (n - 1) * vocab * 2, std.mem.sliceAsBytes(lh)[0 .. vocab * 2]);
             }
         },
         .last => {
@@ -58,8 +69,21 @@ pub fn head(self: anytype, logits_host: ?[]u8) !void {
             if (logits_host) |lh| {
                 try self.complete();
                 const d = self.stream.d;
-                try d.check(d.api.cuMemcpyDtoH_v2(lh.ptr, s.logits, vocab * 2), "cuMemcpyDtoH");
+                try cuda.memory.download(d, s.logits, std.mem.sliceAsBytes(lh)[0 .. vocab * 2]);
             }
         },
     }
+}
+
+/// Column tiles keep their own reduction order; each gathered row restores global vocabulary order.
+pub fn projectHead(self: anytype, out: u64, n: usize) !void {
+    const s = self.s;
+    if (self.m.head.n == vocab) {
+        _ = try self.lane(s.mixed, s.xsm, self.m.head, out, s.dummy, n, 1);
+        return;
+    }
+    if (self.m.head.n != vocab / 2 or n > s.cap or n > s.head_rows) return error.UnexpectedTensor;
+    const c = self.m.collective orelse return error.TensorParallelUnavailable;
+    _ = try self.lane(s.mixed, s.xsm, self.m.head, s.head_local, s.dummy, n, 1);
+    for (0..n) |r| try c.gather(self.stream, s.head_local + r * vocab, out + r * vocab * 2, vocab / 2);
 }

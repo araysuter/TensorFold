@@ -27,14 +27,63 @@ const HcW = wt.HcW;
 
 pub const Sampling = lanes.sampling.Sampling;
 
-/// Drafts a verify window can hold beside its pending token.
-pub const max_chain: usize = max_rows - 1;
+/// Drafts an MTP chain holds at most beside its pending token.
+pub const max_chain: usize = 15;
 /// Preserve the existing recipe unless an explicit depth is selected.
 pub const default_depth: usize = 6;
-/// The live recipe's --mtp-confidence (Python's CONFIDENCE default is 0.7).
-pub const default_confidence: f64 = 0.6;
+/// A greedy stream's chain at most (TF_FLASHNEXT_DRAFTS_GREEDY): greedy drafts land more often, so a deeper chain pays.
+pub const default_depth_greedy: usize = 8;
+
+/// A drafted stream's first token is sent before its first drafts are asked (core/lanes/open_first.zig).
+pub fn firstEarly() bool {
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_FIRST_EARLY", true) catch true;
+}
+
+/// The chain a stream drafts at most: `greedy` for greedy streams (no sampling or temperature 0), else `depth`.
+pub fn depthFor(sm: ?Sampling, depth: usize, greedy: usize) usize {
+    return if (isSampled(sm)) depth else greedy;
+}
+/// The chain's stop rule (Stop): the running product of the drafts' probabilities at 0.4; 0.6 per draft before it.
+pub const default_confidence: f64 = -0.4;
+
+/// TF_FLASHNEXT_CONFIDENCE c > 0: a later draft only at or above c; c < 0: while p1 * ... * pj >= -c; 0: every draft.
+pub const Stop = struct {
+    c: f64,
+    product: f64 = 1.0,
+
+    /// Whether draft j (0-based) with probability `p` is proposed, and whether the chain may go on.
+    pub fn take(s: *Stop, j: usize, p: f64) struct { propose: bool, more: bool } {
+        if (s.c > 0) {
+            const low = p < s.c;
+            if (low and j > 0) return .{ .propose = false, .more = false };
+            return .{ .propose = true, .more = !low };
+        }
+        if (s.c < 0) {
+            s.product *= p;
+            // below the line it ends the chain: no later product can reach it again
+            if (s.product < -s.c) return .{ .propose = j == 0, .more = false };
+        }
+        return .{ .propose = true, .more = true };
+    }
+};
+
+test "the stop rule: per draft above zero, the running product below it, every draft at zero" {
+    var per: Stop = .{ .c = 0.6 };
+    try std.testing.expect(per.take(0, 0.5).propose and !per.take(0, 0.5).more);
+    try std.testing.expect(!per.take(1, 0.5).propose);
+    var prod: Stop = .{ .c = -0.4 };
+    try std.testing.expect(prod.take(0, 0.8).more); // 0.8
+    try std.testing.expect(prod.take(1, 0.6).more); // 0.48
+    const t = prod.take(2, 0.8); // 0.384: below 0.4
+    try std.testing.expect(!t.propose and !t.more);
+    var all: Stop = .{ .c = 0 };
+    try std.testing.expect(all.take(5, 0.01).propose and all.take(6, 0.01).more);
+}
 /// A verify window's rows at most: the pending token and a chain, or a copied continuation.
-pub const max_rows: usize = 16;
+pub const max_rows: usize = 32;
+/// A drafting round's rows at most: a shared verify's (TF_FLASHNEXT_WINDOW_ROWS lowers it; 0: each alone).
+pub const round_rows: usize = 64;
 /// qmm.split_for(2560, 2560): fc_embedding and fc_hidden sum K in four slices, in order.
 pub const fc_sk: usize = 4;
 /// Head rows one launch takes at most (a prompt's rows go through in pieces).
@@ -44,7 +93,8 @@ pub const pss_n = (dims / 256) * streams;
 pub const conv_bytes = (gdn.taps - 1) * gdn.conv_dim * 2;
 pub const proj_bytes = gdn.proj_width * 2;
 
-const vocab_text = @embedFile("draft_vocab_default.txt");
+const core = @import("core");
+const proposal = core.proposal_vocab;
 
 fn cint(v: usize) c_int {
     return @intCast(v);
@@ -52,23 +102,7 @@ fn cint(v: usize) c_int {
 
 /// The draft vocabulary's ids, sorted (Python draft_token_ids("default")): column j of the draft head is ids[j].
 pub fn draftIds(gpa: std.mem.Allocator) ![]u32 {
-    var out: std.ArrayList(u32) = .empty;
-    errdefer out.deinit(gpa);
-    var it = std.mem.tokenizeAny(u8, vocab_text, " \t\r\n,");
-    while (it.next()) |part| {
-        const id = try std.fmt.parseInt(u32, part, 10);
-        if (id >= vocab) continue;
-        try out.append(gpa, id);
-    }
-    std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
-    var n: usize = 0;
-    for (out.items, 0..) |id, i| {
-        if (i > 0 and id == out.items[n - 1]) continue;
-        out.items[n] = id;
-        n += 1;
-    }
-    out.shrinkRetainingCapacity(n);
-    return out.toOwnedSlice(gpa);
+    return proposal.legacy.ids(gpa, @import("proposal_table.zig").text, .{ .vocab = vocab, .skip_past_vocab = true, .delimiters = " \t\r\n," });
 }
 
 // ---- sampling ------------------------------------------------------------------------------------------------------
@@ -89,6 +123,13 @@ pub fn argmaxRow(row: []const u16) usize {
         }
     }
     return at;
+}
+
+/// Structured output: every token whose bit is clear in `bits` (token i in word i / 32) scores bf16 -inf.
+pub fn maskRow(row: []u16, bits: []const u32) void {
+    for (row, 0..) |*v, i| {
+        if (i / 32 >= bits.len or (bits[i / 32] >> @intCast(i % 32)) & 1 == 0) v.* = 0xFF80;
+    }
 }
 
 /// The keyed draw over one bf16 score row, column j being token ids[j] (or j), as lanes.sampling.choose draws.
@@ -138,6 +179,22 @@ pub fn drawRow(gpa: std.mem.Allocator, row: []const u16, ids: ?[]const u32, posi
     return @intCast(try lanes.sampling.choose(gpa, vals, keys, position, s));
 }
 
+/// Whether a stream's rule draws its drafts (a temperature above zero) rather than taking each row's best column.
+pub fn isSampled(sm: ?Sampling) bool {
+    return if (sm) |s| s.temperature > 0 else false;
+}
+
+/// A draft drawn from a downloaded score row (column j is token ids[j]) and its probability under the row's lse.
+pub fn drawPick(gpa: std.mem.Allocator, row: []const u16, ids: []const u32, lse: f32, position: u64, sm: ?Sampling) !Pick {
+    const tok = try drawRow(gpa, row, ids, position, sm);
+    const col = std.sort.binarySearch(u32, ids, tok, struct {
+        fn order(t: u32, x: u32) std.math.Order {
+            return std.math.order(t, x);
+        }
+    }.order) orelse return .{ .token = tok, .prob = 0 };
+    return .{ .token = tok, .prob = @exp(@as(f64, promote(row[col])) - @as(f64, lse)) };
+}
+
 // ---- the head's weights --------------------------------------------------------------------------------------------
 
 pub const Head = struct {
@@ -150,9 +207,12 @@ pub const Head = struct {
     mixer: HcW,
     /// lm_head's rows at `ids`, in their order.
     draft: Q4,
-    ids: []u32,
+    ids: []const u32,
+    artifact: proposal.Artifact,
+    service: lanes.proposal_head.Service,
     module: cuda.Module,
     best_fn: cuda.Function,
+    topk_fn: cuda.Function, // fn_row_topk: a row's top_k candidates as drawRow ranks them (cuda_mtp_draw.zig)
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, dir: []const u8) !*Head {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -184,14 +244,23 @@ pub const Head = struct {
             const pack_fn = try pack_mod.function(wt.pack_symbol);
             h.layer = try load.loadLayerAt(gpa, driver, stream, &store, pack_fn, "language_model.mtp.layers.0", false, false);
         }
+        store.dropStaging(); // the head's experts are on the device
         errdefer h.layer.free(gpa);
-        h.ids = try draftIds(gpa);
-        errdefer gpa.free(h.ids);
-        h.draft = try @import("cuda_mtp_load.zig").draft(gpa, driver, &store, h.ids);
+        const ids = try draftIds(gpa);
+        defer gpa.free(ids);
+        const head_load = @import("cuda_mtp_load.zig");
+        const role = try head_load.mode();
+        const dtype = (try store.tensor("language_model.lm_head.weight")).dtype;
+        h.artifact = try proposal.legacy.artifact(gpa, ids, .{ .vocab = vocab, .hidden = dims, .format = if (dtype == .bf16) "bf16" else "affine4", .group = if (dtype == .bf16) 0 else 32, .scale_recipe = if (dtype == .bf16) @tagName(role) else "stored affine4 group32" });
+        errdefer h.artifact.deinit();
+        h.ids = h.artifact.ids();
+        h.service = try lanes.proposal_head.Service.legacy(gpa, &h.artifact);
+        h.draft = try head_load.draft(gpa, driver, &store, &h.artifact, role);
         errdefer h.draft.free();
         h.module = try cuda.Module.load(driver, cuda.kernels.flashnext_mtp);
         errdefer h.module.unload();
         h.best_fn = try h.module.function("fn_row_best");
+        h.topk_fn = try h.module.function("fn_row_topk");
         return h;
     }
 
@@ -203,7 +272,7 @@ pub const Head = struct {
     pub fn deinit(h: *Head) void {
         h.module.unload();
         h.draft.free();
-        h.gpa.free(h.ids);
+        h.artifact.deinit();
         h.layer.free(h.gpa);
         h.mixer.free();
         h.fc_h.free();
@@ -211,6 +280,32 @@ pub const Head = struct {
         h.norm_h.free();
         h.norm_e.free();
         h.gpa.destroy(h);
+    }
+
+    pub fn view(h: *const Head) core.proposal_rows.Scores {
+        const map = h.service.compact.map.?;
+        return .{ .vocab = vocab, .logical = @intCast(map.ids.len), .stride = @intCast(map.ids.len), .ids = map.ids };
+    }
+
+    /// The BF16 legacy lane is the same qlinear owner; group-32 affine keeps its existing unqualified callback.
+    pub fn project(h: *const Head, pass: anytype, input: u64, sums: u64, out: u64, rows: usize) !void {
+        if (h.draft.native) |weight| {
+            const view_: cuda.qlinear.proposal.Head = .{ .weight = .{ .bf16 = weight }, .role = .decode, .vocab = vocab, .logical = @intCast(h.ids.len), .stride = @intCast(h.ids.len), .ids = h.ids, .generation = h.artifact.fingerprint };
+            return view_.project(.{ .lane = &pass.k.native_lane }, pass.stream, .{ .x = input, .sums = sums, .part = pass.s.native_part }, out, rows);
+        }
+        _ = try pass.lane(input, sums, h.draft, out, pass.s.dummy, rows, 1);
+    }
+
+    /// Each of `rows` rows' `k` best of its first `v` values (fn_row_topk): bf16 bits to out_v, columns to out_c.
+    pub fn topk(h: *const Head, stream: cuda.Stream, scores: u64, v: usize, ld: usize, rows: usize, k: usize, out_v: u64, out_c: u64) !void {
+        var a: cuda.Args = .{};
+        a.add(scores);
+        a.add(cint(v));
+        a.add(@as(c_longlong, @intCast(ld)));
+        a.add(cint(k));
+        a.add(out_v);
+        a.add(out_c);
+        try cuda.launch.launch(h.topk_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &a);
     }
 
     /// fn_row_best over `rows` rows of `v` scores `ld` apart: [rows, 4] fp32 at `out` (best, log-sum-exp, id bits).
@@ -224,9 +319,12 @@ pub const Head = struct {
     }
 };
 
-/// Device bytes the head's weights take beyond the main model's (for the server's admission estimate).
-pub fn headBytes() usize {
-    const experts = (wt.experts_n + 1) * 3 * wt.moe_w * dims / 2 * 5 / 4;
+/// Device bytes the head's weights take beyond the main model's; `fp8`: block-FP8 routed experts (headFp8).
+pub fn headBytes(fp8: bool) usize {
+    const weights = 3 * wt.moe_w * dims;
+    const nvfp4 = weights / 2 * 5 / 4;
+    const routed = if (fp8) weights + 3 * (wt.moe_w / 128) * (dims / 128) * 4 else nvfp4;
+    const experts = wt.experts_n * routed + nvfp4;
     const attn = (wt.proj_n + dims) * dims / 2 * 5 / 4;
     const draft = 79_591 * dims / 2 * 5 / 4;
     return experts + attn + draft + 2 * dims * dims / 2 * 5 / 4;
@@ -237,6 +335,13 @@ pub const Chain = @import("cuda_mtp_draft.zig").Chain;
 pub const Draft = @import("cuda_mtp_draft.zig").Draft;
 pub const Ops = @import("cuda_mtp_ops.zig").Ops;
 pub const check = @import("cuda_mtp_check.zig").check;
+
+test "the head's bytes: NVFP4 experts as before, FP8 routed experts a byte a weight and their f32 block scales" {
+    const before = (wt.experts_n + 1) * 3 * wt.moe_w * dims / 2 * 5 / 4 + (wt.proj_n + dims) * dims / 2 * 5 / 4 + 79_591 * dims / 2 * 5 / 4 + 2 * dims * dims / 2 * 5 / 4;
+    try std.testing.expectEqual(before, headBytes(false));
+    // an expert's three projections: 640 x 2560 bytes and 5 x 20 scales each, against 5/8 of a byte a weight
+    try std.testing.expectEqual(wt.experts_n * (3 * (640 * 2560 + 5 * 20 * 4) - 3 * 640 * 2560 * 5 / 8), headBytes(true) - headBytes(false));
+}
 
 test "the draft vocabulary is 79,591 sorted ids under the vocabulary" {
     const ids = try draftIds(std.testing.allocator);
@@ -270,8 +375,57 @@ test "a keyed draw over the top-k columns is the draw over every column" {
     try std.testing.expectEqual(@as(u32, @intCast(argmaxRow(&row))), try drawRow(gpa, &row, null, 0, null));
 }
 
+test "a drawn pick is the row's keyed draw with its probability under the row's log-sum-exp" {
+    const gpa = std.testing.allocator;
+    var row: [300]u16 = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    for (&row) |*v| v.* = @as(u16, 0x3f00) + prng.random().int(u8);
+    var ids: [300]u32 = undefined;
+    for (&ids, 0..) |*t, i| t.* = @intCast(3 * i + 1); // a sorted map of columns to tokens, as the draft head's
+    var sum: f64 = 0;
+    for (row) |b| sum += @exp(@as(f64, promote(b)));
+    const lse: f32 = @floatCast(@log(sum));
+    for (0..32) |position| {
+        const s: Sampling = .{ .seed = 19, .temperature = 1.0, .top_k = 20, .top_p = 0.95 };
+        const got = try drawPick(gpa, &row, &ids, lse, position, s);
+        try std.testing.expectEqual(try drawRow(gpa, &row, &ids, position, s), got.token);
+        const col = (got.token - 1) / 3;
+        try std.testing.expectEqual(@exp(@as(f64, promote(row[col])) - @as(f64, lse)), got.prob);
+    }
+    const best = try drawPick(gpa, &row, &ids, lse, 0, null);
+    try std.testing.expectEqual(@as(u32, @intCast(3 * argmaxRow(&row) + 1)), best.token);
+    try std.testing.expect(best.prob > 0 and best.prob <= 1);
+}
+
+test "a masked row draws only allowed tokens, greedy the best of them" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(5);
+    for (0..64) |position| {
+        var row: [300]u16 = undefined;
+        for (&row) |*v| v.* = @as(u16, 0x3f00) + prng.random().int(u8);
+        var bits: [10]u32 = @splat(0); // tokens 0..319: three allowed, the vocabulary's best usually not among them
+        const allowed = [_]u32{ 7, @intCast(64 + position), 299 };
+        for (allowed) |t| bits[t / 32] |= @as(u32, 1) << @intCast(t % 32);
+        var best: u32 = allowed[0];
+        for (allowed) |t| if (promote(row[t]) > promote(row[best]) or (promote(row[t]) == promote(row[best]) and t < best)) {
+            best = t;
+        };
+        maskRow(&row, &bits);
+        try std.testing.expectEqual(best, try drawRow(gpa, &row, null, position, null));
+        const s: Sampling = .{ .seed = 11, .temperature = 1.0, .top_k = 20, .top_p = 0.95 };
+        const t = try drawRow(gpa, &row, null, position, s);
+        try std.testing.expect(std.mem.indexOfScalar(u32, &allowed, t) != null);
+    }
+}
+
 test "draft chains fit one verify window while the default stays six" {
     try std.testing.expectEqual(@as(usize, 16), max_chain + 1);
+    try std.testing.expectEqual(@as(usize, 32), max_rows);
+    try std.testing.expect(max_chain < max_rows and max_rows <= round_rows);
     try std.testing.expectEqual(@as(usize, 6), default_depth);
     try std.testing.expect(default_depth <= max_chain);
+}
+
+test {
+    _ = @import("cuda_mtp_nonfinite_test.zig");
 }

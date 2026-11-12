@@ -2,6 +2,9 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
+#include "common/act.cuh"
+#include "common/qmm_frag.cuh"
 
 typedef __nv_bfloat16 bf16;
 
@@ -10,30 +13,13 @@ __device__ __forceinline__ bf16 b16(float v) { return __float2bfloat16(v); }
 __device__ __forceinline__ float wide(float v) { return v; }
 __device__ __forceinline__ float wide(bf16 v) { return __bfloat162float(v); }
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
+using tf_common::warp_sum;
+using tf_common::block_sum_tree;
 
-// The sum over a block of `groups` warps, the same in every thread.
-__device__ __forceinline__ float block_sum(float v, float* scratch, int groups) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_sum(v);
-    if (lane == 0) scratch[w] = v;
-    __syncthreads();
-    v = warp_sum(lane < groups ? scratch[lane] : 0.0f);
-    __syncthreads();
-    return v;
-}
+using tf_common::sigmoidf_;
+using tf_common::silu;
 
-__device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
-__device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
-
-__device__ __forceinline__ float silu_grad(float v) {
-    const float s = sigm(v);
-    return s * (1.0f + v * (1.0f - s));
-}
+using tf_common::silu_grad;
 
 // ---- 4-bit products, any group --------------------------------------------------------------------------------------
 
@@ -101,11 +87,7 @@ __device__ __forceinline__ void gemm_q4(const TA* __restrict__ A, const unsigned
             for (int i = 0; i < 2; i++)
 #pragma unroll
                 for (int j = 0; j < 4; j++)
-                    asm volatile(
-                        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
-                        "{%0, %1, %2, %3};\n"
-                        : "+f"(acc[i][j][0]), "+f"(acc[i][j][1]), "+f"(acc[i][j][2]), "+f"(acc[i][j][3])
-                        : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]), "r"(bq[j][0]), "r"(bq[j][1]));
+                    qmm_frag::mma_v(acc[i][j], af[i], bq[j]);
         }
         __syncthreads();
     }
@@ -145,17 +127,11 @@ extern "C" __global__ void __launch_bounds__(128) tf_q27_gemm_q4_bf(const bf16* 
 
 // ---- 4-bit products, wide tiles.
 
-__device__ __forceinline__ unsigned smem_at(const void* p) { return static_cast<unsigned>(__cvta_generic_to_shared(p)); }
 
-__device__ __forceinline__ void ld4(unsigned (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(smem_at(p)));
-}
 
-__device__ __forceinline__ void ld4t(unsigned (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(smem_at(p)));
-}
+__device__ __forceinline__ void ld4(unsigned (&r)[4], const void* p) { qmm_frag::ldmatrix4(r, p); }
+
+__device__ __forceinline__ void ld4t(unsigned (&r)[4], const void* p) { qmm_frag::ldmatrix4t(r, p); }
 
 // gemm_q4's products bit for bit.
 template <typename TA>
@@ -247,11 +223,7 @@ __device__ __forceinline__ void gemm_q4w(const TA* __restrict__ A, const unsigne
             for (int i = 0; i < 4; i++)
 #pragma unroll
                 for (int j = 0; j < 4; j++)
-                    asm volatile(
-                        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
-                        "{%0, %1, %2, %3};\n"
-                        : "+f"(acc[i][j][0]), "+f"(acc[i][j][1]), "+f"(acc[i][j][2]), "+f"(acc[i][j][3])
-                        : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]), "r"(bq[j][0]), "r"(bq[j][1]));
+                    qmm_frag::mma_v(acc[i][j], af[i], bq[j]);
         }
     }
     const bool split = gridDim.z > 1;
@@ -390,8 +362,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_q27_pocket_grad(const bf16*
         a += gate[(size_t)j * d + i] * v;
         b += up[(size_t)j * d + i] * v;
     }
-    a = block_sum(a, scratch, 8);
-    b = block_sum(b, scratch, 8);
+    a = block_sum_tree(a, scratch, 8);
+    b = block_sum_tree(b, scratch, 8);
     const float k = w * silu(a) * b;
     for (int i = t; i < d; i += 256) grad[(size_t)j * d + i] += k * push[(size_t)r * d + i];
 }

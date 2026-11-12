@@ -5,6 +5,16 @@ Python 0.6.6 stays available at the `v0.6.6` tag and takes no further changes; P
 Start from `main`, the only branch, and keep one change per pull request.
 Open an issue before a new model family, backend or arithmetic change so we can agree on its gate.
 
+## Coordinate before editing
+
+TensorFold uses [ATC](https://github.com/ashhart/ATC) to coordinate contributors and coding agents; check the [agent radar](https://tensorfold.dev/atc) before choosing an issue.
+Follow the [README workflow](README.md#contributing-with-agents) to check, claim, publish your session, pulse while working and land when you finish.
+With ATC 0.7.0 or later, a successful new claim automatically starts an anonymous public session; keep its returned session number and avoid starting a second one.
+Showing a GitHub name is an explicit opt-in with `--github-name`; `--local` keeps a new session on your machine.
+If an issue is taken, offer to pair, split or review instead of opening a competing implementation.
+Run `atc overlap --json` before opening a pull request and resolve conflicts with overlapping work.
+Agents must also read the [ATC contributor instructions](docs/atc/SKILL.md).
+
 ## Build and host tests
 
 Use the exact Zig version in `.zig-version`, currently 0.17.0.
@@ -21,6 +31,7 @@ The `apple_m1` CPU target keeps the macOS binary compatible with M1 through M5.
 Run the full suite on an isolated machine when the local GPU is serving a model.
 `test-golden` compares the frozen server corpus and records known differences separately.
 These results do not substitute for an actual checkpoint/model gate.
+On macOS, `zig build dev-tools` compiles and links every `tf-*` developer tool without running one; run it after changing an API they call.
 
 For the CUDA host-test subset without the macOS Metal family tests:
 
@@ -29,6 +40,17 @@ zig build test-cuda-host
 ```
 
 This subset does not replace the complete `test` suite.
+
+HIP is an explicit build opt-in. Add `-Dhip=true` to enable its host tests and named HIP targets:
+
+```sh
+zig build test -Dhip=true
+zig build native-hip -Dhip=true -Dhipcc=/opt/rocm/bin/hipcc -Dhip-arch=gfx1100
+```
+
+The default graph omits HIP. Enabling it does not select another backend or change CUDA, Metal or XPU runtime options.
+The HIP backend uses the same shared core and serving contracts. Device qualification remains specific to its
+checkpoint, compiler, runtime and architecture; a host build does not establish those receipts.
 
 Linux release builds use the CUDA backend and qualified GPU kernel assets.
 [Packaging](packaging/README.md) lists the flat fatbin set and optional captured CUDA files required by `dist`.
@@ -48,7 +70,7 @@ Verify these contracts at the same checkpoint, backend, runtime and settings:
 - Prompt chunks and decode use the required row arithmetic, with recurrent state, KV and final logits checked at seams.
 - Cancellation, reset and partial acceptance leave the next request's state valid.
 
-A new or changed GPU kernel registers with the [kernel contract](docs/kernel-contract.md), and its pull request posts each backend's `SUMMARY` line.
+A new or changed GPU kernel registers with the [kernel contract](docs/kernel-contract.md), and its pull request posts each backend's `SUMMARY` line. How to bound, profile and measure a speed change is in [docs/optimizing.md](docs/optimizing.md).
 Keep the checkpoint's activation precision and the required accumulation precision.
 A changed reduction order needs an independent FP64 reference for each affected projection class, with native error no worse than the current reference.
 Compare prompt and decode references separately on identical input rows.
@@ -80,6 +102,10 @@ Record 64k, 128k and the native window separately where the model/platform admit
 Compare against the previous release and the applicable standard server, such as `mlx_lm` or `vLLM`.
 When a difference is only a few percent, alternate before/after runs to separate it from temperature and load changes.
 
+Before asking us for a run on our machines, please post main-against-your-branch numbers if your change can reach inference (model and kernel code, the server's prompt and sampling code, build flags): same machine, checkpoint and settings, with token hashes equal on the default path. An opt-in that changes tokens says so and shows its proof.
+Once your numbers are in and there are no requested changes left, we repeat what your files can reach, where we have the hardware and checkpoint to do it. If your numbers show a loss, please fix it or show it's noise first.
+No machine to run on? Say so in the description: we review every PR either way, and we'll work out what we can do. If you have a chip we don't, your numbers are the evidence, so please post them.
+
 Memory receipts include peak physical process footprint and device/pinned allocations where the backend reports them.
 State the hardware RAM class and context; a budget on a larger host is not a measurement on a smaller machine.
 Use a single model process per test machine, the existing GPU lock and admission guard, and record load/cleanup boundaries.
@@ -94,6 +120,8 @@ The lean checker must add zero problems over the branch's pinned baseline:
 ```sh
 python3 tools/zig/lean_check.py
 ```
+
+Before pushing, run `python3 tools/pr_check.py --base origin/main --pr NUMBER` to check tracked and untracked local changes against the merge base; new lean and source-length findings are errors, and added-text and documentation findings are advisory warnings.
 
 Attach the baseline count and identify inherited findings instead of claiming a nonzero checker exit is clean.
 Write tests that demonstrate a real failure and its correction; keep the failing receipt when changing arithmetic or lifecycle behavior.

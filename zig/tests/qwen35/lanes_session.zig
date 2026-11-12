@@ -49,6 +49,9 @@ pub const Session = struct {
         rounds: u64,
         replayed: u64,
         submit_ns: u64,
+        /// Draft head batches run on the graphed chain and replayed from graphs, during the run.
+        head_batches: u64 = 0,
+        head_replayed: u64 = 0,
         /// Nanoseconds and calls of the backend's verifies, keeps and drafts.
         spent: [3]u64,
         calls: [3]u64,
@@ -79,8 +82,10 @@ pub const Session = struct {
         const replayed = s.e.graphs.replayed;
         const rounds = s.e.graphs.rounds;
         const submit = s.e.graphs.submit_ns;
-        const spent = s.h.spent;
-        const calls = s.h.calls;
+        const head_batches = s.headBatches();
+        const head_replayed = s.headReplayed();
+        const spent = s.h.streams.spent;
+        const calls = s.h.streams.calls;
         const t0 = std.Io.Clock.awake.now(s.io);
         if (job.solo) {
             for (streams) |*st| try s.finish(&.{st});
@@ -93,7 +98,17 @@ pub const Session = struct {
         const seconds = @as(f64, @floatFromInt(std.Io.Clock.awake.now(s.io).toNanoseconds() - t0.toNanoseconds())) / 1e9;
         const out = try arena.alloc(Reply, streams.len);
         for (out, streams, job.prompts) |*r, *st, p| r.* = .{ .name = p.name, .tokens = try arena.dupe(u32, st.emitted()), .rounds = st.rounds, .accepted = st.accepted, .cached = st.cached };
-        return .{ .replies = out, .seconds = seconds, .rounds = s.e.graphs.rounds - rounds, .replayed = s.e.graphs.replayed - replayed, .submit_ns = s.e.graphs.submit_ns - submit, .spent = delta(s.h.spent, spent), .calls = delta(s.h.calls, calls) };
+        return .{
+            .replies = out,
+            .seconds = seconds,
+            .rounds = s.e.graphs.rounds - rounds,
+            .replayed = s.e.graphs.replayed - replayed,
+            .submit_ns = s.e.graphs.submit_ns - submit,
+            .head_batches = s.headBatches() - head_batches,
+            .head_replayed = s.headReplayed() - head_replayed,
+            .spent = delta(s.h.streams.spent, spent),
+            .calls = delta(s.h.streams.calls, calls),
+        };
     }
 
     fn finish(s: *Session, streams: []const *lanes.Stream) !void {
@@ -101,6 +116,15 @@ pub const Session = struct {
         defer engine.deinit();
         for (streams) |st| try engine.addStream(st);
         while (engine.live.items.len > 0) try engine.step();
+    }
+
+    /// The draft head's batches on the graphed chain so far (0 without a head).
+    fn headBatches(s: *const Session) u64 {
+        return if (s.h.head) |hd| hd.graphs.rounds else 0;
+    }
+
+    fn headReplayed(s: *const Session) u64 {
+        return if (s.h.head) |hd| hd.graphs.replayed else 0;
     }
 };
 

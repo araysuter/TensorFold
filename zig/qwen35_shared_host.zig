@@ -4,6 +4,10 @@ const cuda = @import("cuda");
 const q = @import("qwen35");
 const a = std.testing.allocator;
 
+test {
+    _ = @import("qwen35_recurrent_host.zig");
+}
+
 test "Shared verification: all 128 streams share one bounded verification frame" {
     try std.testing.expectEqual(@as(usize, 128), q.engine.max_segs);
     try std.testing.expectEqual(@as(usize, 128), q.engine.most_verify);
@@ -39,6 +43,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     d.api.cuMemcpyDtoDAsync_v2 = Driver.copyAsync;
     d.api.cuLaunchKernel = Driver.launch;
     var e: q.engine.Engine = undefined;
+    e.kit = null;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 32, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
@@ -46,7 +51,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     e.kv8 = false;
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
     const f: cuda.Function = .{ .d = d, .handle = @ptrFromInt(1) };
-    e.keeps = .{ .apply = f, .conv = f, .compact = f };
+    e.keeps = .{ .apply = f, .apply_pend = f, .conv = f, .compact = f };
     return e;
 }
 fn buffer(d: *cuda.Driver, data: []u8) cuda.DeviceBuffer {
@@ -110,7 +115,10 @@ test "Shared verification: empty multi-row keep preserves the root and completed
     cache.advanced(128, false);
     try std.testing.expect(cache.last == null);
     try std.testing.expectEqual(@as(usize, 136), cache.len);
-    try std.testing.expectEqual(@as(usize, 2) * e.g.stateBytes() + e.g.kvBytes(256, false) + e.g.logBytes(64), e.streamBytes(256));
+    // the before copy sits inside the log's bytes (one overlaid block), so a stream holds one state beside it
+    const block = q.cache.overlay(&e);
+    try std.testing.expectEqual(e.g.logBytes(64), block.bytes);
+    try std.testing.expectEqual(e.g.stateBytes() + block.bytes + e.g.kvBytes(256, false) + q.cache.pendBytes(e.g), e.streamBytes(256));
 }
 
 const Owners = struct {
@@ -119,6 +127,7 @@ const Owners = struct {
     var fail_alloc: usize = 0;
     var fail_clear: usize = 0;
     var live: [8]bool = @splat(false);
+    var pending = false;
     fn alloc(ptr: *u64, _: usize) callconv(.c) cuda.abi.Result {
         allocations += 1;
         if (allocations == fail_alloc) return cuda.abi.error_not_ready;
@@ -128,6 +137,7 @@ const Owners = struct {
     }
     fn free(ptr: u64) callconv(.c) cuda.abi.Result {
         const slot = ptr / 256;
+        std.debug.assert(!pending);
         std.debug.assert(live[slot]);
         live[slot] = false;
         return cuda.abi.success;
@@ -136,7 +146,22 @@ const Owners = struct {
         clears += 1;
         return if (clears == fail_clear) cuda.abi.error_not_ready else cuda.abi.success;
     }
+    fn clearAsync(ptr: u64, value: u8, bytes: usize, stream: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        std.debug.assert(stream != null);
+        const result = clear(ptr, value, bytes);
+        if (result == cuda.abi.success) pending = true;
+        return result;
+    }
+    fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        pending = false;
+        return cuda.abi.success;
+    }
+    fn context() callconv(.c) cuda.abi.Result {
+        pending = false;
+        return cuda.abi.success;
+    }
     fn setup(d: *cuda.Driver, fail_alloc_: usize, fail_clear_: usize) void {
+        std.debug.assert(!pending);
         allocations = 0;
         clears = 0;
         fail_alloc = fail_alloc_;
@@ -145,8 +170,12 @@ const Owners = struct {
         d.api.cuMemAlloc_v2 = alloc;
         d.api.cuMemFree_v2 = free;
         d.api.cuMemsetD8_v2 = clear;
+        d.api.cuMemsetD8Async = clearAsync;
+        d.api.cuStreamSynchronize = wait;
+        d.api.cuCtxSynchronize = context;
     }
     fn balanced() !void {
+        try std.testing.expect(!pending);
         for (live) |owner| try std.testing.expect(!owner);
     }
 };
@@ -154,10 +183,14 @@ const Owners = struct {
 test "Shared verification: the actual cache constructor unwinds the before bank and every later failure" {
     var d: cuda.Driver = undefined;
     var e = engine(&d);
+    e.stream.handle = @ptrFromInt(17);
+    e.rec_scratch = q.engine.recurrent.Pool.init(a, @intFromPtr(&e));
+    defer q.engine.recurrent.shutdown(&e);
     e.n_taps = 1;
     e.g.layers = 2;
     e.g.linear[1] = false;
-    for (1..6) |fail| {
+    // kv, state, the overlaid log and before block, and the tap ring: four device allocations
+    for (1..5) |fail| {
         Owners.setup(&d, fail, 0);
         try std.testing.expectError(error.NotReady, q.engine.Cache.init(a, &e, 256));
         try Owners.balanced();
@@ -174,7 +207,12 @@ test "Shared verification: the actual cache constructor unwinds the before bank 
     Owners.setup(&d, 0, 0);
     var cache = try q.engine.Cache.init(a, &e, 256);
     try std.testing.expect(cache.before != null);
-    try std.testing.expectEqual(@as(usize, 5), Owners.allocations);
+    try std.testing.expectEqual(@as(usize, 4), Owners.allocations);
+    const block = cache.block.?;
+    try std.testing.expect(cache.before.?.borrowed and cache.log.borrowed);
+    try std.testing.expectEqual(block.ptr, cache.log.ptr);
+    try std.testing.expectEqual(block.ptr + q.cache.overlay(&e).before_at, cache.before.?.ptr);
+    try std.testing.expect(cache.before.?.ptr + cache.before.?.len <= block.ptr + block.len);
     cache.deinit(a);
     try Owners.balanced();
 }

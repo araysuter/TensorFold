@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "scope": "Budgeted rewind/next-turn cache checkpoints; CPU regressions and real GPU restore smoke",
+  "upstream_repository": "https://github.com/BobClawblaw/TensorFold",
+  "upstream_revision": "9328aff8a6c470b026aee7cefe53a0527de44814",
+  "zig_version": "0.17.0",
+  "host_cpu_target": "apple_m4",
+  "native_binary_sha256": "06cb7d1f4a11a88db7494a39f7b2082112facfa348cc38e6c36cff65a28b00a0",
+  "cpu_tests": {
+    "command": "bash tools/studio-gateway/native/test.sh SOURCE_DIRECTORY ZIG_0_17_EXECUTABLE",
+    "test_root": "zig/src/core/session_file.zig",
+    "filters": [],
+    "passed": 108,
+    "failed": 0,
+    "exit_code": 0,
+    "transitive_test_groups": [
+      "session snapshot format and path confinement",
+      "prompt cache",
+      "conversation row store",
+      "learned states",
+      "fault injection and rollback",
+      "assistant-suffix mismatch with two checkpoints and one-state byte budget"
+    ]
+  },
+  "native_build": {
+    "command": "zig build native -Doptimize=ReleaseFast -Dcpu=apple_m4 -j4",
+    "exit_code": 0,
+    "patch_idempotence": "Applied twice successfully, including upgrade from the previous one-checkpoint patch"
+  },
+  "lean": {
+    "same_checker_against": "pinned native port with existing mixed-shared quantization fix",
+    "baseline_findings": 444,
+    "candidate_findings": 444,
+    "new_findings": 0
+  },
+  "diff_check": {
+    "command": "git diff --check",
+    "exit_code": 0
+  },
+  "not_run": [
+    "Full repository test/test-kernel-contract/test-golden/fuzz-cortheon qualification",
+    "Plain zig build of every default tool",
+    "Qualification on other GPU chips or operating systems"
+  ],
+  "gpu_validation": "Scoped real-GPU restore checks and VS Code cache diagnostic; not whole-model or full 128K qualification.",
+  "date": "2026-10-23",
+  "checkpoint_policy": {
+    "maximum_states": 2,
+    "same_active_conversation": true,
+    "swift_budget_gib": 9,
+    "ornith_budget_gib": 4,
+    "budget_increased": false,
+    "at_128k": "May fit only one checkpoint; no new 128K performance qualification"
+  },
+  "gpu_smoke": {
+    "status": "passed",
+    "checks": [
+      "metadata/auth and internal route confinement",
+      "Ornith SSD restore vs fresh/plain token IDs",
+      "Swift SSD restore vs fresh/plain token IDs",
+      "immediate model switch after streaming terminal",
+      "owner/friend context isolation"
+    ],
+    "baseline_examples_reference_compared": false,
+    "not_a_speed_benchmark": true
+  },
+  "gateway_cpu_tests": {
+    "command": "python3 -m unittest discover -s tools/studio-gateway/tests -v",
+    "passed": 45,
+    "failed": 0,
+    "exit_code": 0
+  },
+  "vscode_diagnostic": {
+    "client": "VS Code Copilot Agent Host custom endpoint",
+    "model": "swift-1.5",
+    "tools": 128,
+    "thinking_effort": "medium",
+    "method": "Synthetic no-tool follow-ups in the same sidebar conversation; live endpoint and native numeric logs",
+    "baseline_binary_sha256": "a3bbc06661eb375a33cf2e0e0de261d8875c85f657636dafa82430c18a445bb8",
+    "baseline_samples": [
+      {
+        "turn": 3,
+        "prompt_tokens": 54479,
+        "cached_tokens": 0,
+        "http_wall_seconds": 75.594
+      },
+      {
+        "turn": 4,
+        "prompt_tokens": 54657,
+        "cached_tokens": 0,
+        "http_wall_seconds": 133.74
+      }
+    ],
+    "candidate_samples": [
+      {
+        "turn": 6,
+        "prompt_tokens": 55021,
+        "cached_tokens": 0,
+        "time_to_first_token_seconds": 74.767,
+        "native_elapsed_seconds": 75.089,
+        "note": "Cold after independent smoke checks switched away and restored a suffix-incompatible saved state."
+      },
+      {
+        "turn": 7,
+        "prompt_tokens": 55201,
+        "cached_tokens": 54891,
+        "time_to_first_token_seconds": 0.861,
+        "native_elapsed_seconds": 1.17,
+        "ui_elapsed_seconds": 1
+      },
+      {
+        "turn": 8,
+        "prompt_tokens": 55381,
+        "cached_tokens": 54891,
+        "time_to_first_token_seconds": 1.377,
+        "native_elapsed_seconds": 1.704,
+        "ui_elapsed_seconds": 2
+      }
+    ],
+    "limits": [
+      "Small diagnostic replies; not a throughput or quality benchmark",
+      "First load, model swaps with suffix-incompatible SSD state, prompt edits and cache-budget eviction can still be cold",
+      "No new 128K performance measurement",
+      "No source files, prompt text, credentials or full request payloads included"
+    ],
+    "model_picker_verified": [
+      "swift-1.5",
+      "Ornith 1.5 122B (mixed 2-bit + DFlash2)"
+    ],
+    "endpoint_restored": true,
+    "temporary_diagnostic_relay_stopped": true
+  }
+}

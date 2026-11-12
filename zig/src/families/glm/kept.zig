@@ -26,7 +26,7 @@ pub const Borrowed = struct {
     f: *const fn (ctx: *anyopaque, saved: *anyopaque) bool,
 };
 
-/// Keep slot `i`'s prompt state at `at` tokens (its pass stands there) as snapshot `id` (0: the next); `home`: resident.
+/// Keep slot `i`'s prompt state at `at` tokens (its pass stands there) as snapshot `id` (0: next); `home`: resident.
 pub fn save(sl: *Slots, i: u32, at: u32, id: u32, home: bool) !*snapshot.Snap {
     const slot = try sl.slotAt(i);
     if (at == 0 or at != slot.s.pos or slot.rows != 0 or sl.snaps.contains(id)) return error.SnapshotOutOfStep;
@@ -39,6 +39,7 @@ pub fn save(sl: *Slots, i: u32, at: u32, id: u32, home: bool) !*snapshot.Snap {
     try copySnap(sl, slot, snap, true);
     try sl.snaps.put(sl.gpa, snap.id, snap);
     sl.next_snap = @max(sl.next_snap, snap.id + 1);
+    enroll(sl, snap);
     return snap;
 }
 
@@ -77,7 +78,7 @@ pub fn overwrite(sl: *Slots, i: u32, at: u32) void {
     };
 }
 
-/// Before slot `i` writes from `at`: its resident states past `at` made whole where the budget has room, each id into `ids`.
+/// Before slot `i` writes from `at`: its resident states past `at` made whole as the budget allows, each id into `ids`.
 pub fn copyOut(sl: *Slots, i: u32, at: u32, ids: *std.ArrayList(u32), gpa: std.mem.Allocator) !void {
     const g = sl.grow orelse return;
     var n: usize = 0;
@@ -101,7 +102,7 @@ pub fn copyIds(sl: *Slots, i: u32, ids: []const u32) !void {
     }
 }
 
-/// A resident state made whole: a buffer with its MLA prefixes beside its KDA states, filled from its slot before the slot writes.
+/// A resident state made whole: MLA prefixes beside its KDA states in a buffer, filled from the slot before it writes.
 fn whole(sl: *Slots, snap: *snapshot.Snap) !void {
     const home = snap.home orelse return error.SnapshotOutOfStep;
     const n = snapshot.bytes(&sl.e.c, snap.at, false);
@@ -112,10 +113,12 @@ fn whole(sl: *Slots, snap: *snapshot.Snap) !void {
     defer pool.pop();
     const x = sl.ctx(&sl.slots[home]);
     const b = sl.e.begin();
-    snapshot.spill(&x, b.enc, .{ .buf = snap.buf }, .{ .buf = buf }, snap.at, &sl.slots[home].s);
+    try snapshot.spill(&x, b.enc, .{ .buf = snap.buf }, .{ .buf = buf }, snap.at, &sl.slots[home].s);
     try sl.e.finish(b.cb, b.enc);
+    if (snap.follow) |f| f.leave(f.ctx, snap.buf);
     snap.buf.deinit();
     snap.buf = buf;
+    if (snap.follow) |f| f.join(f.ctx, buf);
     snap.bytes = n;
     snap.home = null;
     std.log.info("glm: a kept state of {d} tokens copied its prefixes out of slot {d} before the slot wrote below it ({d} MiB more)", .{ snap.at, home, (n - snapshot.bytes(&sl.e.c, snap.at, true)) >> 20 });
@@ -158,6 +161,7 @@ pub fn readSnap(sl: *Slots, id: u32, at: u32, file: [:0]const u8) !*snapshot.Sna
     try snapshot.readFile(snap, file);
     try sl.snaps.put(sl.gpa, id, snap);
     sl.next_snap = @max(sl.next_snap, id + 1);
+    enroll(sl, snap);
     return snap;
 }
 
@@ -171,6 +175,7 @@ pub fn blank(sl: *Slots, at: u32) !*snapshot.Snap {
     snap.* = .{ .id = sl.next_snap, .at = at, .buf = buf, .bytes = n };
     try sl.snaps.put(sl.gpa, snap.id, snap);
     sl.next_snap += 1;
+    enroll(sl, snap);
     return snap;
 }
 
@@ -181,8 +186,16 @@ pub fn drop(sl: *Slots, id: u32) void {
 }
 
 pub fn freeSnap(gpa: std.mem.Allocator, snap: *snapshot.Snap) void {
+    if (snap.follow) |f| f.leave(f.ctx, snap.buf);
     snap.buf.deinit();
     gpa.destroy(snap);
+}
+
+fn enroll(sl: *Slots, snap: *snapshot.Snap) void {
+    if (sl.e.residency) |*r| {
+        snap.follow = r.follow();
+        r.add(&.{snap.buf});
+    }
 }
 
 fn copySnap(sl: *Slots, slot: *Slot, snap: *snapshot.Snap, into: bool) !void {
@@ -192,7 +205,7 @@ fn copySnap(sl: *Slots, slot: *Slot, snap: *snapshot.Snap, into: bool) !void {
     const x = sl.ctx(slot);
     const b = sl.e.begin();
     var view: st.State = undefined;
-    snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into, pool_mod.prefixOf(sl, snap, &view));
+    try snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into, pool_mod.prefixOf(sl, snap, &view));
     try sl.e.finish(b.cb, b.enc);
 }
 
@@ -202,7 +215,7 @@ pub fn pick(sl: *const Slots, reuse: ?*const snapshot.Snap) ?u32 {
     return leastRecent(sl.slots, &sl.snaps);
 }
 
-/// The free slot holding no usable resident state, else the one whose newest such state was used longest ago; null: none free.
+/// A free slot with no usable resident state, else the one whose newest such state was used longest ago; null: none.
 pub fn leastRecent(slots: []const Slot, snaps: *const std.AutoHashMapUnmanaged(u32, *snapshot.Snap)) ?u32 {
     var best: ?u32 = null;
     var oldest: u64 = std.math.maxInt(u64);

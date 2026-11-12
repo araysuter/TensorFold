@@ -6,8 +6,8 @@ const stop = @import("benchmark_stop.zig");
 const fake = @import("benchmark_fake.zig");
 const Write = fake.Write;
 
-const golden_chat = "{\"model\": \".tensorfold-benchmark\", \"max_tokens\": 256, \"temperature\": 1.0, \"seed\": 1234, \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"top_k\": 20, \"top_p\": 0.95, \"draft\": false, \"messages\": [{\"role\": \"user\", \"content\": \"Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example.\"}], \"chat_template_kwargs\": {\"enable_thinking\": false}}";
-const golden_code = "{\"model\": \".tensorfold-benchmark\", \"max_tokens\": 256, \"temperature\": 0.0, \"seed\": 1238, \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"prompt\": \"Write a short Python function that computes the Fibonacci sequence and explain it.\"}";
+const golden_chat = "{\"model\": \".tensorfold-benchmark\", \"max_tokens\": 256, \"temperature\": 1.0, \"seed\": 1234, \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"presence_penalty\": 0.0, \"frequency_penalty\": 0.0, \"top_k\": 20, \"top_p\": 0.95, \"draft\": false, \"messages\": [{\"role\": \"user\", \"content\": \"Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example.\"}], \"chat_template_kwargs\": {\"enable_thinking\": false}}";
+const golden_code = "{\"model\": \".tensorfold-benchmark\", \"max_tokens\": 256, \"temperature\": 0.0, \"seed\": 1238, \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"presence_penalty\": 0.0, \"frequency_penalty\": 0.0, \"prompt\": \"Write a short Python function that computes the Fibonacci sequence and explain it.\"}";
 
 fn opts(tokens: u32, serial: bool, timeout_s: f64) stream.Opts {
     return .{ .tokens = tokens, .reps = 1, .temperatures = &.{ 1.0, 0.0 }, .serial = serial, .timeout_s = timeout_s };
@@ -38,8 +38,8 @@ test "request bodies equal the golden bytes, routes and headers, and a chat repl
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings("d85d948f99e8c87c578e103e3e4e584e5d10fc53144a7585cfadd5f8c493fd5b", &sha(golden_chat));
-    try std.testing.expectEqualStrings("fb516b455e574eba1c065ba914a8b7707d3839331156cb4defdcd766c97f4318", &sha(golden_code));
+    try std.testing.expectEqualStrings("1f13ffe30999c85cb4ecc0bfc89ec9f262ebb2cc262935d1c1200d259bc7d74a", &sha(golden_chat));
+    try std.testing.expectEqualStrings("a7528481b784a481f7a6c8365b87becec36c73294f4a02ef95bc1c5f591c75a6", &sha(golden_code));
     const f = try fake.Fake.start(std.testing.allocator, &.{
         .{ .method = "POST", .path = "/v1/chat/completions", .replies = &.{try fake.reply(a, true, 256, 12)} },
         .{ .method = "POST", .path = "/v1/completions", .replies = &.{try fake.reply(a, false, 256, 12)} },
@@ -63,11 +63,12 @@ test "writes apart are measured, one write is unmeasured, and the head's bytes t
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const replies = try fake.reply(a, false, 4, 12);
+    // deliveries 100 ms apart, measured as at least half that: a client a busy runner wakes late still sees them apart
+    const replies = try fake.reply(a, false, 4, 100);
     const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "POST", .path = "/v1/completions", .replies = &.{ replies, try batch(a, replies) } }});
     defer f.stop();
     const apart = try one(f, a, suite.fixtures[0], opts(4, false, 5), 1.0, 1234);
-    try std.testing.expect(apart.status == .ok and apart.delivery_seconds.? >= 0.010);
+    try std.testing.expect(apart.status == .ok and apart.delivery_seconds.? >= 0.050);
     try std.testing.expect(apart.ttft_seconds.? < 0.5 and apart.delivery_seconds.? < 0.5);
     const together = try one(f, a, suite.fixtures[0], opts(4, false, 5), 1.0, 1234);
     try std.testing.expect(together.status == .unmeasured and together.delivery_seconds == null);
@@ -120,16 +121,17 @@ test "a trickling reply times out, and Ctrl-C cancels the attempt and ends the r
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    // 1.5 s of trickle: an attempt or run not cut short takes longer than the 1 s bounds a late wake cannot reach
     var trickle: [60]Write = undefined;
-    trickle[0] = .{ .bytes = try fake.headOf(a, "200 OK", "text/event-stream"), .pause_ms = 4 };
-    for (trickle[1..]) |*w| w.* = .{ .bytes = "x", .pause_ms = 4 };
+    trickle[0] = .{ .bytes = try fake.headOf(a, "200 OK", "text/event-stream"), .pause_ms = 25 };
+    for (trickle[1..]) |*w| w.* = .{ .bytes = "x", .pause_ms = 25 };
     const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "POST", .path = "/v1/completions", .replies = &.{&trickle} }});
     defer f.stop();
     const io = std.testing.io;
     var started = stream.now(io);
     const s = try one(f, a, suite.fixtures[0], opts(4, false, 0.04), 1.0, 1234);
     try std.testing.expectEqual(suite.ErrorCode.timeout, s.error_code.?);
-    try std.testing.expect(stream.now(io) - started < 300 * std.time.ns_per_ms);
+    try std.testing.expect(stream.now(io) - started < 1000 * std.time.ns_per_ms);
     stop.reset();
     defer stop.reset();
     started = stream.now(io);
@@ -143,7 +145,7 @@ test "a trickling reply times out, and Ctrl-C cancels the attempt and ends the r
         defer t.join();
         break :blk try stream.run(a, io, .{ .base = try f.url(a, ""), .served = "m" }, .{ .tokens = 4, .reps = 2, .temperatures = &.{1.0}, .serial = false, .timeout_s = 30 }, null);
     };
-    try std.testing.expect(stream.now(io) - started < 300 * std.time.ns_per_ms);
+    try std.testing.expect(stream.now(io) - started < 1000 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(usize, 1), samples.len);
     try std.testing.expect(samples[0].repeat == -1 and samples[0].error_code.? == .cancelled);
 }
@@ -277,12 +279,14 @@ test "an https exchange is never sent through a proxy that refuses to tunnel" {
     });
     defer f.stop();
     var proxy: std.http.Client.Proxy = .{ .protocol = .plain, .host = .{ .bytes = "127.0.0.1" }, .authorization = null, .port = f.port, .supports_connect = true };
-    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io, .https_proxy = &proxy };
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io, .https_proxy = &proxy, .now = std.Io.Clock.real.now(std.testing.io) };
     client.connection_pool.free_size = 0;
     defer client.deinit();
     const got = stream.fetch(a, std.testing.io, &client, .{ .url = "https://receiver.example.test/api/me", .token = "synthetic-contributor-token-0001", .limit = 64, .timeout_s = 5 });
     try std.testing.expect(got.failed == .network);
-    for (0..f.count()) |i| try std.testing.expectEqualStrings("CONNECT", f.request(i).method);
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+    try std.testing.expectEqualStrings("CONNECT", f.request(0).method);
+    try std.testing.expectEqualStrings("receiver.example.test:443", f.request(0).path);
 }
 
 test "an https exchange is never sent in clear text through a tunnel the proxy opened" {
@@ -293,7 +297,7 @@ test "an https exchange is never sent in clear text through a tunnel the proxy o
     const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "CONNECT", .path = "receiver.example.test:443", .replies = &.{&opened}, .tunnel = true }});
     defer f.stop();
     var proxy: std.http.Client.Proxy = .{ .protocol = .plain, .host = .{ .bytes = "127.0.0.1" }, .authorization = null, .port = f.port, .supports_connect = true };
-    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io, .https_proxy = &proxy };
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io, .https_proxy = &proxy, .now = std.Io.Clock.real.now(std.testing.io) };
     client.connection_pool.free_size = 0;
     defer client.deinit();
     const got = stream.fetch(a, std.testing.io, &client, .{ .url = "https://receiver.example.test/api/me", .token = "synthetic-contributor-token-0001", .limit = 64, .timeout_s = 1 });
@@ -319,8 +323,8 @@ test "a refused attempt keeps its fixed sample and code and hands back the serve
         &.{.{ .bytes = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 15\r\nConnection: close\r\n\r\n<html>x</html>\n" }},
         try fake.jsonReply(a, "400 Bad Request", "{\"error\": \"bad\\u001b[31m red\\u0007\\nline\"}"),
         try fake.jsonReply(a, "400 Bad Request", try std.mem.concat(a, u8, &.{ "{\"detail\": \"", &long, "\"}" })),
-        &.{ .{ .bytes = late_head, .pause_ms = 400 }, .{ .bytes = late_body } },
-        &.{ .{ .bytes = late_head, .pause_ms = 400 }, .{ .bytes = late_body } },
+        &.{ .{ .bytes = late_head, .pause_ms = 1000 }, .{ .bytes = late_body } },
+        &.{ .{ .bytes = late_head, .pause_ms = 1000 }, .{ .bytes = late_body } },
     } }});
     defer f.stop();
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io, .read_buffer_size = 576 << 10 };
@@ -343,7 +347,8 @@ test "a refused attempt keeps its fixed sample and code and hands back the serve
     const started = stream.now(io);
     const late = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, &said);
     const took: f64 = @floatFromInt(@as(i64, @intCast(stream.now(io) - started)));
-    try std.testing.expect(took >= 100e6 and took < 300e6 and late.error_code.? == .http_error);
+    // the body comes 1 s after the head: waiting for it takes 1 s or more, the 100 ms wait well under 900 ms
+    try std.testing.expect(took >= 100e6 and took < 900e6 and late.error_code.? == .http_error);
     try std.testing.expect(late.end_to_end_seconds.? * 1e9 < took - 50e6);
     try std.testing.expectEqualStrings("HTTP 400", said);
     const cut = stream.attempt(a, io, &client, target, opts(4, false, 0.05), suite.fixtures[0], 0.0, 1234, 0, &said);
@@ -375,4 +380,41 @@ test "an unbuffered refusal body is read after its head without a timed sender p
     try std.testing.expectEqual(@as(usize, 0), resp.request.reader.in.buffered().len);
     gate.set(io);
     try std.testing.expectEqualStrings(refusal_body, stream.errorBody(a, io, &resp));
+}
+
+fn checkDefaultMode(switchable: ?bool, applicable: ?bool) !void {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try fake.Fake.start(std.testing.allocator, &.{
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = &.{try fake.reply(a, true, 4, 2)} },
+    });
+    defer f.stop();
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io };
+    defer client.deinit();
+    const sample = stream.attempt(a, std.testing.io, &client, .{ .base = try f.url(a, ""), .served = "m", .thinking_switch = switchable, .thinking_applicable = applicable }, opts(4, false, 5), suite.fixtures[1], 0, 1234, 0, null);
+    // deliveries 2 ms apart may be read at once on a busy runner; the body is what this test checks
+    try std.testing.expect(sample.status == .ok or sample.status == .unmeasured);
+    const body_value = (try @import("json").parse(a, f.request(0).body)).ok;
+    try std.testing.expect(body_value.get("chat_template_kwargs") == null);
+}
+
+test "thinking benchmark: discovery reads only the selected model once" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try fake.Fake.start(std.testing.allocator, &.{
+        .{ .method = "GET", .path = "/v1/models", .replies = &.{try fake.jsonReply(a, "200 OK", "{\"data\":[{\"id\":\"other\",\"capabilities\":{\"thinking_switch\":true}},{\"id\":\"m\",\"capabilities\":{\"thinking_switch\":false}}]}")} },
+    });
+    defer f.stop();
+    try std.testing.expectEqual(@as(?bool, false), (try stream.discoverThinking(a, std.testing.io, .{ .base = try f.url(a, "/v1"), .served = "m" })).switchable);
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+    for ([_][]const u8{ "{}", "{\"data\":[{\"id\":\"m\"}]}", "{\"data\":[{\"id\":\"m\",\"capabilities\":{\"thinking_switch\":1}}]}", "{\"data\":[{\"id\":\"m\",\"capabilities\":{\"thinking_switch\":true}},{\"id\":\"m\",\"capabilities\":{\"thinking_switch\":false}}]}" }) |raw|
+        try std.testing.expectEqual(@as(?bool, null), stream.thinkingSwitch((try @import("json").parse(a, raw)).ok, "m"));
+}
+
+test "thinking benchmark: unsupported and inapplicable thinking omit the off field" {
+    try checkDefaultMode(false, true);
+    try checkDefaultMode(true, false);
+    try checkDefaultMode(null, false);
 }

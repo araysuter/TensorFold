@@ -52,7 +52,7 @@ pub const Weights = struct {
         var paired: std.AutoHashMapUnmanaged(usize, void) = .empty;
         defer paired.deinit(w.gpa);
         try paired.ensureTotalCapacity(w.gpa, @intCast(b.out.items.len));
-        if (w.pair_stacks orelse stacks.enabled()) {
+        if (w.pair_stacks orelse try stacks.enabled()) {
             const names = try w.gpa.alloc([]const u8, b.out.items.len);
             defer w.gpa.free(names);
             const lengths = try w.gpa.alloc(usize, b.out.items.len);
@@ -95,12 +95,10 @@ pub const Weights = struct {
             keys[i] = try w.gpa.dupe(u8, n.name);
             made += 1;
         }
-        const copy = try w.source.take(d, total);
         const buf = try cuda.DeviceBuffer.alloc(d, total);
         w.bufs.appendAssumeCapacity(buf);
         var offset: usize = 0;
         for (items, 0..) |n, i| {
-            @memcpy(copy[offset..][0..n.bytes.len], n.bytes);
             var sha: [32]u8 = @splat(0);
             if (w.digest) std.crypto.hash.sha2.Sha256.hash(n.bytes, &sha, .{});
             w.map.putAssumeCapacity(keys[i], .{ .ptr = buf.ptr + offset, .len = n.bytes.len, .kind = n.kind, .sha256 = sha, .shape = n.shape, .rank = n.rank });
@@ -108,8 +106,19 @@ pub const Weights = struct {
         }
         w.bytes = held;
         published = true;
-        w.dirty = true;
-        try w.source.copyTo(buf, 0, .{ .d = d, .handle = null });
+        offset = 0;
+        for (items) |n| {
+            var from: usize = 0;
+            while (from < n.bytes.len) {
+                const len = @min(n.bytes.len - from, @import("host_stage.zig").upload_chunk);
+                const copy = try w.source.take(d, len);
+                @memcpy(copy, n.bytes[from..][0..len]);
+                w.dirty = true;
+                try w.source.copyTo(buf, offset + from, .{ .d = d, .handle = null });
+                from += len;
+            }
+            offset += n.bytes.len;
+        }
     }
     pub fn get(w: *const Weights, name: []const u8) ?Tensor {
         return if (w.poisoned) null else w.map.get(name);
@@ -133,8 +142,9 @@ pub fn load(w: *Weights, d: *const cuda.Driver, io: std.Io, cfg: *const @import(
     try admitPlan(io, cfg, pack, plan);
     var b: named.Builder = .{ .gpa = w.gpa, .io = io, .pack = pack };
     defer b.deinit();
-    try b.all(plan, cfg.o_groups);
+    try @import("cuda_load_prefetch.zig").all(&b, plan, cfg, try @import("core").checkpoint_read_ahead.optInReaders());
     try w.upload(d, &b);
+    @import("core").checkpoint.cache.files(io, pack.dir, pack.files.items);
 }
 fn admitGroup(pack: *const @import("pack.zig").Pack, io: std.Io, group: @import("plan.zig").GroupPlan) !void {
     try admitWidth(try pack.codebook(io, group.prefix), group.part.group.k2());

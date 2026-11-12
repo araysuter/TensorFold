@@ -19,6 +19,10 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/gemma-4-12b" --port 888
   --drafter "$HOME/models/gemma-4-12b-assistant" --vision
 ```
 
+`--parallel 4` caps this example at four active requests; additional requests wait for a free slot.
+
+Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
+
 `gemma4_12b_convert.py` quantizes the language model's tensors with mlx-lm's converter to affine 4-bit in groups of
 64 (6.3 GB, 4.5 bits a weight with the scales), writes the image embedder's ten tensors as stored (bf16, 100 MB) to
 `model-vision.safetensors`, drops the audio input's, and writes the checkpoint's own `gemma4_unified` config back with
@@ -56,7 +60,7 @@ Served, one stream decodes at 140-248 tokens a second with it (prose 140, code 2
 | --- | --- |
 | The converted 12B, M5 Ultra, macOS 27 | Greedy and sampled decode, prompts to 252k, shared rounds, MTP drafts, structured output, prompt reuse, the server, below. |
 | `google/gemma-4-12B-it-assistant` `46d4c6f1` | The one MTP assistant admitted for the 12B. |
-| M1 to M4 | Refused: the lane projection needs M5 tensor units. |
+| M1 to M4 | Served through the row path (the fused lane projection needs M5 tensor units); the drafters refuse. |
 | Images | `--vision`: PNG and JPEG, 256 to 280 tokens an image, [below](#images). |
 | Audio | Not read: the converter drops the audio input, and the server takes no audio. |
 | Other widths | MLX affine 2-6 or 8 bits in groups of 64, uniform or per module: [other widths](#other-widths). |

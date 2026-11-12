@@ -2,8 +2,8 @@
 
 const std = @import("std");
 const registry = @import("core").registry;
-const tuning = @import("../tuning/tuning.zig");
 const affine = @import("affine.zig");
+const item = @import("matrix_item.zig");
 
 const Entry = affine.Entry;
 const Shape = registry.Shape;
@@ -186,6 +186,23 @@ fn fitsPrefillMatrix(s: Shape) bool {
     return prefillOk(s) and !s.fp16 and gemmFits(s);
 }
 
+/// The item tile's most rows a launch (`m`).
+const item_rows = 1024;
+
+/// An expert's average rows the 64-row item tile takes: past them it splits an expert and reads its weights twice.
+const item_expert_rows = 64;
+
+fn fitsPrefillItem(s: Shape) bool {
+    return fitsPrefillMatrix(s) and s.m <= item_rows and (s.expert_rows == 0 or s.expert_rows <= item_expert_rows);
+}
+
+/// The deepest product (codes a row) the skewed tile takes: past it a band of blocks outgrows the caches at 3 a WGP.
+const skew_k = 8192;
+
+fn fitsPrefillSkew(s: Shape) bool {
+    return fitsPrefillMatrix(s) and s.k <= skew_k;
+}
+
 fn fitsPrefillGemm(s: Shape) bool {
     return prefillOk(s) and gemmFits(s);
 }
@@ -248,6 +265,14 @@ fn launchKp(comptime tier: usize) Launch {
     }.f;
 }
 
+fn launchItem(comptime tier: usize) Launch {
+    return struct {
+        fn f(k: *const Kernels, c: Call) Error!void {
+            try item.go(k, c, tier);
+        }
+    }.f;
+}
+
 // ---- the entries
 
 /// What an entry is besides its op, path and name.
@@ -304,27 +329,34 @@ const other_decode = [_]Entry{
     entry(.routed_act, .decode, "stream", .{ .family = .stream, .fits = &fitsPair, .launch = &launchPair, .policy = &streamOn }),
 };
 
-fn prefill(comptime op: Op) [7]Entry {
+fn prefill(comptime op: Op) [8]Entry {
+    // a plain prompt product rounds into out16 when asked; a routed one writes fp32 for the expert combine
+    const r: registry.Rounds = if (op == .project) .always else .never;
     return .{
-        entry(op, .prefill, "kp0", .{ .family = .gemm, .fits = kpFits(0), .launch = launchKp(0), .policy = &gemmOn }),
-        entry(op, .prefill, "kp1", .{ .family = .gemm, .fits = kpFits(1), .launch = launchKp(1), .policy = &gemmOn }),
-        entry(op, .prefill, "kp2", .{ .family = .gemm, .fits = kpFits(2), .launch = launchKp(2), .policy = &gemmOn }),
-        entry(op, .prefill, "kp3", .{ .family = .gemm, .fits = kpFits(3), .launch = launchKp(3), .policy = &gemmOn }),
-        entry(op, .prefill, "matrix", .{ .family = .gemm, .fits = &fitsPrefillMatrix, .launch = launchBlock(.matrix), .caps = &matrixCores, .policy = &matrixOn }),
-        entry(op, .prefill, "gemm", .{ .family = .gemm, .fits = &fitsPrefillGemm, .launch = launchBlock(.gemm), .policy = &gemmOn }),
-        entry(op, .prefill, "block", .{ .family = .gemm, .fits = &fitsPrefillBlock, .launch = launchBlock(.block) }),
+        entry(op, .prefill, "kp0", .{ .family = .gemm, .fits = kpFits(0), .launch = launchKp(0), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "kp1", .{ .family = .gemm, .fits = kpFits(1), .launch = launchKp(1), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "kp2", .{ .family = .gemm, .fits = kpFits(2), .launch = launchKp(2), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "kp3", .{ .family = .gemm, .fits = kpFits(3), .launch = launchKp(3), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "matrix", .{ .family = .gemm, .fits = &fitsPrefillMatrix, .launch = launchBlock(.matrix), .caps = &matrixCores, .policy = &matrixOn, .rounds = r }),
+        entry(op, .prefill, "skew", .{ .family = .gemm, .fits = &fitsPrefillSkew, .launch = launchBlock(.skew), .caps = &matrixCores, .policy = &matrixOn, .rounds = r }),
+        entry(op, .prefill, "gemm", .{ .family = .gemm, .fits = &fitsPrefillGemm, .launch = launchBlock(.gemm), .policy = &gemmOn, .rounds = r }),
+        entry(op, .prefill, "block", .{ .family = .gemm, .fits = &fitsPrefillBlock, .launch = launchBlock(.block), .rounds = r }),
     };
 }
 
-pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed);
+/// The routed prompt's matrix-core tile of 64 rows an item, the 128-row tile's bits for items of few rows.
+const routed_item = [_]Entry{
+    entry(.routed, .prefill, "item64", .{ .family = .gemm, .fits = &fitsPrefillItem, .launch = launchItem(0), .caps = &matrixCores, .policy = &matrixOn }),
+};
+
+pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed) ++ routed_item;
 
 // ---- the choices on the GPUs' tables
 
 const Caps = @import("../caps.zig").Caps;
 
 fn kernelsOn(gfx: []const u8) affine.Registry {
-    const caps = Caps.of(gfx).?;
-    return affine.Registry.init(if (caps.generation == .rdna2) &tuning.gfx1030 else &tuning.gfx1100, &all);
+    return affine.Registry.init(Kernels.tableFor(Caps.of(gfx).?), &all);
 }
 
 fn envOn(gfx: []const u8, stream_on: bool, gemm_on: bool, matrix_on: bool) Env {
@@ -334,7 +366,7 @@ fn envOn(gfx: []const u8, stream_on: bool, gemm_on: bool, matrix_on: bool) Env {
 }
 
 test "a lane round and a prompt each keep one family at every row count, on every GPU and policy" {
-    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151" }) |gfx| {
+    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1201" }) |gfx| {
         const r = kernelsOn(gfx);
         for ([_]bool{ true, false }) |matrix_on| try r.verify(envOn(gfx, true, true, matrix_on), .mlx);
     }
@@ -405,4 +437,110 @@ test "a prompt takes the K-parallel tiles by rows and by items, then the 128-row
     shape.items = 350;
     shape.m = 10;
     try std.testing.expect(std.mem.endsWith(u8, v.select(envOn("gfx1030", true, true, false), .mlx, .routed, .prefill, shape).?.id, "kp1"));
+}
+
+test "a routed prompt past its pairs per item leaves the K-parallel tiles for the 128-row tile" {
+    const tuning = @import("../tuning/tuning.zig");
+    const bounded = comptime blk: {
+        var rows: [tuning.gfx1201.rows.len]tuning.Row = undefined;
+        for (tuning.gfx1201.rows, 0..) |r, i| {
+            rows[i] = r;
+            if (std.mem.eql(u8, r.id, "mlx.routed.prefill.kp3") or std.mem.eql(u8, r.id, "mlx.routed.prefill.kp1")) rows[i].pairs_per_item = 3;
+        }
+        break :blk rows;
+    };
+    const table: tuning.Table = .{ .gfx = "gfx1201", .rows = &bounded };
+    const r = affine.Registry.init(&table, &all);
+    const unbounded = kernelsOn("gfx1100");
+    const env = envOn("gfx1201", true, true, false);
+    var shape: Shape = .{ .m = 8, .n = 1024, .k = 2048, .bits = 4, .group = 64, .fp16 = false, .items = 300 };
+    for ([_]struct { u32, []const u8 }{ .{ 0, "kp3" }, .{ 900, "kp3" }, .{ 901, "gemm" }, .{ 2400, "gemm" } }) |w| {
+        shape.plan_pairs = w[0];
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
+        // a table without the field bounds no pairs, up to 8 an item
+        try std.testing.expect(std.mem.endsWith(u8, unbounded.select(env, .mlx, .routed, .prefill, shape).?.id, "kp3"));
+    }
+    // a fractional bound: 3.5 pairs an item takes 1,050 pairs over 300 items and refuses 1,051
+    var half = bounded;
+    for (&half) |*row| if (row.pairs_per_item != 0) {
+        row.pairs_per_item = 3.5;
+    };
+    const h = affine.Registry.init(&.{ .gfx = "gfx1201", .rows = &half }, &all);
+    shape.plan_pairs = 1050;
+    try std.testing.expect(std.mem.endsWith(u8, h.select(env, .mlx, .routed, .prefill, shape).?.id, "kp3"));
+    shape.plan_pairs = 1051;
+    try std.testing.expect(std.mem.endsWith(u8, h.select(env, .mlx, .routed, .prefill, shape).?.id, "gemm"));
+}
+
+test "gfx1201 takes the K-parallel tile for short routed prompts, up to its items and pairs per item" {
+    const r = kernelsOn("gfx1201");
+    const env = envOn("gfx1201", true, true, false);
+    // each model's served plans on both sides of a bound: n, k, group, items, pairs and the tile
+    const want = [_]struct { u32, u32, u16, u32, u32, []const u8 }{
+        .{ 1024, 2048, 64, 401, 1152, "kp3" }, // Qwen3.6, 128 tokens
+        .{ 1024, 2048, 64, 545, 1161, "gemm" }, // 129
+        .{ 1856, 2688, 64, 224, 768, "kp3" }, // Nemotron, 128 tokens, as before
+        .{ 1856, 2688, 64, 320, 1116, "kp3" }, // 186
+        .{ 1856, 2688, 64, 320, 1122, "gemm" }, // 187
+        .{ 1280, 2560, 32, 507, 451, "kp3" }, // Flash Next, 41 rows
+        .{ 1280, 2560, 32, 519, 462, "gemm" }, // 42
+    };
+    for (want) |w| {
+        const shape: Shape = .{ .m = 128, .n = w[0], .k = w[1], .bits = 4, .group = w[2], .fp16 = false, .items = w[3], .plan_pairs = w[4] };
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[5]));
+    }
+}
+
+test "gfx1151 takes the 64-row routed tile while its experts average 64 rows or fewer each, the skewed 128-row tile past them" {
+    const moe = @import("../moe.zig");
+    const r = kernelsOn("gfx1151");
+    const env = envOn("gfx1151", true, true, true);
+    // each model's served gate and up, the way moe.expertRows builds the plan's average rows an expert
+    const models = [_]struct { experts: usize, top_k: usize, slots: usize, n: u32, k: u32, group: u16, rows: u32, tile: []const u8 }{
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 128, .tile = "item64" }, // Flash Next
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 1024, .tile = "item64" },
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 2048, .tile = "item64" },
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 4096, .tile = "skew" },
+        .{ .experts = 512, .top_k = 10, .slots = 11, .n = 1280, .k = 2560, .group = 32, .rows = 6554, .tile = "skew" },
+        .{ .experts = 256, .top_k = 8, .slots = 9, .n = 1024, .k = 2048, .group = 64, .rows = 2048, .tile = "item64" }, // Qwen3.6-35B-A3B
+        .{ .experts = 256, .top_k = 8, .slots = 9, .n = 1024, .k = 2048, .group = 64, .rows = 2056, .tile = "skew" },
+        .{ .experts = 128, .top_k = 6, .slots = 6, .n = 1856, .k = 2688, .group = 64, .rows = 1024, .tile = "item64" }, // Nemotron 3.5 Lightning 30B-A3B
+        .{ .experts = 128, .top_k = 6, .slots = 6, .n = 1856, .k = 2688, .group = 64, .rows = 2048, .tile = "skew" },
+    };
+    for (models) |w| {
+        const rows = w.rows;
+        const expert_rows = moe.expertRows(rows, w.top_k, w.experts);
+        const pairs = rows * w.slots;
+        const items = @min(pairs, w.experts) + pairs / 8;
+        const arg: affine.Arg = .{
+            .x = 0,
+            .words = 0,
+            .scale = .{ .p = 0, .kind = 1 },
+            .bias = .{ .p = 0, .kind = 1 },
+            .out = 0,
+            .m = @intCast(@min(rows, 128)),
+            .n = @intCast(w.n),
+            .k = @intCast(w.k),
+            .bits = 4,
+            .group = @intCast(w.group),
+            .fp16 = 0,
+            .route = .{ .items = 1, .members = 1 },
+        };
+        const shape = Kernels.prefillShape(arg, @intCast(items), @intCast(pairs), @intCast(expert_rows));
+        try std.testing.expect(shape.expert_rows == expert_rows);
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w.tile));
+    }
+}
+
+test "gfx1151 takes the skewed matrix tile for prompts up to skew_k codes deep, the padded one past them" {
+    const r = kernelsOn("gfx1151");
+    const env = envOn("gfx1151", true, true, true);
+    // Qwen3.8-27B's gate and up, both sides of skew_k, and the 27B's down
+    for ([_]struct { u32, u32, []const u8 }{ .{ 17408, 5120, "skew" }, .{ 5120, skew_k, "skew" }, .{ 5120, skew_k + 64, "matrix" }, .{ 5120, 17408, "matrix" } }) |w| {
+        const shape: Shape = .{ .m = 2048, .n = w[0], .k = w[1], .bits = 4, .group = 64, .fp16 = false };
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .project, .prefill, shape).?.id, w[2]));
+    }
+    // gfx1100's table has no row for it
+    const shape: Shape = .{ .m = 2048, .n = 17408, .k = 5120, .bits = 4, .group = 64, .fp16 = false };
+    try std.testing.expect(std.mem.endsWith(u8, kernelsOn("gfx1100").select(envOn("gfx1100", true, true, true), .mlx, .project, .prefill, shape).?.id, "matrix"));
 }

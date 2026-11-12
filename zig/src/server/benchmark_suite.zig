@@ -104,7 +104,12 @@ pub const Sample = struct {
     error_code: ?ErrorCode = null,
     finish_reason: ?[]const u8 = null,
     route: ?[]const u8 = null,
+    /// The server's draft counters for this attempt; kept in the local draft counts file, never in the receipt.
+    drafts: ?Drafts = null,
 };
+
+/// A reply's ``speculative`` counters: verify rounds, tokens a drafter proposed and tokens the target kept.
+pub const Drafts = struct { rounds: u64, drafted: u64, accepted: u64 };
 
 /// A cell's medians are set only when every declared repeat is ok.
 pub const Cell = struct {
@@ -298,6 +303,9 @@ pub fn receiptCells(a: Allocator, v: json.Value) ![]Cell {
     const sid = protocol(v.get("suite") orelse return error.UnknownProtocol) orelse return error.UnknownProtocol;
     const stg = v.get("settings") orelse return error.UnknownProtocol;
     const out = try cells(a, v.get("samples").?.array, @intFromFloat(number(stg.get("repetitions")).?));
-    for (out) |*c| c.protocol = sid;
+    for (out) |*c| {
+        c.protocol = sid;
+        if (stg.get("thinking_mode") != null) c.protocol_complete = false;
+    }
     return out;
 }

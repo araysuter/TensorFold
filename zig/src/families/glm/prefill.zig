@@ -6,8 +6,8 @@ const Stream = @import("lanes").Stream;
 pub const decode_rows: u32 = 256;
 pub const State = struct { stream: *Stream, slot: u32, at: u32 = 0, next: usize = 0 };
 
-/// `b` is the real backend or a fake engine at the same prepare/chunk/finish boundary.
-pub fn step(b: anytype, s: *Stream) !bool {
+/// `b` is the real backend or a fake engine at the same prepare/chunk/finish boundary. `_: u32` keeps its 2048 grid.
+pub fn step(b: anytype, s: *Stream, _: u32) !bool {
     errdefer b.abortPrompt(s);
     if (s.isCancelled()) return error.Cancelled;
     if (!b.filling.contains(s)) {
@@ -23,6 +23,7 @@ pub fn step(b: anytype, s: *Stream) !bool {
         const n = b.promptRows(p.at, end);
         if (n == 0 or n > end - p.at) return error.ChunkOutOfStep;
         try b.chunkPrompt(s, p.slot, p.at, n);
+        @import("lanes").prefill_widths.completed(b.gpa, s, n);
         p.at += n;
         s.fill_at.store(p.at, .monotonic);
         if (std.mem.indexOfScalar(u32, s.reuse.marks, p.at) != null) if (s.reuse.hook) |h| h.at(h.ptr, s, p.at);

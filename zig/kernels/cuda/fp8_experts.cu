@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "experts.cuh"
+#include "common/fp_pairs.cuh"
 
 namespace tf_fp8_experts {
 
@@ -11,20 +12,9 @@ constexpr int LANE4 = 2;
 constexpr int BLOCK4 = 32 * LANE4;
 constexpr int PER_SCALE = 4;
 
-__device__ __forceinline__ uint4 ld_nc(const uint4* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
+__device__ __forceinline__ uint4 ld_nc(const uint4* p) { return tf_common::ld_nc(p); }
 
-__device__ __forceinline__ uint32_t fp8pair(uint32_t v) {
-  const uint32_t t = ((v & 0x7Fu) << 4) | ((v & 0x80u) << 8) | ((v & 0x7F00u) << 12) | ((v & 0x8000u) << 16);
-  uint32_t r;
-  asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x7B807B80u), "r"(0x80008000u));
-  return r;
-}
+using tf_common::fp8pair;
 
 template <int M>
 struct Stage {
@@ -151,7 +141,7 @@ __global__ void __launch_bounds__(PWARPS * 32, PMIN)
                              const int* __restrict__ items, const int* __restrict__ counts,
                              const int* __restrict__ members, void* __restrict__ out, int N, float limit, int skip) {
   constexpr int RW = PromptCfg<M, RT, CW>::RW;
-  __shared__ uint4 sw[PSTAGES][CW][M][LANE4][32];
+  __shared__ uint4 sw[PSTAGES][CW][M * BLOCK4];
   __shared__ uint4 sx[PSTAGES][64][4];
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
   const int cw = warp % CW, rw = warp / CW;
@@ -190,8 +180,7 @@ __global__ void __launch_bounds__(PWARPS * 32, PMIN)
       }
       for (int i = threadIdx.x; i < CW * M * BLOCK4; i += PWARPS * 32) {
         const int c = i / (M * BLOCK4), j = i % (M * BLOCK4);
-        const int m = j / BLOCK4, l = (j % BLOCK4) / LANE4, h = j % LANE4;
-        cp16(&sw[g % PSTAGES][c][m][h][l], base + ((size_t)c * KG + g) * (M * BLOCK4) + j);
+        cp16(&sw[g % PSTAGES][c][j], base + ((size_t)c * KG + g) * (M * BLOCK4) + j);
       }
     };
     __syncthreads();
@@ -235,11 +224,15 @@ __global__ void __launch_bounds__(PWARPS * 32, PMIN)
         }
 #pragma unroll
         for (int m = 0; m < M; ++m) {
-          const uint4 wv = sw[g % PSTAGES][cw][m][h][lane];
+          const uint4 wv = sw[g % PSTAGES][cw][m * BLOCK4 + lane * LANE4 + h];
 #pragma unroll
           for (int j = 0; j < NTW; ++j) {
             const uint32_t word = comp(wv, j);
+#if TF_FP_NATIVE
+            const uint32_t b0 = tf_common::e4m3x2(word), b1 = tf_common::e4m3x2(word >> 16);
+#else
             const uint32_t b0 = fp8pair(word), b1 = fp8pair(word >> 16);
+#endif
 #pragma unroll
             for (int r = 0; r < RT; ++r) mma(part[m][r][j], xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
           }

@@ -6,6 +6,8 @@ const Run = replay.Run;
 const Buf = replay.Buf;
 const Variant = replay.Variant;
 const Hc = replay.Hc;
+const experts4 = @import("experts4.zig");
+const rows_w = @import("rows_w.zig");
 
 /// A recorded `constexpr int` and the value it takes.
 pub const Const = struct { name: []const u8, value: usize };
@@ -32,14 +34,17 @@ pub fn table(r: *Run, name: []const u8) ![]const u32 {
 pub fn patched(r: *Run, v: *Variant, consts: []const Const) !*Variant {
     var key: std.ArrayList(u8) = .empty;
     try key.appendSlice(r.arena, v.name);
+    const slotted = r.fsr != null and r.fsr.?.pool != null and std.mem.indexOf(u8, v.name, "qa_expert_") != null;
+    if (slotted) try key.appendSlice(r.arena, "|fsr");
+    const ix = r.sb_index and std.mem.indexOf(u8, v.name, "qa_expert_") != null and experts4.q4(consts);
+    if (ix) try key.appendSlice(r.arena, "|ix");
     for (consts) |c| try key.print(r.arena, "|{s}={d}", .{ c.name, c.value });
     if (r.variants.get(key.items)) |hit| return hit;
-    var text = try Run.variantText(r.arena, v);
-    for (consts) |c| text = try constant(r.arena, text, c.name, c.value);
-    const lib = try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx());
+    const text = try source(r.arena, try Run.variantText(r.arena, v), consts, rows_w.nib(r.device.generation(), 2) == 1, slotted, std.mem.indexOf(u8, v.name, "gateup") != null, ix);
+    const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
     const nv = try r.arena.create(Variant);
     nv.* = v.*;
-    nv.pipe = try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{v.name}, 0), false);
+    nv.pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{v.name}, 0), false));
     nv.text = text;
     try r.variants.put(r.arena, key.items, nv);
     return nv;
@@ -47,7 +52,7 @@ pub fn patched(r: *Run, v: *Variant, consts: []const Const) !*Variant {
 
 /// `role` launched as recorded at `as_rows` rows on its kernel at `consts` (Run.callAs when there are none).
 pub fn callAs(r: *Run, role: []const u8, as_rows: usize, ins: []const Buf, outs: []const Buf, consts: []const Const) !void {
-    if (consts.len == 0) return r.callAs(role, as_rows, ins, outs);
+    if (consts.len == 0 and !(r.fsr != null and r.fsr.?.pool != null and std.mem.indexOf(u8, role, "qa_expert_") != null)) return r.callAs(role, as_rows, ins, outs);
     if (r.skip & Run.class(role) != 0) return;
     if (r.hcskip != 0) for ([_][]const u8{ "hc_norm", "hc_down", "hc_up" }, 0..) |n, i| {
         if (r.hcskip & (@as(u32, 1) << @intCast(i)) != 0 and std.mem.indexOf(u8, role, n) != null) return;
@@ -83,11 +88,21 @@ pub fn four(buf: *[4]Const, w: [4]usize) []const Const {
 }
 
 /// The routed and shared experts on the recorded any-width kernels at `w` (Run.experts' recorded path).
-pub fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: Buf, e: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf, w: Experts) !void {
+pub fn experts(r: *Run, gu_role: []const u8, down_role: []const u8, x: Buf, lg: Buf, e_direct: [18]Buf, act: Buf, pick: Buf, wts: Buf, rows_buf: Buf, y: Buf, w: Experts) !void {
     if (r.skip & (1 << 2) != 0) return;
+    var e = e_direct;
     var cg: [4]Const = undefined;
     var cd: [4]Const = undefined;
+    if (r.sb_index) for (0..6) |j| { // a 4/32 kernel's projections: index and table in the scales' and biases' slots
+        if (!experts4.q4(if (j < 4) four(&cg, w.gu) else four(&cd, w.down))) continue;
+        const p = r.sbix.get(@import("scale_index.zig").keyOf(e[j * 3 + 1])) orelse return error.NoScaleIndex;
+        e[j * 3 + 1] = p[0];
+        e[j * 3 + 2] = p[1];
+    };
+    if (r.fsr) |stream| if (stream.pool != null) stream.bind(r, 18, 19, 0);
+    r.enc.setBuffer(rows_buf.b, rows_buf.off, 17); // the 4/32 gate/up's row count (experts4.gated)
     try callAs(r, gu_role, r.rows, &.{ x, lg, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11] }, &.{ act, pick, wts }, four(&cg, w.gu));
+    if (r.fsr) |stream| if (stream.pool != null) stream.bind(r, 10, 11, 0);
     try callAs(r, down_role, r.rows, &.{ act, pick, e[12], e[13], e[14], e[15], e[16], e[17], rows_buf }, &.{y}, four(&cd, w.down));
 }
 
@@ -107,4 +122,16 @@ pub fn hcOf(r: *Run, comptime fmt: []const u8, args: anytype) !Hc {
         hc.w = .{ .{ v[0], v[1] }, .{ v[2], v[3] } };
     }
     return hc;
+}
+
+/// The loader's width and expert-layout transformations before compilation.
+pub fn source(a: std.mem.Allocator, original: []const u8, consts: []const Const, half_lanes: bool, slotted: bool, gate_up: bool, ix: bool) ![]const u8 {
+    var text = original;
+    for (consts) |c| text = try constant(a, text, c.name, c.value);
+    if (experts4.halfApplies(text, consts) and half_lanes) text = try experts4.half(a, text);
+    if (experts4.applies(text, consts)) text = try experts4.balanced(a, text);
+    if (experts4.gateApplies(text, consts)) text = try experts4.gated(a, text);
+    if (ix) text = try experts4.indexed(a, text, consts);
+    if (slotted) text = try @import("fsr_source.zig").patch(a, text, if (gate_up) .gate else .down);
+    return text;
 }

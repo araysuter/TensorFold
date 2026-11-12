@@ -6,12 +6,14 @@ const Engine = @import("engine.zig").Engine;
 const Buf = fz.Buf;
 
 pub const Session = struct {
+    follow: ?mtl.ResidencySet.Follow = null,
     m: fz.Model,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     select: [fz.CATCH]?fz.Select = @splat(null),
     draft_select: [fz.MAXR]?fz.Select = @splat(null),
     draft_ids: Buf = undefined,
     shape: mtl.Buffer = undefined,
+    blocks: Buf = undefined, // an image stream's indexer block positions [cap / 4 + 1, 3] (int32), the standard frame's (m.bpos)
     last: Buf = undefined,
     held: [fz.MAXR]u32 = @splat(0),
     held_n: usize = 0,
@@ -28,7 +30,7 @@ pub const Session = struct {
         s.m.pos = 0;
         s.m.state = 0;
         s.m.state_row = 0;
-        s.m.recs = null;
+        if (!original) s.m.recs = null; // the GPU-side rounds run on the engine's own session
         s.m.marks = null;
         if (!original) {
             for (&s.m.layers) |*l| if (l.linear) {
@@ -47,6 +49,7 @@ pub const Session = struct {
         s.m.t.kvmeta = try s.words(gpa, e, &.{ 0, @intCast(s.m.cap), 1 });
         s.m.t.ple_ids = try s.buffer(gpa, e, fz.MAXR * 16 * 4);
         s.shape = (try s.words(gpa, e, &.{ 1, 2, @intCast(s.m.cap), 256 })).b;
+        s.blocks = try s.buffer(gpa, e, blockCount(s.m.cap) * 3 * 4);
         s.last = try s.buffer(gpa, e, fz.WIDE * 2);
         for (&s.select) |*sel| {
             sel.* = try s.selector(gpa, e);
@@ -67,10 +70,22 @@ pub const Session = struct {
         return s;
     }
 
-    fn buffer(s: *Session, gpa: std.mem.Allocator, e: *Engine, size: usize) !Buf {
-        const b = try e.r.device.buffer(@max(size, 64), fz.opts);
+    fn blockCount(cap: usize) usize {
+        return cap / 4 + 1;
+    }
+
+    /// An image stream's indexer block positions (the standard frame) into `blocks`: the rounds pool by them.
+    pub fn imageBlocks(s: *Session, v: *const fz.vis_prompt.VisPrompt) void {
+        v.blockPositions(s.blocks.b.slice(i32, blockCount(s.m.cap) * 3), 0, blockCount(s.m.cap));
+        s.m.bpos = s.blocks;
+        s.m.delta = v.delta;
+    }
+
+    pub fn buffer(s: *Session, gpa: std.mem.Allocator, e: *Engine, size: usize) !Buf {
+        const b = try e.r.allocate(@max(size, 64));
         errdefer b.deinit();
         try s.owned.append(gpa, b);
+        if (s.follow) |f| f.join(f.ctx, b);
         @memset(b.contents()[0..@max(size, 64)], 0);
         return .{ .b = b };
     }
@@ -125,9 +140,10 @@ pub const Session = struct {
         h.pooled_n = @min(h.pooled_n, h.pos / 4);
         @memcpy(h.slots[0].ids8.b.slice(u32, follow.len), follow);
         const cb = r.queue.commandBuffer();
-        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        r.begin(cb, if (r.serial) .serial else .concurrent);
+        errdefer if (r.fsr != null) r.abort();
         var ended = false;
-        errdefer if (!ended) r.enc.end();
+        errdefer if (!ended) r.abort();
         for (0..depth) |i| {
             r.sel = s.draft_select[i];
             const rows = if (i == 0) follow.len else 1;
@@ -173,6 +189,13 @@ pub const Session = struct {
         d.ple.hist = m.ple.hist;
         d.mtp.pos = m.mtp.pos;
         d.mtp.drafted = m.mtp.drafted;
+        d.delta = m.delta;
+        d.bpos = null;
+        if (m.bpos != null) { // the block positions it has, then the blocks past them at their slot plus delta
+            const out = dst.blocks.b.slice(i32, blockCount(d.cap) * 3);
+            fz.vis_prompt.moveBlocks(out, s.blocks.b.slice(i32, blockCount(m.cap) * 3), m.delta);
+            d.bpos = dst.blocks;
+        }
         dst.held = s.held;
         dst.held_n = s.held_n;
         dst.first = s.first;
@@ -223,7 +246,16 @@ pub const Session = struct {
         s.held_n = depth;
     }
 
+    pub fn setResident(s: *Session, hook: ?mtl.ResidencySet.Follow) void {
+        for (s.owned.items) |b| {
+            if (s.follow) |f| f.leave(f.ctx, b);
+            if (hook) |f| f.join(f.ctx, b);
+        }
+        s.follow = hook;
+    }
+
     pub fn deinit(s: *Session, gpa: std.mem.Allocator) void {
+        s.setResident(null);
         for (s.owned.items) |b| b.deinit();
         s.owned.deinit(gpa);
     }
@@ -267,6 +299,6 @@ pub const Session = struct {
     /// Metadata and selectors are owned even when the original engine supplies this slot's caches.
     pub fn overhead(capacity: usize) u64 {
         return fz.CATCH * (fz.MAXR * ((capacity + 3) / 4) * 4 + fz.MAXR * fz.KW * 4 + 4096) +
-            fz.MAXR * 17 * 64 + 64 + (2 << 20);
+            fz.MAXR * 17 * 64 + 64 + @max(blockCount(capacity) * 3 * 4, 64) + (2 << 20);
     }
 };

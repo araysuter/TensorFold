@@ -84,6 +84,62 @@ pub fn causal(o: Ops, q: u64, kind: t.Kind, out: u64, p: Plan, layer: usize, hea
     try (try launcher(o)).planCausal(q, out, scores, stats, partials, p, layer, heads, kv_heads, d, span, scale, @backingInt(kind), o.stream);
 }
 
+/// `kvWrite` of keys in the activation kind (as `values`): the cache bytes of their fp32 cast.
+pub fn kvWriteAct(o: Ops, keys: Tensor, values: Tensor, p: Plan, layer: usize, kv_heads: usize, d: usize) Error!void {
+    if (values.kind == .f32 or keys.kind != values.kind) return error.BadShape;
+    try (try launcher(o)).planKvWriteAct(
+        keys.ptr,
+        values.ptr,
+        @backingInt(values.kind),
+        p,
+        layer,
+        kv_heads,
+        d,
+        o.stream,
+    );
+}
+
+/// `causal` with q and out in the activation kind `kind`: the bytes of q cast to fp32 and the output cast back.
+pub fn causalAct(
+    o: Ops,
+    q: Tensor,
+    out: Tensor,
+    p: Plan,
+    layer: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    span: usize,
+    scale: f32,
+) Error!void {
+    if (q.kind == .f32 or q.kind != out.kind) return error.BadShape;
+    const k: c_int = @backingInt(q.kind);
+    const l = try launcher(o);
+    if (o.fused() and try l.planAttend(q.ptr, k, out.ptr, k, p, layer, heads, kv_heads, d, span, scale, k, o.stream))
+        return;
+    const tiles = (span + 127) / 128;
+    const scores = try o.arena.of(f32, p.rows * heads * span);
+    const stats = try o.arena.of(f32, p.rows * heads * 2);
+    const partials = try o.arena.of(f32, p.rows * heads * tiles * d);
+    try (try launcher(o)).planCausalAs(
+        q.ptr,
+        out.ptr,
+        scores,
+        stats,
+        partials,
+        p,
+        layer,
+        heads,
+        kv_heads,
+        d,
+        span,
+        scale,
+        @backingInt(q.kind),
+        true,
+        o.stream,
+    );
+}
+
 /// Keeps the listed slots' rows (see `launches.PlanKeep`).
 pub fn keep(o: Ops, p: Plan, k: Keep) Error!void {
     try (try launcher(o)).planKeep(p, k, o.stream);
@@ -97,4 +153,16 @@ pub fn gdnReplay(o: Ops, keep_counts: u64, p: Plan, key_heads: usize, value_head
 /// Row r of `dst` (`words` words each) from the address in `srcs[r]` (device u64s), for `rows` rows.
 pub fn gather(o: Ops, srcs: u64, dst: u64, words: usize, rows: usize) Error!void {
     try (try launcher(o)).planGather(srcs, dst, words, rows, o.stream);
+}
+
+/// Each round row's residual into its slot's tap ring as tap `tap` of `taps` (see `launches.planTap`).
+pub fn tap(o: Ops, x: Tensor, p: Plan, hidden: usize, index: usize, taps: usize, tap_rows: usize) Error!void {
+    if (x.kind.size() != 2) return error.BadShape;
+    try (try launcher(o)).planTap(x.ptr, p, hidden, index, taps, tap_rows, o.stream);
+}
+
+/// A prompt's rows at positions `pos0` on into one stream's tap ring (see `launches.tapRows`).
+pub fn tapRows(o: Ops, x: Tensor, ring: u64, rows: usize, hidden: usize, index: usize, taps: usize, tap_rows: usize, pos0: usize) Error!void {
+    if (x.kind.size() != 2) return error.BadShape;
+    try (try launcher(o)).tapRows(x.ptr, ring, rows, hidden, index, taps, tap_rows, pos0, o.stream);
 }

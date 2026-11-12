@@ -29,10 +29,15 @@ pub const Sampled = struct { sampling: Sampling, position: u64 };
 /// How a row is drawn: argmax (ties to the lowest id), or the keyed GPU sampler.
 pub const Draw = union(enum) { greedy, sampled: Sampled };
 
+/// A stream's draw at `position`: argmax, or its keyed sampler (rows after it at the next positions).
+pub fn drawOf(s: *const @import("lanes").Stream, position: u64) Draw {
+    return if (s.sampling) |t| .{ .sampled = .{ .sampling = t, .position = position } } else .greedy;
+}
+
 /// Where a segment's Mamba state goes: after all its rows (prompts, steps), its replayed rows (windows), or each row.
 pub const Store = enum { full, lag, all };
 
-/// One stream's rows in a forward: its cache (its replayed rows run first), the state slot it stores (-1: none), its draw.
+/// One stream's rows in a forward: its cache (replayed rows run first), the state slot it stores (-1: none), its draw.
 pub const Seg = struct {
     rows: usize,
     cache: *st.Cache,
@@ -135,7 +140,7 @@ pub const Forward = struct {
         var calls: [3]row.simd_bits.Call = undefined;
         for (parts, 0..) |m, i| {
             if (!tiled(m.rows)) return false;
-            calls[i] = row.simd_bits.call(p, m.rows.bits, m.rows.n, m.rows.k, rows, lin.n, false) catch return false;
+            calls[i] = row.simd_bits.call(p, m.rows.bits, m.rows.n, m.rows.k, rows, lin.n, false, 0) catch return false;
         }
         for (parts, calls[0..parts.len]) |m, c| {
             e.pipe(c.pipeline);
@@ -434,8 +439,8 @@ fn splits(comptime key: []const u8) bool {
 
 var split_mode: enum(u8) { unread, on, off } = .unread;
 
-/// TF_COOP_SPLIT=0 keeps one threadgroup a column tile, as the Python engine dispatches.
-fn splitOn() bool {
+/// TF_COOP_SPLIT=0 keeps one threadgroup a column tile, as the Python engine dispatches (read once a process).
+pub fn splitOn() bool {
     if (split_mode == .unread) {
         const v = platform.c.getenv("TF_COOP_SPLIT");
         split_mode = if (v != null and v.?[0] == '0') .off else .on;

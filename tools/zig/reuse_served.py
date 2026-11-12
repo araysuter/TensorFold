@@ -130,7 +130,7 @@ class Conv:
 
 
 def fits(cached, allowed) -> bool:
-    """A cached count against a list of positions, or a {"min", "max"} range (planned families floor marks to chunk starts)."""
+    """A cached count vs positions, or a {"min","max"} range (planned families floor marks to chunk starts)."""
     if allowed is None:
         return True
     if isinstance(allowed, dict):
@@ -182,10 +182,21 @@ class Recorder:
               flush=True)
         self.i += 1
 
+    def resume_len(self, conv: Conv, prompt: list[int]) -> int:
+        """The rendered history the next turn repeats, under the prompt (a state needs a row left to draw from)."""
+        hist = self.c.tokens(conv.messages, conv.tools, conv.thinking, False)
+        if conv.messages[-1]["role"] == "tool":  # a template may close the turn after a tool reply only while no assistant message follows
+            more = self.c.tokens(conv.messages + [{"role": "assistant", "content": PROBE}], conv.tools, conv.thinking, False)
+            n = 0
+            while n < min(len(hist), len(more)) and hist[n] == more[n]:
+                n += 1
+            hist = hist[:n]
+        return min(len(hist), len(prompt) - 1)
+
     def turn(self, conv: Conv, allowed: list[int] | None, tool_text: tuple[str, str], plain: bool = True, plain_allowed: list[int] | None = None) -> dict:
         """One turn: drafted, then "draft": false on the same messages (it resumes this turn's own history)."""
         prompt = self.c.tokens(conv.messages, conv.tools, conv.thinking, True)
-        history = len(self.c.tokens(conv.messages, conv.tools, conv.thinking, False))
+        history = self.resume_len(conv, prompt)
         body = conv.body(self.c.model, self.max_tokens, False)
         got = self.c.chat(body)
         self.row(conv, "drafted", body, got, allowed, history)
@@ -229,7 +240,7 @@ def scenarios(rec: Recorder, texts: Texts, turns: int, cancel_after: float) -> N
     t = Conv("T", "You answer briefly.\n\n" + texts.get(13, 6_000)[1], "Summarize the code above in three sentences.", None, False, False)
     for k in range(2):
         rec.turn(t, [0] if k == 0 else rec.prev(t), tool())
-    # 5: a request cancelled in prefill, sent again (resumes only a mark kept whole before the cancel), then its next turn
+    # 5: a request cancelled in prefill, resent (resumes only a mark kept whole before cancel), then its next turn
     sys_c = "You audit code for security problems.\n\n" + texts.get(14, 40_000)[1]
     c = Conv("C", sys_c, "Audit the file above and list concrete issues with line references.", TOOLS, True, True)
     body = c.body(rec.c.model, rec.max_tokens, False)
@@ -287,7 +298,7 @@ def split(client: Client, out: str, texts: Texts, max_tokens: int) -> int:
 
 
 def evict(client: Client, out: str, budget_gib: float, texts: Texts, max_tokens: int) -> int:
-    """At 1 GiB one 15k-31k-token state fits and two do not: conversations take turns evicting, a 40k-token state is refused."""
+    """At 1 GiB one 15k-31k-token state fits, two do not: conversations evict in turns, a 40k-token state refused."""
     rec = Recorder(client, out, max_tokens)
     tool = lambda k: texts.get(20 + k, 11_000)
     body = lambda k, chars: "".join(texts.get(k + j, 40_000)[1] for j in range(chars // 40_000 + 1))[:chars]
@@ -372,8 +383,7 @@ def compare(rows_path: str, fresh_path: str) -> int:
 
 
 def ranks(r0_path: str, r1_path: str) -> int:
-    """Rank 0's done and ended lines against rank 1's reply lines, in request order (rank 1 also logs rank 0's engine
-    warm-up first); a reply rank 0 ended early (a client that left) is checked by its prompt only."""
+    """Rank 0 done/ended vs rank 1 replies in order (rank 1 logs rank 0 warm-up first); client-left end: prompt only."""
     line0 = re.compile(r"\] (?:done \S+ prompt=(\d+) .*? tokens=(\d+) sha=([0-9a-f]+)|ended \S+ reason=.*? prompt=(\d+) tokens=(\d+))")
     line1 = re.compile(r"speed-up rank 1: resumed at \d+ of (\d+) .*?reply (\d+) tokens, sha ([0-9a-f]+)")
     a = []
@@ -398,7 +408,7 @@ def ranks(r0_path: str, r1_path: str) -> int:
 
 
 def cold_prompts(client: Client, path: str, root: str) -> list[dict]:
-    """Single-message prompts of fixed token lengths, a unique first line each so nothing resumes (prefill_cold.py's)."""
+    """Single-message prompts of fixed token lengths, unique first lines so nothing resumes (prefill_cold.py's)."""
     if os.path.exists(path):
         return json.load(open(path))
     text = "".join(open(os.path.join(root, n), encoding="utf-8", errors="replace").read() for n in sorted(os.listdir(root)) if n.endswith(".py"))
@@ -420,7 +430,7 @@ def cold_prompts(client: Client, path: str, root: str) -> list[dict]:
 
 
 def ids(client: Client, out_path: str, length: int, root: str) -> int:
-    """A chat prompt of at most `length` tokens as the server renders it, saved as {"prompt": ids} for the engine gates."""
+    """A chat prompt up to `length` tokens as the server renders it, saved as {"prompt": ids} for engine gates."""
     text = "".join(open(os.path.join(root, n), encoding="utf-8", errors="replace").read() for n in sorted(os.listdir(root)) if n.endswith(".py"))
     msgs = lambda chars: [{"role": "user", "content": "Explain what this code does, section by section.\n\n" + text[:chars]}]
     lo, hi = 0, 6 * length
@@ -437,7 +447,7 @@ def ids(client: Client, out_path: str, length: int, root: str) -> int:
 
 
 def warm(client: Client, out_path: str, root: str, turns: int, new_tokens: int, max_tokens: int) -> int:
-    """An agent's short turns as an agent harness sends them (thinking off, ~new_tokens of tool output a turn): each turn's cached tokens and first token."""
+    """Short harness-sent agent turns (thinking off, ~new_tokens tool output/turn): cached tokens, first token."""
     texts = Texts(root)
     system = "You are a careful coding agent working in a Python repository. Read before you edit, keep changes small.\n\n" + texts.get(0, 22_000)[1]
     conv = Conv("W", system, "Task: find why the parser below rejects nested groups.\n\n" + texts.get(1, 4_000)[1], TOOLS, False, True)
@@ -501,7 +511,7 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=160)
     ap.add_argument("--turns", type=int, default=9)
     ap.add_argument("--text", default=os.path.dirname(os.__file__))
-    ap.add_argument("--cancel-after", type=float, default=4.0)
+    ap.add_argument("--cancel-after", type=float, default=1.0)
     ap.add_argument("--planned", action="store_true", help="the family keeps states only at chunk starts (Nemotron)")
     ap.add_argument("--min-prompt", type=int, default=4096, help="the server keeps nothing for shorter prompts (Rules.min_prompt)")
     ap.add_argument("--new-tokens", type=int, default=200, help="warm: tool output tokens a turn adds")

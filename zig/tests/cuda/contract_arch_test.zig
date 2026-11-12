@@ -10,10 +10,10 @@ test "contract architecture: older SMs omit the standalone cluster kernels" {
         for (std.enums.values(mm.Kind)) |kind| {
             var m: mm.Mm = .{ .rig = undefined, .kind = kind, .sm = sm };
             const k = m.kernel();
-            try std.testing.expectEqual((kind == .qmm_group or kind == .verify32_bits or kind == .verify32_fp64), k == null);
+            try std.testing.expectEqual((kind == .qmm_group or kind == .mlp128_bits or kind == .mlp128_fp64 or mm.verifyTile(kind) > 0), k == null);
             if (k != null) count += 1;
         }
-        try std.testing.expectEqual(@as(usize, 6), count);
+        try std.testing.expectEqual(@as(usize, 9), count);
     }
 }
 
@@ -22,11 +22,16 @@ test "contract architecture: SM90 and Blackwell retain every kernel and the GEMV
         var count: usize = 0;
         for (std.enums.values(mm.Kind)) |kind| {
             var m: mm.Mm = .{ .rig = undefined, .kind = kind, .sm = sm };
+            if ((kind == .mlp128_bits or kind == .mlp128_fp64) and sm != 120) {
+                try std.testing.expect(m.kernel() == null);
+                continue;
+            }
             const k = m.kernel().?;
             count += 1;
-            try std.testing.expectEqual(kind == .lane_gemv or kind == .lane_gemv_split or kind == .verify32_bits, k.spec.replaces != null);
+            const bits = kind == .verify32_bits or kind == .verify64_bits or kind == .verify128_bits;
+            try std.testing.expectEqual(kind == .lane_gemv or kind == .lane_gemv_split or kind == .lane_gemv_seg or bits or kind == .mlp128_bits or mm.lean(kind), k.spec.replaces != null);
         }
-        try std.testing.expectEqual(@as(usize, 9), count);
+        try std.testing.expectEqual(@as(usize, if (sm == 120) 18 else 16), count);
     }
 }
 
@@ -38,6 +43,20 @@ test "contract architecture: legacy GEMV keeps every field except the unavailabl
         want.replaces = null;
         try std.testing.expectEqualDeep(want, legacy.kernel().?.spec);
     };
+}
+
+test "contract architecture: prompt_lean keeps the 128 x 128 tile as its replacement on every SM" {
+    for ([_]u32{ 80, 86, 89, 90, 120, 121 }) |sm| for ([_]mm.Kind{ .prompt16_lean, .prompt16_lean_f32 }) |kind| {
+        var m: mm.Mm = .{ .rig = undefined, .kind = kind, .sm = sm };
+        try std.testing.expect(m.kernel().?.spec.replaces != null);
+    };
+}
+
+test "contract architecture: the segmented launch keeps decode() as its replacement on every SM" {
+    for ([_]u32{ 80, 86, 89, 90, 120, 121 }) |sm| {
+        var m: mm.Mm = .{ .rig = undefined, .kind = .lane_gemv_seg, .sm = sm };
+        try std.testing.expectEqualStrings("affine-4 decode()", m.kernel().?.spec.replaces.?);
+    }
 }
 
 test "contract architecture: the legacy FP4 lane names the reduction fallback it actually selects" {
@@ -120,4 +139,10 @@ test "contract architecture: modern gate 3 retains bit equality and rejects a pl
         try std.testing.expectEqual(g.Verdict.fail, try g.shapes(std.testing.allocator, k, 1));
         try std.testing.expectEqual(@as(usize, 0), cpu.references);
     }
+}
+
+test {
+    _ = @import("contract_exl3_grouped_ref.zig");
+    _ = @import("contract_nvfp4_waves_test.zig");
+    _ = @import("contract_exl3.zig"); // its coverage of the EXL3 dispatch's forms
 }

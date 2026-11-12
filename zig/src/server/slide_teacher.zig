@@ -37,11 +37,21 @@ pub const Teacher = struct {
     turn_end: ?[]const u32 = null,
     thinks: ?bool = null, // whether the template opens the model's reasoning in its prompt
     languages: std.StringHashMapUnmanaged(Local) = .empty, // keep and personal prompts in each other language told so far
-    lessons: usize = 0, // lessons so far, which picks the questions about the user a check asks
+    lessons: usize = 0, // lessons kept so far, which picks the questions about the user a check asks
     told: std.ArrayList(Told) = .empty, // learned document facts' answers, which later lessons on their subject keep
 
     pub fn init(gpa: Allocator) Teacher {
         return .{ .arena = .init(gpa) };
+    }
+
+    /// A lesson ended: kept, it counts; given up, the next lesson picks its checks as this one did (none of it stays).
+    pub fn ended(t: *Teacher, kept: bool) void {
+        if (kept) t.lessons += 1;
+    }
+
+    /// The number a lesson being written picks its checks by: one past the lessons kept.
+    pub fn nth(t: *const Teacher) usize {
+        return t.lessons + 1;
     }
 
     /// A kept document lesson's held question and answer, by the subject its edit keys on (copied into the arena).
@@ -205,9 +215,10 @@ pub fn turnEnd(srv: *Server, cx: *Cx, teacher: *Teacher) ![]const u32 {
     const exchange = try a.dupe(Value, &.{ try message(a, "user", "Hello."), try message(a, "assistant", marker) });
     var problem: []const u8 = "";
     const text = srv.text.render(a, .{ .array = exchange }, .{ .add_generation_prompt = false }, &problem) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the chat template cannot render an exchange");
-    const at = std.mem.lastIndexOf(u8, text, marker) orelse return cx.refuse("the chat template drops the assistant's words");
-    const tail = std.mem.trimEnd(u8, text[at + marker.len ..], " \t\r\n");
-    const ids = srv.text.encode(teacher.arena.allocator(), tail, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode the turn's end");
+    const at = std.mem.lastIndexOf(u8, text.text, marker) orelse return cx.refuse("the chat template drops the assistant's words");
+    const tail = std.mem.trimEnd(u8, text.text[at + marker.len ..], " \t\r\n");
+    const tail_rendered = try text.slice(a, at + marker.len, at + marker.len + tail.len);
+    const ids = tail_rendered.encode(srv.text, teacher.arena.allocator(), &problem) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode the turn's end");
     teacher.turn_end = ids;
     return ids;
 }

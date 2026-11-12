@@ -55,9 +55,10 @@ pub fn glueFn(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!vo
     }
     if (std.mem.eql(u8, step, "embed")) {
         const embed = r.weights.get("embed") orelse return error.MissingWeight;
-        const V: usize = f.cfg.vocab / W;
+        const vocab_part = try @import("partition.zig").share(f.cfg.vocab, f.comm.rank(), W);
+        const V: usize = vocab_part.len;
         const rows = try f.sendBuffer(r, 2 * R * D);
-        try k.embedSend(b.tab.dev.ptr + rowtab.colOffset(.ids, b.cap), R, embed.ptr, @intCast(f.comm.rank() * V), V, D, rows);
+        try k.embedSend(b.tab.dev.ptr + rowtab.colOffset(.ids, b.cap), R, embed.ptr, @intCast(vocab_part.lo), V, D, rows);
         const recv = try r.tensorAddr(c.args[1].arg.t);
         try f.comm.allGather(rows, recv, R * D, .bf16, s);
         return k.embedSum(recv, W, R, D, try r.tensorAddr(c.args[0].arg.t));
@@ -146,9 +147,8 @@ pub const Table = struct {
 };
 
 /// TF_DSV41_GRAPH_LOG=1: every row-graph capture logged with its key and host ms (else the powers of two).
-pub fn graphLog() bool {
-    const v = std.c.getenv("TF_DSV41_GRAPH_LOG") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn graphLog() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_GRAPH_LOG", false);
 }
 
 pub fn outcomeLog(out: graphs.gc.Outcome, g: *const Graphs) bool {

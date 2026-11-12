@@ -19,5 +19,72 @@ zig-out/
 # Native Qwen CPU-only Metal compiler receipts.
 .q27-metal-check/
 
+# The qwen4 device gate writes a scratch checkpoint into the tree and takes it away again.
+.qwen4-device-*/
+
+# A build tool that crashes leaves a core dump in the tree.
+/core
+*.core
+
 # Versioned GUI build resources, generated app engines stay ignored in app/.gitignore.
 !app/build/
+
+# Local credentials and machine-specific configuration. Commit examples only.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.local.json
+*.local.toml
+*.key
+*.pem
+*.p12
+*.pfx
+api-key
+api-keys
+api-key.*
+api-keys.*
+*-api-key
+*-api-keys
+*.token
+.netrc
+id_rsa
+id_ed25519
+/.ssh/
+/.aws/
+/.config/
+/secrets/
+/credentials/
+/.cache/
+
+# Checkpoints, native session snapshots, and gateway state stay outside Git.
+*.safetensors
+*.gguf
+*.ckpt
+*.pth
+*.pt
+*.tfs
+/models/
+/weights/
+/checkpoints/
+/snapshots/
+/state/
+/runtime/
+/.gateway-state/
+/tools/studio-gateway/config.json
+/tools/studio-gateway/gateway.json
+/tools/studio-gateway/state/
+
+# Evaluation source data and private model traces are never public artifacts.
+**/*-private.json
+**/*-private.json.*
+**/gpqa-tasks.jsonl*
+**/gpqa_diamond.csv*
+**/gpqa_main.csv*
+**/gpqa_extended.csv*
+**/private-benchmarks/
+/benchmarks/studio/ornith-gpqa-*/
+/tools/ornith/evaluation/tasks.jsonl
+/studio-benchmark-results/
+# The full E4B per-layer input oracle outputs (tools/zig/gemma4_e4b_layer_input_oracle.py --full); the committed fixture is the .json of SHA-256 prints.
+tools/zig/fixtures/e4b_layer_input_mlx.bin

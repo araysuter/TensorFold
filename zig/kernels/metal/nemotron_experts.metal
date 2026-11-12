@@ -1,4 +1,4 @@
-// Routed experts with an expert's member rows MB at a time: each weight word unpacked once for MB rows, each row's sums as tf_rowdot.
+// Routed experts, member rows MB at a time: each weight word unpacked once for MB rows, each row's sums as tf_rowdot.
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
@@ -94,7 +94,7 @@ inline void tf_rowdot_rows(const device uint8_t* w, const device bfloat* sc, con
     for (int b = 0; b < MB; b++) acc[b][j] = simd_sum(acc[b][j]);
 }
 
-// One threadgroup an (expert, 8 outputs): its member pairs MB at a time, then one at a time (UP: x rows by token, relu2).
+// One threadgroup an (expert, 8 outputs): member pairs MB at a time, then one at a time (UP: x rows by token, relu2).
 template <int K, int N, int GS, int RPS, int SG, int TOPK, int MB, bool UP>
 [[kernel]] void tf_experts_rows(
   const device bfloat16_t* X [[buffer(0)]],
@@ -156,6 +156,8 @@ template [[host_name("tf_xup_rows2")]] [[kernel]] decltype(tf_experts_rows<2688,
 template [[host_name("tf_xdown_rows2")]] [[kernel]] decltype(tf_experts_rows<1856, 2688, 64, 4, 2, 6, 2, false>) tf_experts_rows<1856, 2688, 64, 4, 2, 6, 2, false>;
 template [[host_name("tf_xup_rows4")]] [[kernel]] decltype(tf_experts_rows<2688, 1856, 64, 4, 2, 6, 4, true>) tf_experts_rows<2688, 1856, 64, 4, 2, 6, 4, true>;
 template [[host_name("tf_xdown_rows4")]] [[kernel]] decltype(tf_experts_rows<1856, 2688, 64, 4, 2, 6, 4, false>) tf_experts_rows<1856, 2688, 64, 4, 2, 6, 4, false>;
+template [[host_name("tf_xup_rows2r8")]] [[kernel]] decltype(tf_experts_rows<2688, 1856, 64, 8, 2, 6, 2, true>) tf_experts_rows<2688, 1856, 64, 8, 2, 6, 2, true>;
+template [[host_name("tf_xdown_rows2r8")]] [[kernel]] decltype(tf_experts_rows<1856, 2688, 64, 8, 2, 6, 2, false>) tf_experts_rows<1856, 2688, 64, 8, 2, 6, 2, false>;
 
 // A 16-group's four weight words as the outer loop: four activations a member live, each sum in tf_qdot16's order.
 template <int K, int GS, int RPS, int MB>

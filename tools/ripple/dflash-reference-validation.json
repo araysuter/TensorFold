@@ -1,0 +1,863 @@
+{
+  "schema": "ripple-dflash-reference-validation-v1",
+  "status": "scoped_architecture_checks_passed",
+  "publication": "Sanitized evidence summary prepared for owner review",
+  "observed_at_utc": "2026-11-05T02:52:19.967934+00:00",
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "physical_memory_bytes": 68719476736,
+    "macos_version": "27.0.1"
+  },
+  "runtime": {
+    "torch": "2.15.0",
+    "mlx_stock": "0.32.4",
+    "mlx_lm": "0.32.2",
+    "candidate_projection_runtime": "0.32.4.dev20261104+36969c0",
+    "architecture_library_identity": "Not captured in raw architecture receipt; stock/candidate binary identities are from the separate projection diagnostic"
+  },
+  "provenance": {
+    "checkpoint_configuration_context": {
+      "models": [
+        {
+          "repo_id": "ricursiveAI/Ripple-65B-Preview",
+          "revision": "4f308b9954b73cd200812095916c7baf68cf27f4"
+        },
+        {
+          "repo_id": "ricursiveAI/Ripple-65B-Preview-DFlash2",
+          "revision": "35609b3be3dd08a822b3ba1257c1ea5dd6f87632"
+        }
+      ],
+      "scope": "Configuration provenance only; architecture fixtures use synthetic weights and reduced hidden sizes"
+    },
+    "sglang": {
+      "release": "0.5.19",
+      "commit": "0bcd822377da7b5718e674eaf9c870d349424dd1",
+      "license": "Apache-2.0",
+      "dflash_source": {
+        "url": "https://github.com/sgl-project/sglang/blob/0bcd822377da7b5718e674eaf9c870d349424dd1/python/sglang/srt/models/dflash.py",
+        "sha256": "bfdef4b6ebe54f0ed88e04295310102c88b4b85798604f736cdb46320f3929ef"
+      },
+      "activation_sources": [
+        {
+          "repository_path": "python/sglang/srt/layers/activation.py",
+          "sha256": "7cb92806f75eaa95529e841c6b506e77da5030b99e7e98110e64a7f3232e489a",
+          "url": "https://github.com/sgl-project/sglang/blob/0bcd822377da7b5718e674eaf9c870d349424dd1/python/sglang/srt/layers/activation.py"
+        },
+        {
+          "repository_path": "python/sglang/kernels/ops/activation/activation.py",
+          "sha256": "1b938a3778c68ce5f24af370c674097dd9b0dd0771d960262369a200b35cd5d4",
+          "url": "https://github.com/sgl-project/sglang/blob/0bcd822377da7b5718e674eaf9c870d349424dd1/python/sglang/kernels/ops/activation/activation.py"
+        },
+        {
+          "repository_path": "python/sglang/kernels/jit/csrc/elementwise/activation.cuh",
+          "sha256": "f1b56af7476695688d11bb004dc6cee144cd8922a56683a12c504c53aec26c47",
+          "url": "https://github.com/sgl-project/sglang/blob/0bcd822377da7b5718e674eaf9c870d349424dd1/python/sglang/kernels/jit/csrc/elementwise/activation.cuh"
+        }
+      ]
+    },
+    "mlx_dispatch": {
+      "tag": "v0.32.4",
+      "commit": "36969c094354086e15d2a327a9c50feb20b9cf11",
+      "source_url": "https://github.com/ml-explore/mlx/blob/36969c094354086e15d2a327a9c50feb20b9cf11/mlx/backend/metal/quantized.cpp",
+      "official_quantized_cpp_sha256": "947e92b5d51134f329698b2497a8315b135a0012994af385ef296adb962b5850",
+      "candidate_quantized_cpp_sha256": "9bf6435ce7c5348e91c8e69f26367830b56466870db718d5e3c8e6f8c5f0e745",
+      "patch_sha256": "773049a0f7ccabfb5726eb66aa1333f7c6b5f476591ad7eb7279e2223337fdfd",
+      "candidate_wheel_sha256": "119b42d6b026e6af07b1565ec55d6c2c91c41686efbf281cc2e8faa8e46a4b9d",
+      "candidate_core_extension_sha256": "6b8670b3abf4114c68d0696aa57eb3c7118a89767b2bd6615feb0932c1a1feb9",
+      "candidate_libmlx_sha256": "635b6cdf5ad03cd89d52612c1fe5e992f3cb8dc0d384b56e45efe68afeffc9fe",
+      "isolation": "Private candidate build; source and binary identities are specific to this experiment"
+    },
+    "test_sources": {
+      "dflash_oracle.py": "3fab79095bce0bb87c221bf44178f8493cbf2a8c2954329c2826b9c91de4609f",
+      "test_dflash_model.py": "89fb9b3f3100d4f41dc4e689d5f282d6e6340920afdb5984c9efdde0e2ba5293"
+    },
+    "test_source_identity_basis": "Current local files match current remote test copies; historical raw architecture receipts do not embed test-source hashes"
+  },
+  "method": {
+    "architecture": "SHA-pinned upstream SGLang DFlash AST classes executed with CPU primitive adapters",
+    "adapters": [
+      "single-rank linear projections",
+      "RMSNorm",
+      "RoPE",
+      "CPU attention with GQA",
+      "configuration and cache interface stubs"
+    ],
+    "nope_adjustment": "Pinned upstream DFlashAttention does not read no_rope_layers; the CPU adapter explicitly disables RoPE on configured final full-attention layer 4",
+    "activation": "CPU formula emulates aligned CUDA JIT SiLU FP32 activation*up with single output cast",
+    "activation_limit": "CPU formula emulation of aligned CUDA JIT arithmetic; no CUDA kernel was executed",
+    "fp32_device": "Explicit MLX CPU stream against CPU PyTorch; original strict GPU FP32 checks remain failed",
+    "bf16_device": "MLX GPU against CPU PyTorch architecture oracle",
+    "convolutions": "Four taps, group size 16, block size 16; lengths 1, 3, 16 and 32; short oracle inputs zero padded",
+    "attention": "Five draft blocks, bidirectional lookahead, left sliding window, final full-attention NoPE block",
+    "context": "Five ordered target-tap features, FC and hidden norm, per-layer K/V materialization",
+    "embedding_and_head": "Raw shared target embeddings and actual target head interface; target embedding scale excluded",
+    "synthetic_geometries": [
+      {
+        "hidden_size": 64,
+        "attention_heads": 4,
+        "kv_heads": 2,
+        "head_dim": 16,
+        "selector_rank": 64,
+        "selector_top_k": 8,
+        "vocab_size": 128,
+        "precisions": [
+          "FP32 CPU",
+          "BF16 GPU"
+        ]
+      },
+      {
+        "hidden_size": 128,
+        "attention_heads": 20,
+        "kv_heads": 2,
+        "head_dim": 128,
+        "selector_rank": 256,
+        "selector_top_k": 32,
+        "vocab_size": 128,
+        "precisions": [
+          "BF16 GPU"
+        ]
+      }
+    ],
+    "loading": "Strict complete affine mixed 4/8-bit tiny-model reload, missing/extra tensors, checksum and incomplete markers",
+    "numpy_boundary": "BF16 arrays are expanded losslessly to FP32 before NumPy comparisons"
+  },
+  "tolerances": {
+    "fp32_atol": 2e-05,
+    "fp32_rtol": 0.0004,
+    "bf16_normalized_l2_max": 0.025,
+    "bf16_atol": 0.065,
+    "bf16_rtol": 0.035
+  },
+  "result": {
+    "tests": 11,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "passed": true,
+    "architecture_comparison_passed": true
+  },
+  "metric_summary": {
+    "fp32": {
+      "comparisons": 20,
+      "device": "CPU",
+      "maximum_absolute_error": 7.152557373046875e-07,
+      "maximum_normalized_l2_error": 1.3640587326335663e-07,
+      "worst_column_l2_error": 1.1192746569577139e-06
+    },
+    "bf16": {
+      "comparisons": 24,
+      "device": "GPU",
+      "maximum_absolute_error": 0.0546875,
+      "maximum_normalized_l2_error": 0.014011746272444725,
+      "worst_column_l2_error": 0.08797738701105118
+    }
+  },
+  "planted_controls": [
+    {
+      "fault": "convolution omits block-boundary reset",
+      "detected": true,
+      "required_max_difference_greater_than": 0.1
+    },
+    {
+      "fault": "BF16 activation rounded before multiplication",
+      "detected": true,
+      "required_differing_elements_greater_than": 0
+    },
+    {
+      "fault": "causal masking replaces bidirectional draft attention",
+      "detected": true,
+      "required_max_difference_greater_than": 0.001
+    },
+    {
+      "fault": "target embedding scale applied to draft raw embeddings",
+      "detected": true
+    },
+    {
+      "fault": "oracle source SHA mismatch",
+      "detected": true,
+      "behavior": "refused"
+    }
+  ],
+  "selector": {
+    "random_head_large_geometry": {
+      "dtype": "torch.bfloat16",
+      "hidden_size": 128,
+      "top_k": 32,
+      "fixture": "random head; informational when cutoff ties",
+      "mismatched_slots": [
+        14
+      ],
+      "reference_cutoff_margins": [
+        0.01171875,
+        0.05859375,
+        0.00390625,
+        0.00390625,
+        0.04296875,
+        0.07421875,
+        0.03515625,
+        0.0234375,
+        0.0390625,
+        0.00390625,
+        0.01953125,
+        0.005859375,
+        0.00390625,
+        0.01171875,
+        0.0
+      ],
+      "observed_cutoff_margins": [
+        0.01171875,
+        0.05859375,
+        0.00390625,
+        0.00390625,
+        0.04296875,
+        0.07421875,
+        0.03515625,
+        0.0234375,
+        0.0390625,
+        0.00390625,
+        0.01953125,
+        0.005859375,
+        0.00390625,
+        0.01171875,
+        0.0
+      ],
+      "max_absolute_head_logit_error": 0.0,
+      "mismatched_reference_ids": [
+        [
+          114,
+          81,
+          116,
+          103,
+          126,
+          14,
+          76,
+          87,
+          57,
+          89,
+          44,
+          12,
+          47,
+          127,
+          100,
+          9,
+          28,
+          66,
+          119,
+          93,
+          82,
+          120,
+          0,
+          49,
+          125,
+          67,
+          10,
+          26,
+          18,
+          70,
+          78,
+          80
+        ]
+      ],
+      "mismatched_observed_ids": [
+        [
+          114,
+          81,
+          116,
+          103,
+          126,
+          14,
+          76,
+          87,
+          57,
+          89,
+          44,
+          12,
+          47,
+          127,
+          100,
+          9,
+          28,
+          66,
+          119,
+          93,
+          82,
+          120,
+          0,
+          49,
+          125,
+          10,
+          67,
+          18,
+          26,
+          70,
+          78,
+          5
+        ]
+      ]
+    },
+    "separated_head_large_geometry": {
+      "fixture": "separated single-column head",
+      "hidden_size": 128,
+      "top_k": 32,
+      "minimum_cutoff_margin": 0.0625,
+      "candidate_sets_exact": true
+    },
+    "tie_interpretation": "At slot 14, IDs 80 and 5 have identical BF16 unary score 0.8046875 at the K=32 cutoff; all raw head logits match exactly, but top-k tie order differs",
+    "exact_id_gate": "A separate single-column head with minimum cutoff margin 0.0625 passes exact candidate-set and unchanged lattice-score checks; the random tied result remains informational"
+  },
+  "failure_history": [
+    {
+      "attempt": "initial GPU FP32 and uncorrected fixtures",
+      "evidence": {
+        "sha256": "5f8b72f9dd9b1c765457c47386a8a5fe45559b6e8b3f700b942c73c01cdcd6c8"
+      },
+      "tests": 11,
+      "failures": 4,
+      "errors": 0,
+      "skipped": 0,
+      "findings": [
+        {
+          "check": "GPU FP32 FC and hidden norm",
+          "max_absolute_error": 0.0011088848114013672,
+          "resolution": "CPU architecture check passes original tolerance; GPU FP32 contract remains unqualified"
+        },
+        {
+          "check": "GPU FP32 convolution pre-3",
+          "max_absolute_error": 0.0018037110567092896,
+          "resolution": "CPU convolution checks pass original tolerance; GPU FP32 contract remains unqualified"
+        },
+        {
+          "check": "BF16 K=32 candidate set",
+          "resolution": "Exact cutoff tie characterized and retained; separate non-tied fixture added without relaxing exact-ID gate"
+        },
+        {
+          "check": "quantized-load fixture",
+          "resolution": "Fixed module-leaf traversal so fixture actually quantizes projections before asserting packed weights"
+        }
+      ]
+    },
+    {
+      "attempt": "corrected fixtures before NumPy boundary fix",
+      "evidence": {
+        "sha256": "592e7762749c6235be44e0556208f296d25f448c7793c7c321c774dbc7b5fb74"
+      },
+      "tests": 11,
+      "failures": 0,
+      "errors": 1,
+      "finding": "NumPy rejected direct BF16 buffer conversion in strict reload comparison",
+      "resolution": "Lossless BF16-to-FP32 expansion before NumPy comparison"
+    },
+    {
+      "attempt": "corrected fixtures and lossless NumPy boundary",
+      "evidence": {
+        "sha256": "bdaedd8904fbf9fef08df5b58c7506179ab8b2cbc232d66eb36e9f4d12faf0a1"
+      },
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "attempt": "latest recorded repeat",
+      "evidence": {
+        "sha256": "2a419b82ab8bad7592ce8b9317305780799e35c3d50784cf4ddb77fcd62198c3"
+      },
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "fp32_primitive_diagnostic": {
+    "evidence": {
+      "sha256": "6292c556abb2840e9b341edaf11c443e5a0987af3d1c97c4cbe0334c30dbe372"
+    },
+    "result": "All six explicit CPU projections pass original FP32 tolerance; all six default GPU projections fail it",
+    "cause": "Not assigned: default GPU output is not reproduced by the tested TF32-input rounding emulation",
+    "cases": [
+      {
+        "name": "context_fc",
+        "shape": [
+          19,
+          320,
+          64
+        ],
+        "cpu_vs_torch_fp32": {
+          "max_absolute": 0.0,
+          "normalized_l2": 0.0,
+          "worst_column_l2": 0.0,
+          "strict_fp32_pass": true
+        },
+        "gpu_vs_torch_fp32": {
+          "max_absolute": 0.0009453296661376953,
+          "normalized_l2": 0.0007680176058784127,
+          "worst_column_l2": 0.001784042571671307,
+          "strict_fp32_pass": false
+        }
+      },
+      {
+        "name": "conv_kernel_projection_short",
+        "shape": [
+          3,
+          64,
+          32
+        ],
+        "cpu_vs_torch_fp32": {
+          "max_absolute": 0.0,
+          "normalized_l2": 0.0,
+          "worst_column_l2": 0.0,
+          "strict_fp32_pass": true
+        },
+        "gpu_vs_torch_fp32": {
+          "max_absolute": 0.00033929944038391113,
+          "normalized_l2": 0.0007506059482693672,
+          "worst_column_l2": 0.00039031458436511457,
+          "strict_fp32_pass": false
+        }
+      },
+      {
+        "name": "conv_kernel_projection_block",
+        "shape": [
+          16,
+          64,
+          32
+        ],
+        "cpu_vs_torch_fp32": {
+          "max_absolute": 0.0,
+          "normalized_l2": 0.0,
+          "worst_column_l2": 0.0,
+          "strict_fp32_pass": true
+        },
+        "gpu_vs_torch_fp32": {
+          "max_absolute": 0.00046759843826293945,
+          "normalized_l2": 0.0007971575250849128,
+          "worst_column_l2": 0.0006885817274451256,
+          "strict_fp32_pass": false
+        }
+      },
+      {
+        "name": "query_projection",
+        "shape": [
+          16,
+          128,
+          2560
+        ],
+        "cpu_vs_torch_fp32": {
+          "max_absolute": 0.0,
+          "normalized_l2": 0.0,
+          "worst_column_l2": 0.0,
+          "strict_fp32_pass": true
+        },
+        "gpu_vs_torch_fp32": {
+          "max_absolute": 0.0007365942001342773,
+          "normalized_l2": 0.0007676223176531494,
+          "worst_column_l2": 0.0011905583087354898,
+          "strict_fp32_pass": false
+        }
+      },
+      {
+        "name": "kv_projection",
+        "shape": [
+          19,
+          128,
+          256
+        ],
+        "cpu_vs_torch_fp32": {
+          "max_absolute": 0.0,
+          "normalized_l2": 0.0,
+          "worst_column_l2": 0.0,
+          "strict_fp32_pass": true
+        },
+        "gpu_vs_torch_fp32": {
+          "max_absolute": 0.0007257461547851562,
+          "normalized_l2": 0.0007759740110486746,
+          "worst_column_l2": 0.0013709994964301586,
+          "strict_fp32_pass": false
+        }
+      },
+      {
+        "name": "shared_lm_head",
+        "shape": [
+          15,
+          128,
+          128
+        ],
+        "cpu_vs_torch_fp32": {
+          "max_absolute": 0.0,
+          "normalized_l2": 0.0,
+          "worst_column_l2": 0.0,
+          "strict_fp32_pass": true
+        },
+        "gpu_vs_torch_fp32": {
+          "max_absolute": 0.0007917881011962891,
+          "normalized_l2": 0.0007610952015966177,
+          "worst_column_l2": 0.0011411862215027213,
+          "strict_fp32_pass": false
+        }
+      }
+    ]
+  },
+  "limits": [
+    "Synthetic architecture and loader fixtures; no complete original-BF16 checkpoint comparison",
+    "The explicit NoPE adjustment means this is not an unmodified whole-SGLang qualification",
+    "BF16 full-block differences are bounded, not byte-identical to the CPU oracle",
+    "Strict GPU FP32 architecture fidelity remains unqualified; FP32 passes apply to the explicit CPU stream",
+    "No native TensorFold engine, CUDA, other GPU or operating-system qualification",
+    "No benchmark quality, throughput, long-context accuracy, serving or production deployment claim",
+    "Target-token identity and end-to-end runtime gates are separate evidence"
+  ],
+  "metrics": [
+    {
+      "label": "target-taps-fc-hidden-norm",
+      "dtype": "bf16",
+      "normalized_l2": 3.17933086080302e-07,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 1.52587890625e-05,
+      "worst_column_l2": 1.52587890625e-05
+    },
+    {
+      "label": "context-key-0",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-value-0",
+      "dtype": "bf16",
+      "normalized_l2": 1.906818480890138e-09,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 5.960464477539063e-08,
+      "worst_column_l2": 5.960464477539063e-08
+    },
+    {
+      "label": "context-key-1",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-value-1",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-key-2",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-value-2",
+      "dtype": "bf16",
+      "normalized_l2": 9.57405291046598e-07,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 3.0517578125e-05,
+      "worst_column_l2": 3.0517578125e-05
+    },
+    {
+      "label": "context-key-3",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-value-3",
+      "dtype": "bf16",
+      "normalized_l2": 1.9367428194527747e-06,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 6.103515625e-05,
+      "worst_column_l2": 6.103515625e-05
+    },
+    {
+      "label": "context-key-4",
+      "dtype": "bf16",
+      "normalized_l2": 3.1503070204053074e-05,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.001953125,
+      "worst_column_l2": 0.001953125
+    },
+    {
+      "label": "context-value-4",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "five-draft-blocks-final-norm",
+      "dtype": "bf16",
+      "normalized_l2": 0.014011746272444725,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0546875,
+      "worst_column_l2": 0.08797738701105118
+    },
+    {
+      "label": "target-taps-fc-hidden-norm",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-key-0",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-value-0",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-key-1",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-value-1",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-key-2",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-value-2",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-key-3",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-value-3",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-key-4",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "context-value-4",
+      "dtype": "bf16",
+      "normalized_l2": 0.0,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "five-draft-blocks-final-norm",
+      "dtype": "bf16",
+      "normalized_l2": 0.004555543884634972,
+      "mlx_device": "Device(gpu, 0)",
+      "max_absolute": 0.03125,
+      "worst_column_l2": 0.035067975521087646
+    },
+    {
+      "label": "target-taps-fc-hidden-norm",
+      "dtype": "fp32",
+      "normalized_l2": 7.408586100154935e-08,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 4.76837158203125e-07,
+      "worst_column_l2": 5.850010893482249e-07
+    },
+    {
+      "label": "context-key-0",
+      "dtype": "fp32",
+      "normalized_l2": 1.3157118416984304e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 7.152557373046875e-07,
+      "worst_column_l2": 1.034236106534081e-06
+    },
+    {
+      "label": "context-value-0",
+      "dtype": "fp32",
+      "normalized_l2": 1.1831965451847282e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 2.086162567138672e-07,
+      "worst_column_l2": 3.559358390248235e-07
+    },
+    {
+      "label": "context-key-1",
+      "dtype": "fp32",
+      "normalized_l2": 1.2141202887505642e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 7.152557373046875e-07,
+      "worst_column_l2": 9.837588095251704e-07
+    },
+    {
+      "label": "context-value-1",
+      "dtype": "fp32",
+      "normalized_l2": 1.1910664454717335e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 2.384185791015625e-07,
+      "worst_column_l2": 3.0835076358926017e-07
+    },
+    {
+      "label": "context-key-2",
+      "dtype": "fp32",
+      "normalized_l2": 1.3640587326335663e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 7.152557373046875e-07,
+      "worst_column_l2": 1.0349538115406176e-06
+    },
+    {
+      "label": "context-value-2",
+      "dtype": "fp32",
+      "normalized_l2": 1.0718419218846975e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 1.4901161193847656e-07,
+      "worst_column_l2": 2.9906911436228256e-07
+    },
+    {
+      "label": "context-key-3",
+      "dtype": "fp32",
+      "normalized_l2": 1.2842697572068573e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 7.152557373046875e-07,
+      "worst_column_l2": 1.1192746569577139e-06
+    },
+    {
+      "label": "context-value-3",
+      "dtype": "fp32",
+      "normalized_l2": 1.1852037573589769e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 1.7881393432617188e-07,
+      "worst_column_l2": 2.8226295967215265e-07
+    },
+    {
+      "label": "context-key-4",
+      "dtype": "fp32",
+      "normalized_l2": 1.2658971115797613e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 4.76837158203125e-07,
+      "worst_column_l2": 1.1188095641045948e-06
+    },
+    {
+      "label": "context-value-4",
+      "dtype": "fp32",
+      "normalized_l2": 1.235124216236727e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 1.7881393432617188e-07,
+      "worst_column_l2": 3.007869224802562e-07
+    },
+    {
+      "label": "five-draft-blocks-final-norm",
+      "dtype": "fp32",
+      "normalized_l2": 1.3305863433288323e-07,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 7.152557373046875e-07,
+      "worst_column_l2": 9.808926506593707e-07
+    },
+    {
+      "label": "conv-pre-1",
+      "dtype": "fp32",
+      "normalized_l2": 0.0,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "conv-post-1",
+      "dtype": "fp32",
+      "normalized_l2": 0.0,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "conv-pre-3",
+      "dtype": "fp32",
+      "normalized_l2": 1.367607627145162e-08,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 1.1920928955078125e-07,
+      "worst_column_l2": 1.1920928955078125e-07
+    },
+    {
+      "label": "conv-post-3",
+      "dtype": "fp32",
+      "normalized_l2": 8.92956375508902e-09,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 1.1920928955078125e-07,
+      "worst_column_l2": 1.1920928955078125e-07
+    },
+    {
+      "label": "conv-pre-16",
+      "dtype": "fp32",
+      "normalized_l2": 0.0,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "conv-post-16",
+      "dtype": "fp32",
+      "normalized_l2": 0.0,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "conv-pre-32",
+      "dtype": "fp32",
+      "normalized_l2": 0.0,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    },
+    {
+      "label": "conv-post-32",
+      "dtype": "fp32",
+      "normalized_l2": 0.0,
+      "mlx_device": "cpu (explicit mx.stream(mx.cpu))",
+      "max_absolute": 0.0,
+      "worst_column_l2": 0.0
+    }
+  ]
+}

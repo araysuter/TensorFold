@@ -15,6 +15,16 @@ pub const LayerCache = union(enum) {
 /// Words of a descriptor before its layers: the positions it holds and the last kept final row.
 pub const header_words = 2;
 
+/// The descriptor word after the layers' addresses: the stream's tap ring (0: none), then the page table.
+pub fn tapWord(layers: usize) usize {
+    return header_words + 2 * layers;
+}
+
+/// Words of a descriptor before its page table (PlanArgs.pages).
+pub fn tableWord(layers: usize) usize {
+    return tapWord(layers) + 1;
+}
+
 pub const Caches = struct {
     layers: []LayerCache,
     /// Positions the page table can name.
@@ -26,6 +36,8 @@ pub const Caches = struct {
     table: std.ArrayList(u32) = .empty,
     /// Pages promised to this stream, not yet taken (the pool's reservation).
     promised: usize = 0,
+    /// A drafter's tap ring (`addTap`): the newest rows of the tapped layers' residuals.
+    tap: ?hip.DeviceBuffer = null,
 
     /// Device bytes the caches of `total` positions hold beside their pages: linear state and the descriptor.
     pub fn deviceBytes(m: *const view.Model, total: usize) usize {
@@ -34,7 +46,7 @@ pub const Caches = struct {
         for (0..s.n_layers) |i| linear += @intFromBool(!s.full(i));
         const conv = (s.conv - 1) * view.convChannels(s) * 4;
         const state = s.value_heads * s.value_dim * s.key_dim * 4;
-        return linear * (conv + state) + 8 * (header_words + 2 * s.n_layers + std.mem.alignForward(usize, pages.pagesFor(total), 2) / 2);
+        return linear * (conv + state) + 8 * (tableWord(s.n_layers) + std.mem.alignForward(usize, pages.pagesFor(total), 2) / 2);
     }
 
     /// Caches for up to `total` positions with no pages yet; every linear byte zeroed.
@@ -62,7 +74,7 @@ pub const Caches = struct {
             made += 1;
         }
         const slots = std.mem.alignForward(usize, pages.pagesFor(total), 2);
-        const words = try gpa.alloc(u64, header_words + 2 * s.n_layers + slots / 2);
+        const words = try gpa.alloc(u64, tableWord(s.n_layers) + slots / 2);
         defer gpa.free(words);
         @memset(words, 0);
         var desc = try hip.DeviceBuffer.alloc(d, 8 * words.len);
@@ -82,6 +94,17 @@ pub const Caches = struct {
         errdefer c.deinit(gpa);
         _ = try c.grow(gpa, total);
         return c;
+    }
+
+    /// A tap ring of `bytes` for this stream, its address in the descriptor; every byte zeroed.
+    pub fn addTap(c: *Caches, bytes: usize) !void {
+        std.debug.assert(c.tap == null);
+        var ring = try hip.DeviceBuffer.alloc(c.pool.d, bytes);
+        errdefer ring.free();
+        try ring.fill8(0);
+        const at = ring.base();
+        try c.desc.upload(8 * tapWord(c.layers.len), std.mem.asBytes(&at));
+        c.tap = ring;
     }
 
     /// The stream's last kept final row lives at `ptr`: a round's keep copies it there.
@@ -105,6 +128,7 @@ pub const Caches = struct {
         c.pool.ids.reserved -|= c.promised;
         c.table.deinit(gpa);
         c.desc.free();
+        if (c.tap) |*t| t.free();
         for (c.layers) |*l| free(l);
         gpa.free(c.layers);
         c.* = undefined;
@@ -118,6 +142,7 @@ pub const Caches = struct {
     /// Bytes this stream holds: its linear state and every page it names (shared ones counted whole).
     pub fn held(c: *const Caches) usize {
         var n: usize = c.table.items.len * c.pool.pageBytes();
+        if (c.tap) |t| n += t.len;
         for (c.layers) |l| switch (l) {
             .full => {},
             .linear => |x| n += x.conv.len + x.state.len,
@@ -126,7 +151,7 @@ pub const Caches = struct {
     }
 
     fn put(c: *const Caches, first: usize, ids: []const u32) !void {
-        const base = 8 * (header_words + 2 * c.layers.len);
+        const base = 8 * tableWord(c.layers.len);
         try c.desc.upload(base + 4 * first, std.mem.sliceAsBytes(ids));
     }
 
@@ -184,7 +209,7 @@ pub const Caches = struct {
 
     /// The attention kernels' view of a full layer's pages.
     pub fn paged(c: *const Caches, m: *const view.Model, index: usize) hip.ops.Ops.Paged {
-        const base = c.desc.base() + 8 * (header_words + 2 * c.layers.len);
+        const base = c.desc.base() + 8 * tableWord(c.layers.len);
         return .{ .k = c.pool.keys[index].base(), .v = c.pool.values[index].base(), .table = base, .kind = m.act, .kv_heads = m.spec.kv_heads, .d = m.spec.head_dim, .count = c.pool.count };
     }
 
@@ -197,47 +222,21 @@ pub const Caches = struct {
         };
         return n;
     }
-};
 
-/// A stream's linear state at a prompt's page edge: each linear layer's conv window and DeltaNet state, in tree slots.
-pub const Snapshots = struct {
-    gpa: Allocator,
-    d: *const hip.Runtime,
-    slots: std.ArrayList(?hip.DeviceBuffer) = .empty,
-
-    pub fn init(gpa: Allocator, d: *const hip.Runtime) Snapshots {
-        return .{ .gpa = gpa, .d = d };
-    }
-
-    pub fn deinit(s: *Snapshots) void {
-        for (s.slots.items) |*b| if (b.*) |*x| x.free();
-        s.slots.deinit(s.gpa);
-    }
-
-    /// Frees every slot's buffer.
-    pub fn clear(s: *Snapshots) void {
-        for (s.slots.items) |*b| if (b.*) |*x| x.free();
-        s.slots.clearRetainingCapacity();
-    }
-
-    /// The caches' linear state copied into slot `slot` (its buffer made on first use).
-    pub fn take(s: *Snapshots, slot: u32, c: *const Caches, stream: hip.abi.Stream) !void {
-        while (s.slots.items.len <= slot) try s.slots.append(s.gpa, null);
-        const entry = &s.slots.items[slot];
-        if (entry.* == null) entry.* = try hip.DeviceBuffer.alloc(s.d, c.linearBytes());
+    /// The linear state copied into `buf` (a snapshot slot of `linearBytes`).
+    pub fn saveLinear(c: *const Caches, buf: hip.DeviceBuffer, stream: hip.abi.Stream) !void {
         var at: usize = 0;
         for (c.layers) |l| switch (l) {
             .full => {},
             .linear => |x| for ([_]hip.DeviceBuffer{ x.conv, x.state }) |b| {
-                try hip.raw.copy(entry.*.?, at, b.base(), b.len, stream);
+                try hip.raw.copy(buf, at, b.base(), b.len, stream);
                 at += b.len;
             },
         };
     }
 
-    /// Slot `slot`'s linear state copied back into the caches.
-    pub fn put(s: *const Snapshots, slot: u32, c: *Caches, stream: hip.abi.Stream) !void {
-        const buf = (if (slot < s.slots.items.len) s.slots.items[slot] else null) orelse return error.NoSnapshot;
+    /// `buf`'s linear state copied back into the caches.
+    pub fn loadLinear(c: *Caches, buf: hip.DeviceBuffer, stream: hip.abi.Stream) !void {
         var at: usize = 0;
         for (c.layers) |l| switch (l) {
             .full => {},
@@ -246,12 +245,5 @@ pub const Snapshots = struct {
                 at += b.len;
             },
         };
-    }
-
-    /// Bytes the slots hold.
-    pub fn held(s: *const Snapshots) usize {
-        var n: usize = 0;
-        for (s.slots.items) |b| n += if (b) |x| x.len else 0;
-        return n;
     }
 };

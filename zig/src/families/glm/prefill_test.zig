@@ -7,128 +7,61 @@ const mac = @import("builtin").os.tag == .macos;
 const fill = @import("prefill.zig");
 const a = std.testing.allocator;
 const Stream = lanes.Stream;
-const Fake = struct {
-    gpa: std.mem.Allocator = a,
-    target: lanes.fake.Fake = .{ .gpa = a },
-    filling: std.AutoHashMapUnmanaged(*Stream, fill.State) = .empty,
-    table: lanes.backend.Backend.VTable = undefined,
-    barrier: bool = false,
-    ready: std.atomic.Value(bool) = .init(false),
-    go: std.atomic.Value(bool) = .init(false),
-    chunks: usize = 0,
-    first_round: u64 = 0,
-    last_round: u64 = 0,
-    max_rows: u32 = 0,
-    begins: usize = 0,
-    ends: usize = 0,
-    restored_at: u32 = 0,
-    fail_chunk: bool = false,
-    chunk_hook: ?*const fn (*anyopaque, *Stream) void = null,
-    chunk_ctx: ?*anyopaque = null,
-    fn from(ptr: *anyopaque) *Fake {
-        const target: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
-        return @fieldParentPtr("target", target);
-    }
-    fn backend(f: *Fake) lanes.backend.Backend {
-        const stepped = if (comptime mac) blk: {
-            var real: Backend = undefined;
-            break :blk real.backend().vtable.prefill_step != null;
-        } else true;
-        const b = f.target.backend();
-        f.table = b.vtable.*;
-        f.table.prefill = prefill;
-        f.table.prefill_step = if (stepped) step else null;
-        f.table.release = release;
-        f.table.verify = verify;
-        return .{ .ptr = &f.target, .vtable = &f.table };
-    }
-    fn deinit(f: *Fake) void {
-        f.filling.deinit(a);
-        f.target.deinit();
-    }
-    fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
-        while (!try fill.step(from(ptr), s)) {}
-    }
-    fn step(ptr: *anyopaque, s: *Stream) anyerror!bool {
-        return fill.step(from(ptr), s);
-    }
-    fn release(ptr: *anyopaque, s: *Stream) void {
-        from(ptr).abortPrompt(s);
-    }
-    fn verify(ptr: *anyopaque, wins: []const lanes.backend.Window, out: []lanes.backend.Verified) anyerror!void {
-        const f = from(ptr);
-        try f.target.backend().vtable.verify(ptr, wins, out);
-        if (f.barrier and !f.ready.load(.acquire)) {
-            f.ready.store(true, .release);
-            while (!f.go.load(.acquire)) std.Thread.yield() catch {};
-        }
-    }
-    pub fn beginPrompt(f: *Fake, s: *Stream) !fill.State {
-        f.begins += 1;
-        f.target.backend().release(s);
-        const got = try f.target.lanes.getOrPut(a, s);
-        got.value_ptr.* = .{};
-        errdefer f.target.backend().release(s);
-        const at = if (s.reuse.saved != null) s.reuse.at else f.restored_at;
-        if (at > s.prompt_len) return error.SnapshotNotPrefix;
-        if (s.reuse.saved) |snap| {
-            const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(snap));
-            if (kept.items.len != at) return error.SnapshotOutOfStep;
-            try got.value_ptr.history.appendSlice(a, kept.items);
-        } else try got.value_ptr.history.appendSlice(a, s.prompt()[0..at]);
-        s.cached = at;
-        s.fill_at.store(at, .monotonic);
-        return .{ .stream = s, .slot = 0, .at = at };
-    }
-    pub fn decoding(f: *const Fake) bool {
-        return f.target.lanes.count() > f.filling.count();
-    }
-    pub fn promptRows(_: *Fake, at: u32, end: u32) u32 {
-        return @min(16384, end - at);
-    }
-    pub fn chunkPrompt(f: *Fake, s: *Stream, _: u32, at: u32, n: u32) !void {
-        if (f.fail_chunk) return error.GpuFailed;
-        const held = &f.target.lanes.getPtr(s).?.history;
-        if (held.items.len != at) return error.PositionMismatch;
-        try held.appendSlice(a, s.prompt()[at..][0..n]);
-        if (s.prompt_len == 102400) {
-            if (f.chunks == 0) f.first_round = f.target.rounds;
-            f.last_round = f.target.rounds;
-            f.chunks += 1;
-            f.max_rows = @max(f.max_rows, n);
-        }
-        if (f.chunk_hook) |hook| hook(f.chunk_ctx.?, s);
-    }
-    pub fn finishPrompt(f: *Fake, s: *Stream) !void {
-        if (f.target.lanes.get(s).?.history.items.len != s.prompt_len) return error.PromptIncomplete;
-        f.ends += 1;
-    }
-    pub fn abortPrompt(f: *Fake, s: *Stream) void {
-        _ = f.filling.remove(s);
-        f.target.backend().release(s);
-    }
-};
-const Box = struct {
-    tokens: [2]std.ArrayList(u32) = @splat(.empty),
-    done: std.atomic.Value(u32) = .init(0),
-    bad: bool = false,
-    fn event(ptr: *anyopaque, id: api.Id, e: *const api.Event) void {
-        const b: *Box = @ptrCast(@alignCast(ptr));
-        switch (e.*) {
-            .tokens => |ts| b.tokens[id - 1].appendSlice(a, ts) catch {
-                b.bad = true;
-            },
-            .finished => |end| {
-                if (end.reason == .failed) b.bad = true;
-                _ = b.done.fetchAdd(1, .release);
-            },
-            else => {},
-        }
-    }
-    fn deinit(b: *Box) void {
-        for (&b.tokens) |*ts| ts.deinit(a);
-    }
-};
+
+test "glm prefill: exhausted pool releases the waiting owner and preserves permanent refusals" {
+    if (comptime !mac) return error.SkipZigTest;
+    const pool = @import("pool.zig");
+    const slots = @import("slots.zig");
+    var engine: @import("engine.zig").Engine = undefined;
+    engine.ep = null;
+    engine.c = .{};
+    engine.c.layers = 0;
+    engine.c.mtp = 0;
+    var storage: [2]slots.Slot = undefined;
+    for (&storage) |*s| s.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl: slots.Slots = .{
+        .gpa = a,
+        .e = &engine,
+        .slots = &storage,
+        .rows = undefined,
+        .ids = undefined,
+        .lasts = undefined,
+        .picks = undefined,
+        .ring = undefined,
+        .pool = .{ .base = undefined, .blocks = 2, .kpool = 4 },
+    };
+    defer sl.snaps.deinit(a);
+    var backend: Backend = .{ .gpa = a, .sl = &sl };
+    defer backend.deinit();
+    const prompt: [100]u32 = @splat(7);
+    var waiting = try Stream.init(a, .{ .id = "waiting", .prompt = &prompt, .max_new = 200 });
+    defer waiting.deinit(a);
+    var oversized = try Stream.init(a, .{ .id = "oversized", .prompt = &prompt, .max_new = 400 });
+    defer oversized.deinit(a);
+
+    try std.testing.expect(Backend.fits(&backend, 100, 200));
+    try pool.reserve(&sl, 0, 317, null);
+    storage[0].used = true;
+    const occupied = storage[0].region.?;
+    try std.testing.expect(!Backend.fits(&backend, 100, 200));
+    try std.testing.expectError(error.LaneMemory, fill.step(&backend, &waiting, 0));
+    try std.testing.expectEqual(@as(u32, 0), backend.by.count());
+    try std.testing.expectEqual(@as(u32, 0), backend.filling.count());
+    try std.testing.expect(storage[1].region == null and !storage[1].used);
+    try std.testing.expectEqual(occupied, storage[0].region.?);
+
+    try std.testing.expectError(error.ContextFull, fill.step(&backend, &oversized, 0));
+    sl.release(0);
+    try std.testing.expect(Backend.fits(&backend, 100, 200));
+    try std.testing.expectError(error.ContextFull, fill.step(&backend, &oversized, 0));
+    try pool.reserve(&sl, 1, 317, null);
+    sl.release(1);
+    for (storage) |s| try std.testing.expect(s.region == null and !s.used);
+}
+
+const harness = @import("prefill_harness.zig");
+const Fake = harness.Fake;
+const Box = harness.Box;
 fn run(drafts: bool, concurrent: bool) !Box {
     var fake: Fake = .{ .barrier = concurrent };
     defer fake.deinit();
@@ -169,6 +102,10 @@ fn run(drafts: bool, concurrent: bool) !Box {
     try std.testing.expectEqual(@as(usize, 32), box.tokens[1].items.len);
     try std.testing.expectEqual(@as(usize, 2), fake.begins);
     try std.testing.expectEqual(@as(usize, 2), fake.ends);
+    try std.testing.expectEqualSlices(u32, &.{4}, box.widths[0].items);
+    var prompt_total: usize = 0;
+    for (box.widths[1].items) |width| prompt_total += width;
+    try std.testing.expectEqual(@as(usize, 102400), prompt_total);
     if (concurrent) {
         try std.testing.expect(fake.chunks >= 102400 / fill.decode_rows);
         try std.testing.expect(fake.max_rows <= fill.decode_rows);
@@ -201,16 +138,16 @@ test "glm prefill: resumed planned cuts and marks survive yields and independent
     };
     var marks: Marks = .{};
     first.reuse = .{ .marks = &.{ 2048, 4096 }, .hook = .{ .ptr = &marks, .at = Marks.hit } };
-    try std.testing.expect(!try fill.step(&f, &first));
+    try std.testing.expect(!try fill.step(&f, &first, 0));
     try std.testing.expectEqual(@as(u32, 2048), first.fill_at.load(.monotonic));
     f.restored_at = 0;
-    try std.testing.expect(!try fill.step(&f, &second));
+    try std.testing.expect(!try fill.step(&f, &second, 0));
     try std.testing.expectEqual(@as(u32, 3000), second.fill_at.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 2), f.filling.count());
-    try std.testing.expect(!try fill.step(&f, &first));
+    try std.testing.expect(!try fill.step(&f, &first, 0));
     try std.testing.expectEqual(@as(u32, 4096), first.fill_at.load(.monotonic));
-    try std.testing.expect(try fill.step(&f, &first));
-    while (!try fill.step(&f, &second)) {}
+    try std.testing.expect(try fill.step(&f, &first, 0));
+    while (!try fill.step(&f, &second, 0)) {}
     try std.testing.expectEqualSlices(u32, &.{ 2048, 4096 }, &marks.at);
     try std.testing.expectEqual(@as(usize, 0), f.filling.count());
 }
@@ -222,9 +159,9 @@ test "glm prefill: a failed chunk, cancellation or state allocation releases jus
     defer s.deinit(a);
     var survivor = try Stream.init(a, .{ .id = "other", .prompt = &.{ 2, 7, 1, 8 }, .max_new = 4, .chunks = &.{2} });
     defer survivor.deinit(a);
-    try std.testing.expect(!try fill.step(&f, &survivor));
+    try std.testing.expect(!try fill.step(&f, &survivor, 0));
     f.fail_chunk = true;
-    try std.testing.expectError(error.GpuFailed, fill.step(&f, &s));
+    try std.testing.expectError(error.GpuFailed, fill.step(&f, &s, 0));
     try std.testing.expectEqual(@as(usize, 1), f.filling.count());
     try std.testing.expectEqual(@as(u32, 2), f.filling.get(&survivor).?.at);
     f.abortPrompt(&survivor);
@@ -234,11 +171,11 @@ test "glm prefill: a failed chunk, cancellation or state allocation releases jus
     f.filling = .empty;
     f.gpa = failing.allocator();
     f.fail_chunk = false;
-    try std.testing.expectError(error.OutOfMemory, fill.step(&f, &s));
+    try std.testing.expectError(error.OutOfMemory, fill.step(&f, &s, 0));
     try std.testing.expectEqual(@as(usize, 0), f.filling.count());
     f.gpa = a;
     s.chunks = &.{2};
-    try std.testing.expect(!try fill.step(&f, &s));
+    try std.testing.expect(!try fill.step(&f, &s, 0));
     const Cancel = struct {
         fn yes(_: *anyopaque) bool {
             return true;
@@ -246,7 +183,7 @@ test "glm prefill: a failed chunk, cancellation or state allocation releases jus
     };
     var dummy: u8 = 0;
     s.cancel_check = .{ .ptr = &dummy, .check = Cancel.yes };
-    try std.testing.expectError(error.Cancelled, fill.step(&f, &s));
+    try std.testing.expectError(error.Cancelled, fill.step(&f, &s, 0));
     try std.testing.expectEqual(@as(usize, 0), f.filling.count());
 }
 
@@ -315,14 +252,49 @@ test "glm prefill: an image handoff failure invalidates the old owner before cha
     second.images = &images;
     var io: Images = .{ .image_owner = &first };
     const input = @import("prompt_images.zig");
-    try std.testing.expectError(error.GpuFailed, input.prepare(&io, &second, 1));
+    try std.testing.expectError(error.GpuFailed, input.prepare(&io, &second, 1, second.cached));
     try std.testing.expect(io.image_owner == null and !io.inject);
     io.fail = false;
-    try input.prepare(&io, &first, 0);
+    try input.prepare(&io, &first, 0, first.cached);
     try std.testing.expect(io.image_owner == &first and io.inject);
     try std.testing.expectEqual(@as(usize, 2), io.writes);
-    try input.prepare(&io, &first, 0);
+    try input.prepare(&io, &first, 0, first.cached);
     try std.testing.expectEqual(@as(usize, 2), io.writes);
+}
+test "glm prefill: a resumed image prompt sends the tower only the images its restored state does not hold" {
+    const Images = struct {
+        image_owner: ?*Stream = null,
+        sent: []const lanes.stream.Image = &.{},
+        writes: usize = 0,
+        pub fn endImages(_: *@This()) void {}
+        pub fn encodeImages(i: *@This(), _: u32, imgs: []const lanes.stream.Image) !void {
+            i.writes += 1;
+            i.sent = imgs;
+        }
+    };
+    var s = try Stream.init(a, .{ .id = "a", .prompt = &.{ 1, 9, 9, 2, 9, 9, 3, 4 }, .max_new = 1 });
+    defer s.deinit(a);
+    var other = try Stream.init(a, .{ .id = "b", .prompt = &.{1}, .max_new = 1 });
+    defer other.deinit(a);
+    const images = [_]lanes.stream.Image{ .{ .pixels = &.{}, .gh = 0, .gw = 0, .at = 1, .tokens = 2 }, .{ .pixels = &.{}, .gh = 0, .gw = 0, .at = 4, .tokens = 2 } };
+    s.images = &images;
+    const input = @import("prompt_images.zig");
+    // fresh, kept through the first image, kept inside the second: whole images from the first one not held
+    for ([_]u32{ 0, 3, 5 }, [_]usize{ 2, 1, 1 }) |cached, n| {
+        var io: Images = .{};
+        s.cached = cached;
+        try input.prepare(&io, &s, 0, s.cached);
+        try std.testing.expectEqual(@as(usize, 1), io.writes);
+        try std.testing.expectEqual(n, io.sent.len);
+        try std.testing.expectEqual(images[2 - n].at, io.sent[0].at);
+        try std.testing.expect(io.image_owner == &s);
+    }
+    // kept past every image: no tower run, and another prompt's rows stay its own
+    var io: Images = .{ .image_owner = &other };
+    s.cached = 7;
+    try input.prepare(&io, &s, 0, s.cached);
+    try std.testing.expectEqual(@as(usize, 0), io.writes);
+    try std.testing.expect(io.image_owner == &other);
 }
 test "glm prefill: GLM advertises one-chunk prompt work to the shared lane core" {
     if (comptime !mac) return error.SkipZigTest;
@@ -377,7 +349,7 @@ test "glm prefill: resumed equals fresh with real fake histories and saved prefi
         var made: usize = 0;
         defer for (saved[0..made]) |snap| f.target.drop(snap);
         while (true) {
-            const done = try fill.step(&f, &s);
+            const done = try fill.step(&f, &s, 0);
             try history(&f, &s);
             if (done) break;
             saved[made] = try f.target.save(&s, s.fill_at.load(.monotonic));
@@ -393,11 +365,11 @@ test "glm prefill: resumed equals fresh with real fake histories and saved prefi
             defer r.deinit(a);
             var other = try Stream.init(a, .{ .id = "other", .prompt = &.{ 9, 2, 6, 5, 3 }, .max_new = 1, .chunks = &.{ 2, 4 } });
             defer other.deinit(a);
-            var other_done = try fill.step(&resumed, &other);
+            var other_done = try fill.step(&resumed, &other, 0);
             while (true) {
-                const done = try fill.step(&resumed, &r);
+                const done = try fill.step(&resumed, &r, 0);
                 try history(&resumed, &r);
-                if (!other_done) other_done = try fill.step(&resumed, &other);
+                if (!other_done) other_done = try fill.step(&resumed, &other, 0);
                 try history(&resumed, &other);
                 if (done) break;
             }
@@ -412,10 +384,10 @@ test "glm prefill: fake completion cannot repair a corrupted earlier chunk by re
     defer f.deinit();
     var s = try Stream.init(a, .{ .id = "control", .prompt = &.{ 3, 1, 4, 1, 5 }, .max_new = 1, .chunks = &.{2} });
     defer s.deinit(a);
-    try std.testing.expect(!try fill.step(&f, &s));
+    try std.testing.expect(!try fill.step(&f, &s, 0));
     try history(&f, &s);
     f.target.lanes.getPtr(&s).?.history.items[0] += 1;
-    try std.testing.expect(try fill.step(&f, &s));
+    try std.testing.expect(try fill.step(&f, &s, 0));
     try std.testing.expectEqual(@as(u32, 4), f.target.lanes.get(&s).?.history.items[0]);
     const expected = lanes.fake.next(s.prompt(), s.sampling, s.prompt_len);
     const b = f.target.backend();
@@ -490,4 +462,89 @@ test "glm prefill: the live lane host finishes a long fill amid continuing short
     try std.testing.expect(q.max_gap <= 8 + 3);
     try std.testing.expect(q.ended_with_arrivals);
     try std.testing.expectEqual(@as(usize, 130), q.done.load(.acquire));
+}
+
+test "glm prefill: the flag share keeps every CUDA chunk start on the grid while the family is gated out" {
+    const hostfill = @import("../../core/lane_host_fill.zig");
+    var f: Fake = .{ .grid = 2048, .decode_shrink = false }; // CUDA's 2048 grid, full-grid chunks (no Metal shrink)
+    defer f.deinit();
+    var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(a);
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, f.backend(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2, .decode_share = 0.5 }); // the explicit flag share
+    try std.testing.expect(host.decode_cap);
+    var dec = try Stream.init(a, .{ .id = "dec", .prompt = &.{ 3, 1, 4 }, .max_new = 8 });
+    defer dec.deinit(a);
+    try core.addStream(&dec); // a live decoder: the policy sees concurrent load
+    defer core.backend.release(&dec);
+    const tokens = try a.alloc(u32, 5000);
+    defer a.free(tokens);
+    @memset(tokens, 7);
+    var s = try Stream.init(a, .{ .id = "grid", .prompt = tokens, .max_new = 4, .chunks = &.{ 2048, 4096 } });
+    defer s.deinit(a);
+    var hint: u32 = hostfill.capRows(&host); // the host's prefill_step hint: 0 for a gated-off family
+    try std.testing.expectEqual(@as(u32, 0), hint);
+    while (!try fill.step(&f, &s, hint)) {
+        hint = hostfill.capRows(&host);
+        try std.testing.expectEqual(@as(u32, 0), hint); // every step arrives uncapped: l.fill rides the grid
+    }
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2048, 4096 }, f.starts.items); // every start on 2048; BadChunk never raised
+}
+
+test "glm prefill: a family that opts into chunk invariance gets the cap, and GLM's step still keeps the 2048 grid" {
+    const hostfill = @import("../../core/lane_host_fill.zig");
+    var f: Fake = .{ .grid = 2048, .decode_shrink = false, .invariant = true };
+    defer f.deinit();
+    var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(a);
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, f.backend(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2, .decode_share = 0.5 });
+    var dec = try Stream.init(a, .{ .id = "dec", .prompt = &.{ 3, 1, 4 }, .max_new = 8 });
+    defer dec.deinit(a);
+    try core.addStream(&dec);
+    defer core.backend.release(&dec);
+    const hint = hostfill.capRows(&host);
+    try std.testing.expectEqual(hostfill.decode_cap_rows, hint); // opted in: the cap now reaches the driver
+    const tokens = try a.alloc(u32, 5000);
+    defer a.free(tokens);
+    @memset(tokens, 7);
+    var s = try Stream.init(a, .{ .id = "capped", .prompt = tokens, .max_new = 4, .chunks = &.{ 2048, 4096 } });
+    defer s.deinit(a);
+    try std.testing.expect(!try fill.step(&f, &s, hint)); // the step takes the hint as `_`: a whole 2048-row chunk...
+    try std.testing.expect(!try fill.step(&f, &s, hint));
+    try std.testing.expect(try fill.step(&f, &s, hint)); // ...so the prompt ends on the cold plan's cuts
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2048, 4096 }, f.starts.items); // every start on 2048: no BadChunk
+}
+
+test "glm prefill: widths report actual planned cuts and a single pass" {
+    for ([_]bool{ false, true }) |chunked| {
+        var f: Fake = .{};
+        defer f.deinit();
+        const tokens: [23]u32 = @splat(7);
+        var s = try Stream.init(a, .{ .id = "widths", .prompt = &tokens, .max_new = 4, .chunks = if (chunked) &.{ 5, 18 } else &.{} });
+        defer s.deinit(a);
+        while (!try fill.step(&f, &s, 0)) {}
+        const expected: []const u32 = if (chunked) &.{ 5, 13, 5 } else &.{23};
+        try std.testing.expectEqualSlices(u32, expected, s.prefill_widths.items);
+        try std.testing.expectEqualSlices(u32, &tokens, f.target.lanes.get(&s).?.history.items);
+        f.abortPrompt(&s);
+    }
+}
+
+test "glm prefill: widths exclude a restored prefix and failed target chunks" {
+    var f: Fake = .{ .restored_at = 3 };
+    defer f.deinit();
+    const tokens: [23]u32 = @splat(7);
+    var s = try Stream.init(a, .{ .id = "resumed-widths", .prompt = &tokens, .max_new = 4, .chunks = &.{ 5, 18 } });
+    defer s.deinit(a);
+    try std.testing.expect(!try fill.step(&f, &s, 0));
+    try std.testing.expectEqualSlices(u32, &.{2}, s.prefill_widths.items);
+    f.fail_chunk = true;
+    try std.testing.expectError(error.GpuFailed, fill.step(&f, &s, 0));
+    try std.testing.expectEqualSlices(u32, &.{2}, s.prefill_widths.items);
+    try std.testing.expectEqual(@as(usize, 0), f.filling.count());
 }

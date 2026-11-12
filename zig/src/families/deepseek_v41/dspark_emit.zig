@@ -211,7 +211,7 @@ const Ds = struct {
         const cf = d.cfg();
         const n = e.n;
         const D: i64 = cf.hidden;
-        const H: i64 = cf.heads / e.o.world;
+        const H: i64 = try e.rankHeads();
         const hd: i64 = cf.head_dim;
         const x = try e.buf("w.out", .{}, .bf16, &.{ n, D });
         const qa = try e.buf("L.qa", .{}, .bf16, &.{ n, cf.q_lora });
@@ -263,7 +263,7 @@ const Ds = struct {
         // `r1`: the split kernel's CTAs a chunk; q arrives rotated (no ATTN_ROPE fold)
         if (e.o.r1) try d.appendArgs(&.{ .{ .i = E.attnSplit(n) }, .{ .i = 0 } }) else if (e.o.r1_sig) try d.appendArgs(&.{ .{ .i = 0 }, .{ .i = 0 } });
         // o: wo_a's groups over the heads' columns, then wo_b (this rank's fp32 partial)
-        const g: usize = cf.o_groups / e.o.world;
+        const g: usize = try e.rankGroups();
         const gk: i64 = @divExact(H * hd, @as(i64, @intCast(g)));
         const oa = try e.buf("L.oa", .{}, .bf16, &.{ n, @as(i64, @intCast(g)) * cf.o_lora });
         var po: [8]E.Proj = undefined;
@@ -337,7 +337,7 @@ const Ds = struct {
             try e.glue("exchange_f32", &.{ try e.buf("L.moe", .{}, .f32, &.{ n, D }), try e.buf("w.recv.moe", .{}, .bf16, &.{ e.o.world, n, D }) });
         }
         try d.final();
-        const V: i64 = d.cfg().vocab / e.o.world;
+        const V: i64 = (try @import("partition.zig").share(d.cfg().vocab, e.o.rank, e.o.world)).len;
         const logits = try e.buf("w.ds.logits", .{}, .f32, &.{ n, V });
         try e.upstream("head", try e.buf("w.out", .{}, .bf16, &.{ n, D }), D, V, logits);
         try e.glue("ds_out", &.{ logits, try e.buf("L.mhc.c", .{}, .bf16, &.{ n, D }) });

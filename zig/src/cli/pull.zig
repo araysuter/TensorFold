@@ -33,7 +33,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     }
     const endpoint = envValue(env, "HF_ENDPOINT") orelse "https://huggingface.co";
     const root = try hub.cacheDir(a, env, override);
-    var client: std.http.Client = .{ .allocator = a, .io = io };
+    var client = @import("pull_http.zig").client(a, io);
     defer client.deinit();
 
     const sha = resolveRevision(a, &client, out, endpoint, repo, revision) catch |e| switch (e) {
@@ -229,8 +229,7 @@ fn lfsDigest(oid: []const u8) ?[32]u8 {
     return parseHex(32, if (std.mem.startsWith(u8, oid, "sha256:")) oid[7..] else oid);
 }
 
-/// config.json's model_type from raw bytes.
-/// config.json's model_type, copied out of the parse, and whether it is a DFlash2 drafter (`serve --drafter`).
+/// config.json's model_type, copied from the raw bytes' parse, and whether it is a DFlash2 drafter (`serve --drafter`).
 fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, drafter: bool } {
     var parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch return .{ .model_type = "unknown", .drafter = false };
     defer parsed.deinit();

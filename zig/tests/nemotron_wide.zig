@@ -1,4 +1,4 @@
-//! Wide-window probes for Nemotron on Metal: window cost by kernel class, and expert picks of drafted, sibling and stream rows.
+//! Wide-window Nemotron probes on Metal: window cost by kernel class, expert picks of drafted, sibling, stream rows.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -117,7 +117,7 @@ fn geometry(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void 
     for (o.rows) |r| most = @max(most, r);
     const m = try nm.Model.load(gpa, io, o.model, true);
     defer m.deinit();
-    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = 2, .batch_rows = @max(most, 16) });
+    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = @max(most, 2), .batch_rows = @max(most, 16) });
     defer b.deinit();
     var truth: std.ArrayList(u32) = .empty;
     var p = try Probe.init(b);
@@ -172,7 +172,7 @@ fn profile(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void {
     const m = try nm.Model.load(gpa, io, o.model, true);
     defer m.deinit();
     const c = m.config;
-    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = 2, .batch_rows = @max(most, 16) });
+    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = @max(most, 2), .batch_rows = @max(most, 16) });
     defer b.deinit();
     const kept = 3; // a verify's replayed rows: the last window's kept rows
 
@@ -241,7 +241,7 @@ fn profile(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void {
     }
 }
 
-/// Window cost curves in one process, round robin: per-row stores (before), replayed rows, replayed rows + 2-row experts.
+/// Window cost curves, one process, round robin: per-row stores (before), replayed rows, replayed rows + 2-row experts.
 fn curve(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void {
     const prompts = try probe.readPrompts(arena, o.prompts);
     const prompt = prompts.map.get(o.prompt) orelse fail("no prompt {s}", .{o.prompt});
@@ -249,7 +249,7 @@ fn curve(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void {
     for (o.rows) |r| most = @max(most, r);
     const m = try nm.Model.load(gpa, io, o.model, true);
     defer m.deinit();
-    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = 2, .batch_rows = @max(most, 16) });
+    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = @max(most, 2), .batch_rows = @max(most, 16) });
     defer b.deinit();
     const kept = 3;
     var truth: std.ArrayList(u32) = .empty;
