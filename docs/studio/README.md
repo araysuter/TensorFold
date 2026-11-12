@@ -1,11 +1,13 @@
 # Studio native serving
 
-For Swift and Ornith behind one API with one engine resident at a time, use the
+For Swift and Arete behind one API with one engine resident at a time, use the
 [Studio gateway](../../tools/studio-gateway/README.md). It owns model switching,
-SSD conversation snapshots, and idle unloading. The single-model launcher below
-remains available for direct Swift serving and historical benchmark reproduction.
+SSD conversation snapshots, and idle unloading. Its default profiles each use
+one 131,072-token window and one active request. The single-model launcher below
+remains available for historical benchmark reproduction; its two-stream settings
+are separate from the current gateway configuration.
 
-The current upstream engine is native TensorFold 1.1.1. Serving uses the installed Zig/Metal binary, not the frozen Python engine or MLX. The Python virtual environment remains useful for benchmark tokenization and clients.
+The historical launcher below pins native TensorFold 1.1.1. Synchronizing this repository with newer upstream source does not replace the separately qualified serving executable. Native serving uses the installed Zig/Metal binary; Python environments remain useful for benchmark clients.
 
 `tools/start-studio.sh` serves the pinned Swift 1.5 affine 4-bit checkpoint with the pinned 4-bit DFlash2 drafter, 131,072 total context tokens, two concurrent streams and a 5 GiB retained-prompt budget. It listens on loopback port 8080 and keeps the existing restricted-permission API-key file. `STUDIO_PORT` selects an isolated benchmark port, and `TENSORFOLD_NATIVE_BIN` selects another native executable. The public hostname comes from `STUDIO_ALLOWED_HOST` or the private `$HOME/.config/tensorfold/studio-host` file.
 
