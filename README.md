@@ -5,67 +5,42 @@ The optional [Studio gateway](tools/studio-gateway/README.md) supervises one
 model at a time. Its deployed runtime remains separately pinned and qualified;
 synchronizing this source tree does not upgrade that binary.
 
-The [Ripple MLX conversion experiment](tools/ripple/README.md) builds independent
-mixed-precision checkpoints from the original BF16 release. An optional temporary
-MLX worker adds `ripple-65b-preview` to the same API while native Ripple support
-is developed upstream. It supports text chat and private SSD KV restoration.
-Its [matching DFlash2 runtime](tools/ripple/DFLASH2.md) passes matched token checks,
-improves short-prompt generation from about 12 to 16–22 tokens/sec, and fits the
-128K capacity/SSD test at 49.1 GiB peak MLX allocation. Prompt processing remains
-about 255 tokens/sec at the full window. Tool calling remains unsupported. Swift and Ornith retain their
-existing native engines and matching drafters.
-
 ## Models through one Studio API
 
-The [Studio gateway](tools/studio-gateway/README.md) exposes Swift-1.5, our
-smallest Ornith-1.5-122B quant, [Arete-27B MLX 5-bit](tools/arete/README.md),
-and the optional Ripple MLX profile through one API. It loads **one model and
-its DFlash2 drafter at a time**, keeps the most recently used conversation in
-RAM, and retains up to four conversations total across all models and API keys. After
-30 minutes idle, it saves the conversation and unloads the engine. Temporary
-conversation state is cleared when the gateway shuts down; model weights stay
-on SSD. A cold request includes model-loading and conversation-restoration time.
+The default Studio setup advertises **Swift-1.5** and **Arete-27B MLX 5-bit**.
+Both use native TensorFold, the Qwen3.8-27B DFlash2 drafter, and a **131,072-token
+input-plus-output window with one active request at a time**. Only the selected
+model and its drafter are loaded in RAM; the other model's weights stay on SSD.
+Swift and Arete both have [native image profiles](tools/studio-gateway/VISION.md).
 
-Swift, Ornith and Arete have [native image profiles](tools/studio-gateway/VISION.md).
-Ripple has no trained vision encoder and remains text-only. The gateway checks
-RAM headroom before admitting a model request and returns HTTP 503 when another
-task leaves insufficient space for the configured working budget and host reserve.
+The gateway retains up to four conversations **total across all models and API
+keys**, including the active conversation. After 30 minutes idle, it saves the
+conversation and unloads the engine. Temporary conversation state is cleared
+when the gateway shuts down. A cold request includes model-loading and
+conversation-restoration time. RAM admission checks keep a 6 GiB host reserve
+and return HTTP 503 when other work leaves insufficient headroom.
 
-For a 64 GiB Studio, **start with Swift-1.5**: it scored higher across the full
-test and used less reasoning to solve matched questions. Choose Ornith mixed
-2-bit when you want the 122B MoE model and can accept its larger weight footprint
-and more frequent reasoning cutoffs. Both configurations use their matching
-DFlash2 drafters.
+Start with Swift for the locally tested reasoning workload. Choose Arete when
+you want the NousResearch model with its original BF16 vision tower and our
+5-bit language quantization. There is no matched local quality score for Arete.
 
-| Model | Checkpoint weights only | Our cleaned GPQA result |
+| API model ID | Published checkpoint | Local quality evidence |
 | --- | --- | --- |
-| [Swift-1.5 affine 4-bit](https://huggingface.co/ukisai/Swift-1.5-4bit-MLX) | 15.83 GB / 14.74 GiB | **175/189 — 92.6%** |
-| [Ornith-1.5-122B mixed 2-bit](https://huggingface.co/araysuter/Ornith-1.5-122B-MLX-mixed-2bit) | 40.62 GB / 37.83 GiB | **157/189 — 83.1%** |
+| `swift-1.5` | [Swift-1.5 affine 4-bit](https://huggingface.co/ukisai/Swift-1.5-4bit-MLX) | Cleaned GPQA: **175/189 (92.6%)** |
+| `arete-27b` | [Arete-27B MLX 5-bit](https://huggingface.co/araysuter/Arete-27B-MLX-5bit) | No local GPQA run; [vision/runtime checks](benchmarks/arete-2026-11-07/README.md) |
 
-[Ripple mixed-4bit](https://huggingface.co/araysuter/Ripple-65B-Preview-MLX-mixed-4bit)
-uses 39.05 GB of target weights plus the selected 2.48 GB drafter. Its
-[runtime receipt](tools/ripple/DFLASH2.md) covers speed and 128K capacity; there
-is no matched GPQA result for Ripple here. The conversion's 89.75% synthetic
-top-token agreement is a separate fidelity diagnostic, not a task score.
+Swift's score is from [our historical local evaluation](benchmarks/studio/charts/studio-model-gateway-2026-10-22/gpqa-summary.json).
+It excludes nine questions from the 198-question GPQA Diamond set and uses
+adaptive output budgets: 32,768 tokens initially, with unfinished cutoffs
+retried at 65,536 and then 98,304. Remaining cutoffs count as incorrect. It is
+not a fresh fixed-budget run or an Arete comparison.
 
-These are [our local results](benchmarks/studio/charts/studio-model-gateway-2026-10-22/gpqa-summary.json),
-not the model authors' scores. The cleaned set
-removes nine questions from the original 198-question GPQA Diamond set. Greedy
-generation used thinking mode and an initial 32,768-token output budget; only
-unfinished cutoffs were retried at 65,536 and then 98,304 tokens. Other answers
-were retained, so this is an adaptive-budget comparison, not a fresh 96K run.
-Ornith retains early MLX answers before its native TensorFold/DFlash2
-continuation. The main scores include unfinished answers as incorrect. Excluding
-remaining cutoffs yields 93.1% for Swift and 94.0% for Ornith on **different
-subsets**; those filtered scores do not establish a ranking. Weights above
-exclude drafters, context state, and execution buffers.
-
-Use [Qwen3.8-27B DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) with
-Swift and [Ornith-1.5-122B DFlash2](https://huggingface.co/incoai/Ornith-1.5-122B-DFlash2)
-with Ornith. The gateway needs the [session-enabled native runtime](tools/studio-gateway/native/),
-the prepared native-compatible Swift checkpoint, and private configuration.
-Build and checkpoint preparation are described in the linked guides; a stock
-release binary does not provide the gateway's session save/load contract.
+Use the [session-enabled native runtime](tools/studio-gateway/native/) and
+[Qwen3.8-27B DFlash2](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2) with both
+models. Prepare Swift's native checkpoint and vision tower as described in the
+[gateway setup guide](tools/studio-gateway/README.md); the published Arete quant
+already contains its tower. A stock release binary does not provide the
+supervisor's session save/load contract.
 
 ```sh
 install -d -m 700 "$HOME/.config/tensorfold"
@@ -78,16 +53,15 @@ python3 tools/studio-gateway/gateway.py \
   --config "$HOME/.config/tensorfold/studio-gateway.json"
 ```
 
-Clients keep one `/v1` base URL and API key, choosing `swift-1.5` or
-`ornith-1.5-122b-mixed-2bit` in the request's `model` field. Follow the
-[gateway setup and client guide](tools/studio-gateway/README.md) for conversation
-IDs, authentication, memory settings, and cold-loading behavior. The configured
-131,072-token window counts input and output together.
-Our [near-128K capacity check](benchmarks/studio/charts/studio-model-gateway-2026-10-22/README.md)
-saved and restored 130,950 cached tokens for both models on the 64 GiB M5 Max;
-peak process footprint was 42.6 GiB for Swift and 48.3 GiB for Ornith.
-Keep keys, snapshots, private datasets, and
-operator configuration outside Git; see [sharing this fork](docs/studio/SHARING.md).
+Clients keep one `/v1` base URL and API key, choosing `swift-1.5` or `arete-27b`
+in the request's `model` field. Keep downloaded weights and conversion staging
+in Time Machine-excluded directories; private configuration, keys and snapshots
+stay outside Git. See [sharing this fork](docs/studio/SHARING.md).
+
+The [Ornith benchmarks](benchmarks/studio/charts/studio-model-gateway-2026-10-22/README.md)
+and [Ripple MLX conversion/DFlash2 tools](tools/ripple/README.md) remain available
+for historical reproduction. Their models are optional and are not included in
+the default two-model configuration.
 
 TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
