@@ -23,7 +23,7 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
     const side = try shared.fork(self, native, n);
     switch (owned.format) {
         .nvfp4 => {
-            const pt = nvfp4_tile.size(n);
+            const pt = nvfp4_tile.size(self.k, n);
             try self.k.router.route(self.stream, picks, pairs, e, pt, plan);
             const items = cuda.grouped.maxItems(pairs, e, pt);
             try nvfp4_tile.run(self.k, pt, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, skip);
@@ -32,7 +32,7 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
         .fp8g => try fp8(self.k, self.stream, s.picks, s.mixed, owned.view(), plan, pairs, n, s.y, s.moe_act),
         else => return error.UnsupportedQuantization,
     }
-    try shared.join(self, side, native, n);
+    if (side != null) try shared.join(self, side, native, n) else try @import("cuda_shared_split.zig").run(self, native, n);
     if (native.world != 1) {
         const collective = self.m.collective orelse return error.TensorParallelUnavailable;
         try collective.sum(self.stream, s.y, pairs * dims);
@@ -53,7 +53,7 @@ fn ownPicks(self: anytype, picks: u64, out: u64, pairs: usize, first: usize, cou
 pub fn fp8(k: *const Kernels, stream: cuda.Stream, picks: u64, x: u64, layer: cuda.experts.Layer, plan: cuda.grouped.Plan, pairs: usize, n: usize, out: u64, act: u64) !void {
     if (layer.format != .fp8g) return error.UnsupportedQuantization;
     const e = experts_n + 1;
-    const prompt = nvfp4_tile.size(n) != 16;
+    const prompt = nvfp4_tile.size(k, n) != 16;
     const tile: usize = if (prompt) cuda.experts.promptTile(.fp8g) else 16;
     try k.router.route(stream, picks, pairs, e, tile, plan);
     const items = cuda.grouped.maxItems(pairs, e, tile);

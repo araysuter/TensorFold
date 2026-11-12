@@ -79,8 +79,8 @@ const Plan = struct {
 
 /// Whether the full layers' caches lease the pool's pages: asked, and not turned off by TENSORFOLD_KOLIBRI_KV_PAGES=0.
 fn pagesOn(o: Options) bool {
-    const v = std.c.getenv("TENSORFOLD_KOLIBRI_KV_PAGES") orelse return o.kv_pages;
-    return o.kv_pages and !std.mem.eql(u8, std.mem.span(v), "0");
+    const v = @import("profile").lookup("TENSORFOLD_KOLIBRI_KV_PAGES") orelse return o.kv_pages;
+    return o.kv_pages and !std.mem.eql(u8, v, "0");
 }
 
 /// Paged: the first stream's rings and the scratch must fit; the host plans the pool after.
@@ -99,6 +99,12 @@ pub fn attach(p: *anyopaque, streams: u32, n: usize) !void {
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const own: *const Owned = @ptrCast(@alignCast(p));
     return own.kb.admits(prompt, max_tokens);
+}
+
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*kv.Pool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.kb.pool) |*pool| pool else null;
 }
 
 /// Physical positions include the verification reserve, in whole 1,024s; the served window is unchanged.

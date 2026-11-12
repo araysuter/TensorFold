@@ -9,8 +9,8 @@ const moe_w = wt.moe_w;
 
 /// On by default: its slot rows of y are apart from the routed experts', so the bits match; =0 runs it after them.
 pub fn on() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_SHARED_SIDE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_SHARED_SIDE", true) catch true;
 }
 
 /// The shared expert's stream and the two points it forks and joins at.
@@ -41,7 +41,17 @@ pub fn run(pass: anytype, st: cuda.Stream, native: anytype, n: usize) !void {
     try pass.k.nativeMatmul(st, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part, .bf16);
     try pass.k.nativeMatmul(st, s.mixed, dims, n, native.shared[1].native.?, s.shared_up, s.native_part, .bf16);
     try glue.sharedSwiGLU(st, s.shared_gate, s.shared_up, s.shared_act, n, moe_w);
-    try pass.k.nativeMatmul(st, s.shared_act, moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part, .f32);
+    try down(pass, st, s.shared_act, native, n);
+}
+
+/// The whole shared down into y's slot at any eligible rows (faster than the prompt tile and scatter); else scatter.
+pub fn down(pass: anytype, st: cuda.Stream, input: u64, native: anytype, n: usize) !void {
+    const s = pass.s;
+    const w = native.shared[2].native.?;
+    if (w.n == dims and cuda.qmmf_shared.eligible(pass.k.native_lane, n, w, moe_w, slots * dims))
+        return pass.k.native_lane.matmulF32Strided(st, input, moe_w, n, w, s.y + (slots - 1) * dims * 4, slots * dims);
+    const glue = pass.tri.own orelse return error.NativeGlueRequired;
+    try pass.k.nativeMatmul(st, input, moe_w, n, w, s.shared_out, s.native_part, .f32);
     try glue.sharedScatter(st, s.shared_out, s.y, n, dims, slots);
 }
 

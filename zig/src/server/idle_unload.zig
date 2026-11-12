@@ -5,6 +5,7 @@ const cli = @import("cli.zig");
 const log = @import("log.zig");
 const engines = @import("engines.zig");
 const server_mod = @import("server.zig");
+const wait_reason = @import("wait_reason.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -215,7 +216,7 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, reply: Allocator, problem_ou
     }
     if (m.state == .resident) return m.mutex.unlock(m.io);
     if (m.state != .unloaded) {
-        problem_out.* = "the engine is still unloading; send the request again";
+        problem_out.* = wait_reason.unloading_problem;
         m.mutex.unlock(m.io);
         return error.ReloadFailed; // the route returns the retry reason with Retry-After
     }
@@ -247,7 +248,9 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, reply: Allocator, problem_ou
         problem_out.* = "the reopened engine does not draft from the recall record; send the request again";
         return error.ReloadFailed;
     }
-    const info = opened.engine.info();
+    var info = opened.engine.info();
+    info.thinking_switch = srv.info.thinking_switch; // the chat template's facts, read once at start-up, not the engine's
+    info.thinking_applicable = srv.info.thinking_applicable;
     var keepalive: ?*api.keepalive.Keepalive = null;
     if (srv.config.keep_warm_s > 0) if (opened.engine.keepaliveTarget()) |target| {
         keepalive = api.keepalive.Keepalive.start(m.gpa, m.io, target, @as(i64, srv.config.keep_warm_s) * std.time.ns_per_s) catch |e| blk: {

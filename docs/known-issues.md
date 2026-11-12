@@ -8,6 +8,9 @@ release fixes it, and the release notes say which one.
 - GLM-5.3 (EXLR8) decodes slowly next to the other models: a one-row round on two M5 Ultras takes about 45 ms. No CUDA
   engine serves it, and only the `home` profile on M5 Ultras has run. Replies past 2,048 tokens, where the sparse indexer
   starts picking keys, have not been compared with a whole-model reference.
+- Dory on CUDA with `TF_KV_SHARE=n`: a kept state resumes on a 256-token page edge, so a turn prefills up to 255 more
+  tokens than the copy store would. A short resume that also keeps a new state can start 17-23 ms later than the copy
+  store's on a GB10 (153 against 130 ms at 3K tokens). Each state's sliding caches take 12 pool pages (168 MiB at two loops).
 - Kolibri-1 on CUDA with `TF_KV_SHARE=n`: the prompt store keeps whole 512-token pages, so a shared start shorter
   than a page (a chat template's first 45 tokens, say) is not reused, and a prompt is cut at a page boundary. On a GB10,
   cold 2K chat prompts take about 10% longer to the first token than without the store (0.87 against 0.79 s). Decode
@@ -22,23 +25,20 @@ release fixes it, and the release notes say which one.
   verification has been kept. A revised physical-memory peak comparison with 1.0.12 remains unmeasured.
 - Qwen3.8-27B cold prefill at 64K tokens on RTX 50-series GPUs (sm_120) measures about 2% slower than 1.1.0; 32K and shorter prompts, and GB10, are at parity or faster.
 - Flash Next on Metal with explicit --parallel 2 or more ([#1893](https://github.com/ashhart/TensorFold/issues/1893)):
-  on an M3 Ultra with the MLX 4-bit checkpoint, a lone request decodes about 4% slower than at --parallel 1 (likely
-  because kept DeltaNet states can't hand over to shared rounds), and in a 12-turn chat of about 15,000 tokens, 8 of the 11 resumed
-  turns reused 31 to 350 fewer tokens than the single host, about 0.4 s in all. Replies are the same. On a chip with
-  tensor units, a long prompt beside a running reply still takes a 32-row step before each round, which slows both;
-  `--decode-share` helps. The default --parallel auto uses the single host.
+  on an M3 Ultra with the MLX 4-bit checkpoint, in a 12-turn chat of about 15,000 tokens, 8 of the 11 resumed
+  turns reused 31 to 350 fewer tokens than the single host, about 0.4 s in all. Replies are the same. On an M5 Ultra
+  with the MLX 4-bit checkpoint, two overlapping clients still finish later at `--parallel 2` than at `--parallel 1`
+  (47 s against 40 s; 44 s with `--decode-share 0.95`), and so does a 64K prompt beside a reply (21 s against 19 s).
+  The default --parallel auto uses the single host.
 - The 1.0.12 gfx1151 Qwen receipts leave the 27B cancellation failure open and the 9B/27B drafted/plain comparisons
   unrun. Those receipts do not establish a new 1.1.0 device pass.
-- Qwen3.8-Flash-Next in speed-up mode: a drafted request right after a `"draft": false` one decodes slowly, and the next
-  request is back to speed. The tokens are the same.
 - Qwen3.8-Flash-Next on a Mac: a turn more than `--keep-warm` seconds after the last request (900 by default) takes
   about 2 s to its first token on an M3 Ultra, even when its prompt is cached, while macOS wires the model again.
 - Qwen3.8-Flash-Next on one GB10 reads its n-gram embedding tables (29.8 GiB in the MLX 4-bit MTP checkpoint) from
-  the checkpoint files through the page cache, so they compete with the server's own memory. With
-  `TF_FLASHNEXT_CHUNK=16384` the larger prompt scratch leaves too little room for all of them: in our runs, time to
-  first token at 65,536 tokens ranged from 32.9 s to 49.1 s, about 1.5 times, with heavy paging in the slow runs. With
-  the default 1,536-token chunks and the prompt cache off, three runs differed by at most 2.2%; saved prompt states
-  (up to 16 GiB by default) use the same memory and can push table rows out at that chunk size too.
+  the checkpoint files through the page cache, so they compete with the server's own memory. As saved prompt states
+  (up to 16 GiB by default) fill, time to first token on a new prompt of about 65,000 tokens rises from 34 s to about
+  38 s at 1,536-row passes, and from 27 s to about 32 s at 16,384-row passes, with the tables paging in both. One
+  16,384-row run reached 38.9 s. With the prompt cache off, repeats stay within about 1%.
 - On a Mac without tensor units (M1 to M4), Flash Next's uniform 6-bit checkpoint decodes different tokens from 1.0.9
   since 1.0.10's faster products. `FZ_M3_LANES=1` keeps the earlier kernels and their tokens.
 - @Bizuayeu's regression run on shipped 1.1.0 loaded the whole GLM-5.3-Flash NVFP4 checkpoint on two GB10s at TP=2 in 302.1 s, kept one token hash per prompt across three runs and found a passphrase in 199,307 tokens; scored prompts and more than two ranks were not covered ([#1040](https://github.com/ashhart/TensorFold/issues/1040)).

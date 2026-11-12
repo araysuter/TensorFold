@@ -4,7 +4,9 @@ const json = @import("json");
 const ids = @import("ids.zig");
 const reply_text = @import("reply_text.zig");
 const tool_dsml = @import("tool_dsml.zig");
+const tool_dsml_stream = @import("tool_dsml_stream.zig");
 const tool_glm_cut = @import("tool_glm_cut.zig");
+const tool_json_cut = @import("tool_json_cut.zig");
 const tool_glm_stream = @import("tool_glm_stream.zig");
 const tool_params = @import("tool_params.zig");
 const tool_specs = @import("tool_specs.zig");
@@ -36,7 +38,7 @@ fn closing(rest: []const u8, text: []const u8) ?usize {
     return if (std.mem.startsWith(u8, rest[i..], text)) i + text.len else null;
 }
 
-/// Streams XML argument deltas and validated DSML envelopes, matching the final parser.
+/// Streams XML, GLM and DSML argument deltas, else whole envelopes at their closers, matching the final parser.
 pub const Streamer = struct {
     a: Allocator,
     schemas: tool_params.Schemas,
@@ -46,7 +48,7 @@ pub const Streamer = struct {
     typed: bool = false,
     buffer: std.ArrayList(u8) = .empty,
     pos: usize = 0,
-    state: enum { outside, call, buffered, function, value, closing, glm, abort } = .outside,
+    state: enum { outside, call, buffered, function, value, closing, glm, dsml, abort } = .outside,
     index: i64 = -1,
     args_open: bool = false,
     lead: bool = false,
@@ -61,6 +63,7 @@ pub const Streamer = struct {
     buffered_start: usize = 0,
     buffered_close: []const u8 = "",
     glm: tool_glm_stream.Glm = .{},
+    dsml: tool_dsml_stream.Dsml = .{},
 
     pub fn init(a: Allocator, tools: []const Value) Allocator.Error!Streamer {
         var s: Streamer = .{ .a = a, .schemas = try tool_params.schemas(a, tools), .tools = tools };
@@ -90,7 +93,7 @@ pub const Streamer = struct {
         return q[1 .. q.len - 1];
     }
 
-    /// The delta that opens call ``name``: an XML or a GLM call's header, before its arguments.
+    /// The delta that opens call ``name``: an XML, GLM or DSML call's header, before its arguments.
     pub fn begin(s: *Streamer, name: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
         s.current = name;
         s.index += 1;
@@ -151,10 +154,9 @@ pub const Streamer = struct {
                     while (std.mem.indexOfScalarPos(u8, text, at, '<')) |start| {
                         if (tool_dsml.openedBy(text[start..])) |sp| {
                             s.dsml_seen = true;
-                            s.dsml_start = start;
-                            s.dsml_close = sp.close;
                             s.pos = start + sp.open.len;
-                            s.dsml_searched = s.pos;
+                            s.dsml = .{ .sp = sp, .start = start, .at = s.pos };
+                            s.state = .dsml;
                             break;
                         }
                         if (std.mem.startsWith(u8, text[start..], "<tool_call>")) {
@@ -226,6 +228,10 @@ pub const Streamer = struct {
                 },
                 .glm => {
                     if (!try s.glmStep(text, out)) return;
+                    continue;
+                },
+                .dsml => {
+                    if (!try s.dsmlStep(text, out)) return;
                     continue;
                 },
                 .buffered => {
@@ -305,6 +311,7 @@ pub const Streamer = struct {
 
     /// A call that the reply's end left open: its name streamed, its envelope not closed.
     pub fn open(s: *const Streamer) bool {
+        if (s.state == .dsml) return s.dsml.sent > 0; // the block's whole parse would keep it all as text
         return s.index >= 0 and (s.state == .glm or s.state == .function or s.state == .value or s.state == .closing);
     }
 
@@ -332,10 +339,28 @@ pub const Streamer = struct {
         }
     }
 
+    /// One DSML state-machine step: whether ``feed`` goes on; a block it cannot stream parses whole at its closer.
+    fn dsmlStep(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!bool {
+        switch (try tool_dsml_stream.feed(s, text, out)) {
+            .wait => return false,
+            .outside => return true,
+            .rejected => {
+                s.dsml_start = s.dsml.start;
+                s.dsml_close = s.dsml.sp.close;
+                s.pos = s.dsml.start + s.dsml.sp.open.len;
+                s.dsml_searched = s.pos;
+                s.state = .outside;
+                return true;
+            },
+            .more => unreachable,
+        }
+    }
+
     /// ``feed`` of the reply's final text; a value it cuts sends the bytes held back for a closer that never came.
     pub fn finishCut(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
         try s.feed(text, out);
         if (s.state == .glm) return tool_glm_stream.cut(s, text, out); // a GLM value's held bytes
+        if (s.state == .dsml) return tool_dsml_stream.cut(s, text, out); // a DSML value's held bytes
         if (s.state != .value) return;
         var cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", s.held, text[@min(s.pos, text.len)..] });
         if (s.lead and cut.len > 0 and cut[0] == '\n') cut = cut[1..];
@@ -359,7 +384,8 @@ pub fn cutCalls(a: Allocator, text: []const u8, tools: []const Value) Allocator.
     var s: Streamer = try .init(a, tools);
     var deltas: std.ArrayList(Value) = .empty;
     try s.finishCut(text, &deltas);
-    if (!s.open()) return tool_glm_cut.cutCalls(a, text, tools); // a GLM envelope streams no call before it closes
+    // GLM and JSON envelopes stream no call before they close
+    if (!s.open()) return (try tool_glm_cut.cutCalls(a, text, tools)) orelse try tool_json_cut.cutCalls(a, text, tools);
     const Call = struct { id: []const u8 = "", name: []const u8 = "", args: std.ArrayList(u8) = .empty };
     const built = try a.alloc(Call, @intCast(s.index + 1));
     for (built) |*c| c.* = .{};

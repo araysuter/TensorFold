@@ -1,9 +1,11 @@
-//! The contract's family sets: pocket, MiniMax-M3, MOSS-Image, Flash Next NVFP4, grouped affine-4, Flash Next, EXL3.
+//! The CUDA contract's family sets and Clef's joint schema head.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
 const g = @import("core").contract.gates;
 
+const Prompt = @import("contract_qmmf_prompt.zig").Registrations;
+const SharedDown = @import("contract_qmmf_shared.zig").Registrations;
 const Grouped = @import("contract_gb10_many.zig").Registrations;
 
 pub const Sets = struct {
@@ -15,6 +17,9 @@ pub const Sets = struct {
     grouped: *Grouped,
     flashnext: *@import("contract_flashnext_more.zig").Set,
     exl3: *@import("contract_exl3.zig").Set,
+    shared_down: *SharedDown,
+    prompt: *Prompt,
+    joint_schema: *@import("contract_joint_schema.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -40,6 +45,16 @@ pub const Sets = struct {
             gpu.gpa.destroy(exl3);
         }
         try exl3.add(gpu, s, list);
+        const shared_down = try SharedDown.create(gpu, s, &modelopt.lane, a, list);
+        errdefer shared_down.deinit();
+        const prompt = try gpu.gpa.create(Prompt);
+        errdefer gpu.gpa.destroy(prompt);
+        var prompt_lane = modelopt.lane; // the tile in this set's copy only, as Flash Next loads it
+        try prompt_lane.loadPrompt(gpu.d);
+        prompt.* = Prompt.init(gpu, s, prompt_lane);
+        errdefer prompt.deinit();
+        try prompt.append(cap, a, list);
+        const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .pocket = pocket,
@@ -49,10 +64,17 @@ pub const Sets = struct {
             .grouped = grouped,
             .flashnext = flashnext,
             .exl3 = exl3,
+            .shared_down = shared_down,
+            .prompt = prompt,
+            .joint_schema = joint_schema,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.joint_schema.deinit();
+        sets.prompt.deinit();
+        sets.gpa.destroy(sets.prompt);
+        sets.shared_down.deinit();
         sets.exl3.deinit();
         sets.gpa.destroy(sets.exl3);
         sets.flashnext.deinit();

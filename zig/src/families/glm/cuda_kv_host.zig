@@ -4,17 +4,18 @@ const cuda = @import("cuda");
 const posix = std.posix;
 
 pub fn onHost() bool {
-    return set("TF_GLM_KV_HOST");
+    return enabled(.TF_GLM_KV_HOST);
 }
 
 /// TF_GLM_KV_HOST_SHARED=1: the ranks on this host share one copy of the pages (their latent rows are identical).
 pub fn shared() bool {
-    return set("TF_GLM_KV_HOST_SHARED");
+    return enabled(.TF_GLM_KV_HOST_SHARED);
 }
 
-fn set(name: [*:0]const u8) bool {
-    const v = std.c.getenv(name) orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+/// An exact-one switch through the profile registry, which is the one reader of a registered name.
+fn enabled(comptime id: @import("profile").Switch) bool {
+    const v = @import("profile").get(id) orelse return false;
+    return std.mem.eql(u8, v, "1");
 }
 
 /// Host pages of `page` bytes for a `capacity`-row window: `gib` GiB of them, else one full window and 16.
@@ -144,6 +145,7 @@ pub const Gather = struct {
         try stream.d.check(stream.d.api.cuMemsetD32Async(g.n.ptr, 0, 1, stream.handle), "cuMemsetD32Async");
         try launch(ops, stream, "tf_glm_kvh_mark", cdiv(total, 256), .{ tokens, counts, @as(c_int, @intCast(width)), @as(i64, @intCast(total)), g.slot_of.ptr, g.list.ptr, g.n.ptr, cap, g.over_dev });
         const l = layer orelse {
+            try g.invalidate(stream); // this call rewrites rows a cached list may name, and it keeps no list of its own
             try launch(ops, stream, "tf_glm_kvh_copy", cdiv(upper, 8), .{ lc, g.list.ptr, g.n.ptr, g.slots.ptr, rv, cap });
             try launch(ops, stream, "tf_glm_kvh_remap", cdiv(total, 256), .{ tokens, counts, @as(c_int, @intCast(width)), @as(i64, @intCast(total)), g.slot_of.ptr });
             try launch(ops, stream, "tf_glm_kvh_reset", cdiv(upper, 256), .{ g.list.ptr, g.n.ptr, g.slot_of.ptr, cap });

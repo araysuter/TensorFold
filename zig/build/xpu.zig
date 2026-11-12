@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const exlr8_build = @import("exlr8.zig");
+const xpu_contract = @import("xpu_contract.zig");
 
 /// ze.zig as its own module: the Qwen27 runner and the Nemotron runtime share one Level Zero table.
 fn zeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -171,6 +172,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     var runners = family(b, target, optimize, runtime(b, target, optimize, &nem.images, ze_mod, runner_core, dpas), runner_core, lanes);
     runners.images = nem.images;
     nemotronSteps(b, target, optimize, runners);
+    const with_contract = b.option(bool, "xpu-contract", "Build the XPU kernel contract's limits audit (needs ocloc for the objects)") orelse false;
+    const images = b.option([]const u8, "xpu-images", "A directory of zebins made on a host with ocloc: glue.bin, contract_controls.bin, contract_gate_controls.bin");
+    if (with_contract) xpu_contract.steps(b, target, optimize, ocloc, device, images);
 }
 
 /// One SPIR-V image: the .cl in zig/kernels/xpu (`src`, else `name`) and its ocloc options (dot/matrix kernels: CL3.0).
@@ -318,11 +322,22 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     gemma_native.addImport("ze", ze);
     gemma_native.addImport("xpu_gemma4_kernels", empty);
     sources.addImport("gemma4_xpu", gemma_native);
+    sources.addImport("lfm3_xpu", lfm3Module(b, b.graph.host, .debug, xpu));
     // the host test checks every family's admission, so it builds with both DPAS engines
     const source_options = b.addOptions();
     source_options.addOption(bool, "qwen27", true);
     source_options.addOption(bool, "gemma4", true);
     sources.addOptions("xpu_engine_options", source_options);
+    const inventory = b.step("test-xpu-refusal-host", "Unknown-model inventory with and without DPAS, without devices");
+    inventory.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"capability audit: XPU unknown-model"} })).step);
+    const no_dpas = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_xpu_test.zig"), .target = host, .link_libc = true });
+    var imports = sources.import_table.iterator();
+    while (imports.next()) |entry| no_dpas.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    const no_dpas_options = b.addOptions();
+    no_dpas_options.addOption(bool, "qwen27", false);
+    no_dpas_options.addOption(bool, "gemma4", false);
+    no_dpas.addOptions("xpu_engine_options", no_dpas_options);
+    inventory.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = no_dpas, .filters = &.{"capability audit: XPU unknown-model"} })).step);
     const source_tests = b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"draft sources:"} }));
     b.step("test-slide-xpu-host", "Unsupported XPU learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"slide admission:"} })).step);
     // the Gemma 4 runner's shard header reader on core (gemma4/xpu_dev.zig), so its malformed inputs run

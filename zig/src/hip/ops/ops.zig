@@ -14,10 +14,13 @@ const moe = @import("moe.zig");
 const draw = @import("draw.zig");
 const tp = @import("tp.zig");
 pub const mamba = @import("mamba.zig");
+/// The DFlash2 drafter's ops (tap gathers, key ring, dynamic conv, block attention).
+pub const draft = @import("draft.zig");
 
 pub const Kind = types.Kind;
 pub const Error = types.Error;
 pub const Tensor = types.Tensor;
+pub const ConvSplit = recurrence.ConvSplit;
 pub const Affine = types.Affine;
 /// The gated norm's gate: SiLU or sigmoid.
 pub const Gate = norms.Gate;
@@ -37,6 +40,7 @@ pub const Ops = struct {
     blas: ?*const @import("../blas.zig").Blas = null,
 
     pub const project = products.project;
+    pub const projectSilu = products.projectSilu;
     pub const projectGroup = products.projectGroup;
     pub const projectRoutedAct = products.projectRoutedAct;
     pub const projectRouted = products.projectRouted;
@@ -120,4 +124,5 @@ test "dtype numberings of the three kernel families" {
 
 test "every launch compiles" {
     std.testing.refAllDecls(Ops);
+    std.testing.refAllDecls(draft);
 }

@@ -15,6 +15,7 @@ pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
+pub const kv_ledger = @import("kv_ledger.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
@@ -26,10 +27,7 @@ pub const seedFor = lanes.sampling.seedFor;
 pub const LogprobRow = lanes.LogprobRow;
 
 /// The request's stop strings, checked on the engine's thread after each committed token (the server decodes the tail).
-pub const Stop = struct {
-    ctx: *anyopaque,
-    check: *const fn (ctx: *anyopaque, emitted: []const u32) bool,
-};
+pub const Stop = struct { ctx: *anyopaque, check: *const fn (ctx: *anyopaque, emitted: []const u32) bool };
 
 pub const CallGate = @import("engine_request_controls.zig").CallGate;
 pub const Structure = @import("engine_request_controls.zig").Structure;
@@ -123,6 +121,10 @@ pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
 pub const SpeechResult = @import("speech_api.zig").SpeechResult;
 pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
 pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
+pub const ImageRequest = @import("image_api.zig").ImageRequest;
+pub const ImageResult = @import("image_api.zig").ImageResult;
+pub const ImageInfo = @import("image_api.zig").ImageInfo;
+pub const ImageSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 
 pub const Reason = enum { stop, length, cancelled, failed, silence };
 pub const speech_guard = @import("speech_guard.zig");
@@ -164,9 +166,13 @@ pub const Info = struct {
     embeddings: ?lanes.embedding.Info = null,
     readouts: ?lanes.readout.Info = null, // non-null: the engine answers readout requests and nothing else
     speech: ?SpeechInfo = null,
+    /// The engine serves one picture a request through `submit_image`; null: no image capability.
+    image: ?ImageInfo = null,
     lanes: u32 = 1,
-    /// Prompt plus reply tokens one request may use (0: no limit).
+    /// Server preflight prompt-plus-reply limit (0: the engine owns admission).
     context_window: u32 = 0,
+    /// Discovery-only limit for an engine that keeps its existing prefill admission and error policy.
+    reported_context_window: ?u32 = null,
     context_fitted: bool = false,
     /// What the engine enforces; the server refuses requests that need more.
     call_gates: bool = false,
@@ -176,17 +182,21 @@ pub const Info = struct {
     thinking_budget: bool = true,
     /// The model can emit a reasoning block; false: all reply text is answer content, whatever enable_thinking renders.
     reasoning: bool = true,
+    thinking_switch: bool = false, // server-set from the chat template (Server.init): an explicit thinking off is honoured
+    thinking_applicable: bool = false, // server-set from the tokenizer (Server.init): the thinking close marker is one token
     /// The engine stops the reply after the think block at Request.answer_max (every lane engine: Info.ofLanes).
     answer_limit: bool = false,
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
-    /// Requests' presence_penalty and frequency_penalty change the draws (false: they are ignored, and logged once).
+    /// Requests' presence_penalty and frequency_penalty change the draws (false: nonzero is refused).
     penalties: bool = false,
     /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
     prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
+    /// The minimum distance between template message cuts; exact-start families may keep adjacent turns.
+    prefill_min_chunk: u32 = 256,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
     /// Startup cache budget and the smallest state admitted by the family's existing keep plan.
@@ -222,6 +232,13 @@ pub const Info = struct {
     /// A byte budget each request promises its caches from as it is admitted (null: none); never beside `admit`.
     ledger: ?Ledger = null,
 
+    pub const Capability = @import("engine_capabilities.zig").Capability;
+
+    /// One loaded flag for both discovery and request checks; optional user features report presence.
+    pub inline fn capability(i: Info, comptime key: Capability) bool {
+        return @import("engine_capabilities.zig").read(i, key);
+    }
+
     /// What a lane engine's streams enforce themselves (core/lanes/stream.zig): loop guards and answer limits.
     pub fn ofLanes(i: Info) Info {
         var out = i;
@@ -231,34 +248,27 @@ pub const Info = struct {
     }
 };
 
-pub const Admit = struct {
-    ctx: *anyopaque,
-    fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool,
-};
+pub const Admit = struct { ctx: *anyopaque, fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool };
 
 /// The bytes the lane host may promise at once, and what one request's caches cost at most (core/kv_ledger.zig).
 pub const Ledger = struct {
     ctx: *anyopaque,
     total: u64,
     cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
+    standing: kv_ledger.Standing = .{}, // streams paid at load, in `total`: the engine's own sequence (#1943)
 };
 
-pub const PromptCacheCapacity = struct { budget_bytes: u64, minimum_state_bytes: u64 };
-
-pub const PromptCachePlan = struct {
-    source: enum { physical_footprint, explicit, metal_working_set },
-    budget_bytes: u64,
-    explicit_budget: bool = false,
-    over_cap: ?bool = null,
-    ram_bytes: ?u64 = null,
-    ready_footprint_bytes: ?u64 = null,
-    cap_bytes: ?u64 = null,
-    room_bytes: ?u64 = null,
-    margin_bytes: ?u64 = null,
-};
+pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
+pub const PromptCachePlan = @import("engine_cache_plan.zig").PromptCachePlan;
 
 /// A native family's model type, weight formats and explicit raw-text capability.
-pub const Family = struct { model_type: []const u8, formats: []const []const u8, raw_text: bool = true };
+pub const Family = struct {
+    model_type: []const u8,
+    formats: []const []const u8,
+    raw_text: bool = true,
+    /// Formats it serves only for decisions (a readout head beside the checkpoint), not for chat.
+    decision_formats: []const []const u8 = &.{},
+};
 
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
@@ -371,10 +381,7 @@ pub const Opened = struct {
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
 
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
-pub const Explain = struct {
-    ctx: ?*anyopaque = null,
-    text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8,
-};
+pub const Explain = struct { ctx: ?*anyopaque = null, text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8 };
 
 /// A backend's own memory counts for LaneHost; read from HTTP threads, so it must not touch the GPU.
 pub const MemorySource = struct {
@@ -392,6 +399,9 @@ pub const pressure_message = "this Mac is under critical memory pressure: the se
 
 /// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
+
+/// The longest engine refusal message the server keeps; a longer one is cut at a UTF-8 boundary.
+pub const refusal_bytes = 256;
 
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none); context: the rows of a conversation before its own turn, which other examples share (0: none)
@@ -416,6 +426,7 @@ pub const Engine = struct {
         info: *const fn (ctx: *anyopaque) Info,
         submit: *const fn (ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) SubmitError!void,
         submit_speech: ?*const fn (*anyopaque, Id, *const SpeechRequest, Sink) SpeechSubmitError!void = null,
+        submit_image: ?*const fn (*anyopaque, Id, *const ImageRequest, Sink) ImageSubmitError!void = null,
         /// Ends a request between rounds; its ``finished`` (cancelled) still arrives. Unknown ids are ignored.
         cancel: *const fn (ctx: *anyopaque, id: Id) void,
         status: *const fn (ctx: *anyopaque, out: *Status, stream_tokens: []u32) void,
@@ -437,6 +448,8 @@ pub const Engine = struct {
         drain: ?*const fn (ctx: *anyopaque) void = null,
         /// The server's load-ledger producer at attach, null at detach (load_ledger.zig); null entry: no engine group.
         load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
+        /// Asked once per whole request: the returned message is the refusal, up to `refusal_bytes`; null: accepted.
+        refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -459,6 +472,11 @@ pub const Engine = struct {
     }
     pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
         const f = e.vtable.submit_speech orelse return error.Unsupported;
+        return f(e.ctx, id, request, sink);
+    }
+    /// The image hook, or Unsupported when this engine serves no picture.
+    pub fn submitImage(e: Engine, id: Id, request: *const ImageRequest, sink: Sink) ImageSubmitError!void {
+        const f = e.vtable.submit_image orelse return error.Unsupported;
         return f(e.ctx, id, request, sink);
     }
     pub fn cancel(e: Engine, id: Id) void {
@@ -510,12 +528,19 @@ pub const Engine = struct {
         const f = e.vtable.learn orelse return error.Unsupported;
         return f(e.ctx, request, sink);
     }
+
+    /// The engine's refusal of a whole `request`: the returned message, up to `refusal_bytes`; null: accepted.
+    pub fn refusal(e: Engine, request: *const Request, out: []u8) ?[]const u8 {
+        const f = e.vtable.refusal orelse return null;
+        return f(e.ctx, request, out);
+    }
 };
 
 /// A backend's own driver for a lone greedy stream (the GPU round), which LaneHost runs while the stream is alone.
 pub const Lone = struct {
     ctx: *anyopaque,
     sampled: bool = false, // it drives sampled streams too
+    plain: bool = false, // it drives streams with drafts off too
     logprobs: bool = false, // it gives each token its logprob row too
     structures: bool = false, // it masks each window's rows by the stream's grammar too
     images: bool = true, // it takes image requests too (false: they stay in the lane core)
@@ -538,15 +563,15 @@ pub const LoneHooks = struct {
 
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
+/// TENSORFOLD_PREFILL_* values the lane host would misread, refused at serve start (lane_host_env.zig).
+pub const prefill_env = @import("lane_host_env.zig");
 /// An opt-in family round planner for the lane host, in place of its `prefill_step` chunks (lane_rounds.zig).
 pub const Rounds = @import("lane_host.zig").Rounds;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
-
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
 pub const prompt_radix = @import("prompt_radix.zig");
-
 /// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).
 pub const cache_modes = @import("cache_modes.zig");
 
@@ -571,4 +596,5 @@ pub const save_guard = @import("save_guard");
 
 test {
     _ = @import("engine_api_test.zig");
+    _ = @import("engine_capabilities.zig");
 }

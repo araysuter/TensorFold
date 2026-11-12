@@ -14,6 +14,7 @@ const quant = @import("core").quant;
 const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
 const stream_pick = @import("stream_pick.zig");
+const stream_layout = @import("stream_layout.zig");
 
 const Error = runtime.Error;
 
@@ -42,19 +43,7 @@ pub const Arg = extern struct {
     out16: u64 = 0,
 };
 
-/// quant/mlx_tiles.hpp's StreamSides: up to four products that share x, K, width and group in one launch.
-pub const StreamSides = extern struct {
-    words: [4]u64 = @splat(0),
-    scale: [4]u64 = @splat(0),
-    bias: [4]u64 = @splat(0),
-    out: [4]u64 = @splat(0),
-    n: [4]c_int = @splat(0),
-    first: [5]c_int = @splat(0),
-    count: c_int = 0,
-    out_half: c_int = 0,
-    pair_cols: c_int = 0,
-    limit: f32 = 0,
-};
+pub const StreamSides = stream_layout.StreamSides;
 
 /// One side of a group: its matrix and where its (rows, n) output goes.
 pub const Side = struct { words: u64, scale: u64, bias: u64, n: c_int, out: u64 };
@@ -106,8 +95,8 @@ pub const kp_tiles = [_]KpTile{
 /// The GEMM tiles of the m >= 64 products: `gemm` (the default) or the reference `block`.
 pub const Tile = enum { gemm, block };
 
-/// Which GEMM tile of the 128-row family a launch runs: the matrix cores, the dot2 tile, or the reference tile.
-pub const BlockKind = enum { matrix, gemm, block };
+/// Which 128-row GEMM tile a launch runs: matrix cores (padded or skewed rows), the dot2 tile, or the reference tile.
+pub const BlockKind = enum { matrix, skew, gemm, block };
 
 pub const Kernels = struct {
     /// Whether block shape `tier` can take `m` rows: a tile that does not loop over its rows holds rb * r of them.
@@ -134,9 +123,12 @@ pub const Kernels = struct {
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
+    /// Off lays a round's stream row blocks on the grid's y: the reference layout the interleaved one must equal.
+    stream_interleave: bool,
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,
+    wmma_skew: [bit_widths.len]Function,
     item: @import("matrix_item.zig").Functions,
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
@@ -157,6 +149,7 @@ pub const Kernels = struct {
         k.mode = choices.matrix;
         k.tile = if (choices.gemm) .gemm else .block;
         k.stream_on = choices.stream;
+        k.stream_interleave = true;
         k.reg = Registry.init(tableFor(caps), &mlx_entries.all);
         k.reg.verify(k.env(), .mlx) catch return error.Invalid;
         // the GEMM tile's rows of x a lane keeps (tiles/gemm.hpp GemmShape): 8 for BF16, 16 for FP16
@@ -176,6 +169,7 @@ pub const Kernels = struct {
         inline for (bit_widths, 0..) |bits, b| {
             k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
             if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
+            if (k.matrix) k.wmma_skew[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_skewILi{d}EEEvNS0_6AffineE", .{bits}));
             if (k.matrix) k.item[b] = try @import("matrix_item.zig").load(m, bits);
             k.gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_gemm_blockINS0_{s}ELi{d}E{s}EEvNS0_6AffineE", .{ dot, bits, shape }));
             inline for (kp_tiles, 0..) |t, i| {
@@ -369,7 +363,9 @@ pub const Kernels = struct {
         }));
         const table = if (sides.pair_cols > 0) &k.pairs else if (relu2) &k.relu2 else &k.stream;
         const f = table[b][ri][tile.at].?;
-        try go(r, f, .{ .x = blocks, .y = cdiv(a.m, stream_rows[ri]), .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
+        // a column block's row blocks run next to each other on x, so the later ones read its weights from cache
+        const grid = stream_layout.grid(k.stream_interleave, blocks, cdiv(a.m, stream_rows[ri]), items);
+        try go(r, f, grid, .{ .x = 32 * stream_waves }, s, &args);
     }
 
     /// One row on the row tile: a lane owns a group, a wave reads a column's row in one run.
@@ -437,6 +433,7 @@ pub const Kernels = struct {
         try args.add(a);
         const f = switch (kind) {
             .matrix => k.wmma_gemm[b],
+            .skew => k.wmma_skew[b],
             .gemm => k.gemm[b],
             .block => k.block[b],
         };
@@ -457,12 +454,18 @@ pub const Kernels = struct {
     // ---- the entry points ----
 
     /// Prefill's tile, same bits however a prompt is cut: matrix on gfx11 unless off, else dot2 GEMM; few rows K-split.
-    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int) Error!void {
+    pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int, expert_rows: c_int) Error!void {
         const op: registry.Op = if (a.route.items != 0) .routed else .project;
+        const e = k.choose(op, .prefill, prefillShape(a, items, pairs, expert_rows)) orelse return refuse("prefill shape");
+        try e.launch(k, .{ .r = r, .s = s, .arg = a, .items = items });
+    }
+
+    /// The product a prompt launch asks the registry about; a routed plan's pairs, and its average rows per expert.
+    pub fn prefillShape(a: Arg, items: c_int, pairs: c_int, expert_rows: c_int) registry.Shape {
         var shape = shapeOf(a, items);
         shape.plan_pairs = @intCast(@max(pairs, 0));
-        const e = k.choose(op, .prefill, shape) orelse return refuse("prefill shape");
-        try e.launch(k, .{ .r = r, .s = s, .arg = a, .items = items });
+        shape.expert_rows = @intCast(@max(expert_rows, 0));
+        return shape;
     }
 
     /// launch_affine on the auto schedule: `schedule` 3 is prefill's, 4 a lane round's; `partial`, `parts` the tests'.
@@ -589,4 +592,5 @@ test "the lane groups of a row tile" {
 test {
     _ = mlx_entries;
     _ = stream_pick;
+    _ = stream_layout;
 }

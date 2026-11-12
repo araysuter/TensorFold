@@ -8,7 +8,43 @@ const Job = LaneHost.Job;
 /// The ledger an engine's Info asks for (null: none); a family admits through its own pool or this, never both.
 pub fn of(info: api.Info) ?kv.Ledger {
     std.debug.assert(info.ledger == null or info.admit == null);
-    return if (info.ledger) |l| .{ .total = l.total } else null;
+    return if (info.ledger) |l| .{ .total = l.total, .standing = l.standing } else null;
+}
+
+/// Whether jobs promise bytes as they leave the queue (Info.ledger's price); a paged family's pool promises its own.
+pub fn priced(h: *const LaneHost) bool {
+    return h.info_.ledger != null;
+}
+
+/// `pool`'s pages count in this host's ledger, which alone admits them; a pool another host counts is refused.
+pub fn count(h: *LaneHost, pool: anytype) error{PoolHasHost}!void {
+    const P = @TypeOf(pool.*);
+    if (pool.host != null) return error.PoolHasHost;
+    std.debug.assert(h.kv == null and pool.ledger == null); // one pool a host, and never beside a priced ledger
+    const view = struct {
+        fn read(ctx: *const anyopaque) kv.Pages {
+            const p: *const P = @ptrCast(@alignCast(ctx));
+            return .{
+                .total = p.total(),
+                .available = p.available(),
+                .reclaimable = p.reclaimable(),
+                .unit = p.unit(),
+            };
+        }
+        fn detach(ctx: *anyopaque) void {
+            const p: *P = @ptrCast(@alignCast(ctx));
+            p.ledger = null;
+            p.host = null;
+        }
+    };
+    h.kv = .ofPages(.{ .ctx = pool, .read = view.read, .detach = view.detach });
+    pool.ledger = .{ .ctx = &h.kv.?, .want = kv.Ledger.wantOf };
+    pool.host = h;
+}
+
+/// The pool stops counting in this host's ledger and admits on its own pages again (the host is stopping).
+pub fn uncount(h: *LaneHost) void {
+    if (h.kv) |*l| l.detach();
 }
 
 /// What `job`'s caches cost at most (the family's price for its prompt and reply).
@@ -24,7 +60,7 @@ pub fn fits(h: *const LaneHost, job: *const Job) bool {
 
 /// Promise `job`'s bytes as it leaves the queue (true without a ledger); false: they do not fit now.
 pub fn promise(h: *LaneHost, job: *Job) bool {
-    if (h.kv) |*l| l.promise(&job.lease, cost(h, job)) catch return false;
+    if (priced(h)) h.kv.?.promise(&job.lease, cost(h, job)) catch return false;
     return true;
 }
 
@@ -40,13 +76,14 @@ pub fn outstanding(h: *const LaneHost) bool {
 
 /// Whether `job` alone exceeds the whole budget: with nothing else promised it would wait forever.
 pub fn never(h: *const LaneHost, job: *const Job) bool {
-    return h.kv != null and !outstanding(h) and !fits(h, job);
+    return priced(h) and !outstanding(h) and !fits(h, job);
 }
 
 /// At stop every job has ended: bytes still promised mean a lease that never came back.
 pub fn checkIdle(h: *const LaneHost) void {
     const l = h.kv orelse return;
-    if (!l.idle()) std.log.warn("kv ledger: {d} of {d} bytes still promised at stop", .{ l.promised, l.total });
+    if (l.promised > 0) std.log.warn("kv ledger: {d} of {d} bytes still promised at stop", .{ l.promised, l.total });
+    if (l.bound > 0) std.log.warn("kv ledger: {d} standing streams still held at stop", .{l.bound}); // never the lease itself
 }
 
 pub const too_big = "this request's caches exceed the whole KV budget with nothing else running: lower max_tokens or --context";

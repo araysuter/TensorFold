@@ -67,7 +67,8 @@ const Plan = struct {
 
 /// Whether the full layers' caches lease the pool's pages: asked, and not turned off by TENSORFOLD_SPARK25_KV_PAGES=0.
 fn pagesOn(o: Options) bool {
-    return o.kv_pages and !envOff("TENSORFOLD_SPARK25_KV_PAGES");
+    const off = if (@import("core").profile.get(.TENSORFOLD_SPARK25_KV_PAGES)) |v| std.mem.eql(u8, v, "0") else false;
+    return o.kv_pages and !off;
 }
 
 /// Paged: the first stream's rings and the scratch must fit; the host plans the pool after.
@@ -86,6 +87,12 @@ pub fn attach(p: *anyopaque, streams: u32, n: usize) !void {
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const own: *const Owned = @ptrCast(@alignCast(p));
     return own.sb.admits(prompt, max_tokens);
+}
+
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*kv.Pool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.sb.pool) |*pool| pool else null;
 }
 
 /// Positions a stream's caches hold: whole 1,024s.
