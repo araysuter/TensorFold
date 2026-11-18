@@ -44,7 +44,7 @@ def eventually(assertion, timeout: float = 5) -> None:
 
 
 class Harness:
-    def __init__(self, root: Path, *, model_options=None, readiness_timeout=3, **overrides):
+    def __init__(self, root: Path, *, model_options=None, profile_options=None, readiness_timeout=3, **overrides):
         config = importlib.import_module("config")
         gateway = importlib.import_module("gateway")
         self.root = root
@@ -54,6 +54,7 @@ class Harness:
         self.state = root / "state"
         self.backend_port = available_port()
         model_options = model_options or {}
+        profile_options = profile_options or {}
         models = tuple(config.ModelConfig(
             id=model, aliases=(model + "-alias",),
             argv=(sys.executable, str(DIRECTORY / "fake_backend.py"),
@@ -62,6 +63,7 @@ class Harness:
                   *model_options.get(model, ())),
             readiness_timeout=(readiness_timeout.get(model, 3)
                                if isinstance(readiness_timeout, dict) else readiness_timeout),
+            **profile_options.get(model, {}),
         ) for model in ("swift", "ornith"))
         values = dict(host="127.0.0.1", port=0, backend_port=self.backend_port,
                       key_files=(config.KeyFile("owner", self.owner_key_file),

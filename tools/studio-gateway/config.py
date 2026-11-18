@@ -32,6 +32,11 @@ class ModelConfig:
     readiness_timeout: float = 240.0
     text_chat_only: bool = False
     memory_required_gib: float = 0.0
+    stateless: bool = False
+    max_concurrent: int = 1
+    context_window: int = 131072
+    memory_per_request_gib: float = 0.0
+    request_reserve_gib: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -100,6 +105,20 @@ def validate(config: GatewayConfig) -> GatewayConfig:
                 or not isinstance(model.memory_required_gib, (int, float))
                 or not 0 <= model.memory_required_gib <= 1024):
             raise ValueError("memory_required_gib must be between zero and 1024")
+        if not isinstance(model.stateless, bool):
+            raise ValueError("stateless must be a boolean")
+        for name, low, high in (("max_concurrent", 1, 8), ("context_window", 1, 131072)):
+            value = getattr(model, name)
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValueError("invalid model concurrency or context window")
+        for name in ("memory_per_request_gib", "request_reserve_gib"):
+            value = getattr(model, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1024:
+                raise ValueError("invalid model request memory budget")
+        if model.max_concurrent > 1 and (not model.stateless or model.memory_per_request_gib <= 0):
+            raise ValueError("concurrency requires stateless execution and a positive per-request RAM budget")
+        if model.stateless and model.memory_required_gib <= 0:
+            raise ValueError("stateless execution requires a cold-load RAM budget")
     if config.default_model not in names:
         raise ValueError("default model must name a configured model")
     for key in config.key_files:
@@ -164,6 +183,10 @@ def load_config(path: str | Path) -> GatewayConfig:
         readiness_timeout=row.get("readiness_timeout", 240),
         text_chat_only=row.get("text_chat_only", False),
         memory_required_gib=row.get("memory_required_gib", 0.0),
+        stateless=row.get("stateless", False), max_concurrent=row.get("max_concurrent", 1),
+        context_window=row.get("context_window", 131072),
+        memory_per_request_gib=row.get("memory_per_request_gib", 0.0),
+        request_reserve_gib=row.get("request_reserve_gib", 0.0),
     ) for row in document["models"])
     document["key_files"] = tuple(KeyFile(
         label=row["label"], path=_path(row["path"]), required=row.get("required", True),

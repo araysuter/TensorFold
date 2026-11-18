@@ -1,22 +1,24 @@
 # One API, one resident engine
 
-The default Studio gateway exposes Swift-1.5 and Arete-27B MLX 5-bit through one
+The Studio gateway exposes Swift-1.5 and Ornith-1.5-122B mixed 2-bit through one
 OpenAI-compatible API. It runs one native TensorFold model process and its
-Qwen3.8-27B DFlash2 drafter at a time. Both profiles use one 131,072-token window
-and serialize requests. Model and drafter weights stay on SSD between uses.
-The gateway is a small Python supervisor; inference stays in the native engine.
-Historical Ornith and Ripple tools remain in the repository as optional setups;
-their models are not part of the default configuration.
+DFlash2 drafter at a time. Model and drafter weights stay on SSD between uses.
+The gateway is a small Python supervisor; those two profiles keep inference in
+the native engine. The optional [Ripple MLX profile](../ripple/README.md#optional-temporary-mlx-api-worker)
+adds `ripple-65b-preview` through a temporary MLX worker. Its `text_chat_only`
+setting rejects tools, images, constrained output and unsupported endpoints
+before loading or switching models. Ripple's matching DFlash2 runtime is
+documented in its [qualified MLX setup](../ripple/DFLASH2.md).
 
 Requests for the resident model reuse it. A request for the other model parks
 the active conversation, stops the old model process, waits for it to exit, and
-starts the requested engine. Requests queue while another request or a model
+starts the requested engine. Snapshot-profile requests queue while another request or a model
 switch is in progress. Streaming replies hold their place in the queue until
 they finish or disconnect. The gateway does not load both models concurrently.
 
 The shared LRU retains up to four conversations total across all models and API
 keys, including the active conversation and its saved copy. The context window
-is configured as 131,072 total input-plus-output tokens.
+defaults to 131,072 total input-plus-output tokens; each profile can set a lower limit.
 After 30 minutes without a request, the gateway parks the active conversation
 and releases the model process. The next request loads the selected model and
 restores its conversation. Cold requests therefore include model-loading and
@@ -32,12 +34,53 @@ telemetry fails closed. Zero profile budget disables admission for legacy/test
 profiles. The example enables it for both native profiles. This is an admission
 check, not a reservation against another process allocating RAM afterward.
 
+## Concurrent stateless profiles
+
+Set `stateless: true` only for a backend qualified to isolate each request without
+process-wide session RPCs. Its native prefix cache must be disabled. Full input
+history is sent on every turn; this mode does not park contexts on SSD. Existing
+snapshot profiles retain their serialized lifecycle and the four-context global
+LRU. One model process remains resident at a time: model switches wait until
+all admitted requests release their leases.
+
+A concurrent profile additionally sets:
+
+| Field | Meaning |
+| --- | --- |
+| `context_window` | Total input plus output limit advertised by this profile; default 131072. |
+| `max_concurrent` | Maximum active requests, from 1 through 8; match the native `--parallel` capacity. |
+| `memory_required_gib` | Conservative cold-load budget for weights, scratch and one full-context request. |
+| `memory_per_request_gib` | Full-window per-user KV, recurrent, drafter and scratch growth reservation. |
+| `request_reserve_gib` | Profile host reserve; the larger of this and the global reserve applies. |
+
+Admission reads available memory and OS pressure for every request under one
+lock. It reserves each active user's remaining growth to the full configured
+window, crediting only measured process-group growth since that cohort started.
+This avoids counting already allocated KV twice. Retained idle allocations are
+part of the next cohort's baseline, never speculative credit for future users.
+A cold start is checked before and after loading. Missing memory telemetry or
+non-normal memory pressure fails closed.
+
+When RAM cannot cover another user plus the reserve, the gateway immediately
+returns HTTP 503 with `insufficient_memory`. A full configured request-slot cap
+returns HTTP 429 with `concurrency_limit`. Already admitted users continue.
+The client can retry later; no unbounded model-native queue is used to disguise
+RAM admission. A request behind a model switch waits in the existing bounded
+FIFO. A disconnected stateless client closes only its own native connection;
+the shared model and other users remain alive.
+
+For a Liquid profile tested at 96,000 total tokens, use a qualified LFM2 DSpark
+native build with `--context 96000 --parallel 8 --prompt-cache-gib 0`, an 8 GiB
+`request_reserve_gib`, and a measured full-window per-user memory budget. These
+settings describe capacity, not a throughput guarantee. Admission cannot prevent
+another application from allocating RAM after a request has been admitted.
+
 ## Native runtime requirement
 
 For image input, prepare Swift's original BF16 tower and enable the native
-vision options in the example. Arete already includes its BF16 tower. See
+vision options in the example. Ornith already includes its BF16 tower. See
 [native image profiles](VISION.md) for preparation, input limits and the current
-image-history cache limitation.
+image-history cache limitation. Ripple remains text-only.
 
 The native profiles need binaries with internal session save, load, and
 clear endpoints. A stock release binary does not provide that contract. Native
@@ -46,29 +89,30 @@ and drafter state; saving only message text would require prompt recomputation.
 See the native compatibility patch and build notes in [`native/`](native/).
 
 Use the native-compatible Swift checkpoint prepared by
-[`prepare-swift-native.py`](../prepare-swift-native.py). The published
-[Arete quant](../arete/README.md) is ready for the native profile.
+[`prepare-swift-native.py`](../prepare-swift-native.py). Ornith needs the native
+Ornith port and support for its mixed 2-bit routed and 4-bit shared experts.
 Download weights from their published repositories into a model directory
 outside the source checkout:
 
 - [Swift-1.5 affine 4-bit](https://huggingface.co/ukisai/Swift-1.5-4bit-MLX)
-- [Arete-27B MLX 5-bit](https://huggingface.co/araysuter/Arete-27B-MLX-5bit)
-- [Shared Qwen3.8-27B DFlash2 drafter](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2)
+- [Ornith-1.5-122B mixed 2-bit](https://huggingface.co/araysuter/Ornith-1.5-122B-MLX-mixed-2bit)
+- [Swift's Qwen3.8-27B DFlash2 drafter](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2)
+- [Ornith's DFlash2 drafter](https://huggingface.co/incoai/Ornith-1.5-122B-DFlash2)
 
 A configured 128K window is a capacity limit, not a promise of a measured
 128K prompt-processing speed or a guarantee that every workload fits in 64 GiB.
 Use the validated checkpoint, drafter, engine, and memory settings together.
-The historical [Swift capacity receipt](../../benchmarks/studio/charts/studio-model-gateway-2026-10-22/README.md)
-and [Arete receipt](../../benchmarks/arete-2026-11-07/README.md) each check a
-130,944-token cold input and 130,950 restored cached tokens on the 64 GiB M5 Max.
-These are capacity probes, not general speed or quality benchmarks; their
-original runtime identities and scope remain attached to those receipts.
+Our [M5 Max capacity receipt](../../benchmarks/studio/charts/studio-model-gateway-2026-10-22/README.md)
+checks 130,944 cold prompt tokens and 130,950 restored cached tokens for each
+model. Observed process peaks were 42.6 GiB for Swift and 48.3 GiB for Ornith.
+The published build target and these measurements were checked on the M5 Max.
 
 ## Download and prepare the checkpoints
 
 Python 3.11 or later is sufficient for the supervisor. It uses the standard
 library and does not need Python MLX. The native profiles require compatible
-Apple Silicon hardware and the prepared executables above.
+Apple Silicon hardware and the prepared executables above; the optional Ripple
+profile has a separate pinned MLX environment as described in its guide.
 
 Run these commands from this repository's root. A separate download environment
 provides the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli);
@@ -101,23 +145,24 @@ twice. Allow space for both the original Swift weights and their prepared copy.
 The prepared copy links its small configuration/tokenizer assets to the source
 snapshot, so keep that cached snapshot available.
 
-Download our published Arete quant and the shared drafter into the paths used
-by the example configuration. On a backed-up Mac, verify the model and download
-cache destinations are excluded from Time Machine before downloading:
+Download our published smallest Ornith quant and both drafters into the paths
+used by the example configuration:
 
 ```sh
-"$HOME/ai/hf-tools-env/bin/hf" download araysuter/Arete-27B-MLX-5bit \
-  --revision fe55469f0c69fb73c3680f49f384ec78175381ed \
-  --local-dir "$HOME/ai/models/arete-27b-mlx-5bit-108f0afb"
+"$HOME/ai/hf-tools-env/bin/hf" download araysuter/Ornith-1.5-122B-MLX-mixed-2bit \
+  --revision 848e5a0d53f457d213bb43e554012722f3f3fc60 \
+  --local-dir "$HOME/ai/models/ornith-1.5-122b-mlx-mixed-2bit-dfa07bab"
 "$HOME/ai/hf-tools-env/bin/hf" download z-lab/Qwen3.8-27B-DFlash2 \
   --revision 50307d4c4cde6860d4eee73e2547cd786fe8e8a4 \
   --local-dir "$HOME/ai/drafters/Qwen3.8-27B-DFlash2"
+"$HOME/ai/hf-tools-env/bin/hf" download incoai/Ornith-1.5-122B-DFlash2 \
+  --revision a5ed7396f5f9e5b1abf7ff50b7899a3186961432 \
+  --local-dir "$HOME/ai/drafters/Ornith-1.5-122B-DFlash2"
 ```
 
-These are tested revisions rather than moving `main` references. The public
-quant is ready to download; the original Arete BF16 source and Python MLX are
-not required for native inference. Keep the shared drafter when removing an
-unused model; both current profiles depend on it.
+These are tested revisions, including the Ornith drafter revision used in the
+benchmark, rather than moving `main` references. The public quant is ready to
+download; the original 250 GB BF16 source and Python MLX are not required.
 
 ## Build the session-enabled native engine
 
@@ -168,7 +213,8 @@ overwrite an existing file. It does not print the key:
 (umask 077; set -C; openssl rand -hex 32 > "$HOME/.config/tensorfold/api-key")
 ```
 
-The example reserves a 9 GiB native context-cache budget for either model. The explicit `--prompt-cache-over-cap` setting is needed for those
+The example reserves a 9 GiB native context-cache budget for Swift and 4 GiB for
+Ornith. The explicit `--prompt-cache-over-cap` setting is needed for those
 budgets on this configuration. The engine's active execution state and saved
 context can overlap in memory, so one logical conversation does not mean one
 physical copy of every cache tensor. Leave these settings tied to measured
@@ -202,8 +248,8 @@ Keep the existing `/v1` base URL and API key. Choose a model in each request:
 | Model ID | Backend |
 | --- | --- |
 | `swift-1.5` | Swift-1.5 with Qwen3.8-27B DFlash2 |
-| `arete-27b` | Arete MLX 5-bit with Qwen3.8-27B DFlash2 |
-| `arete-27b-5bit` | Alias for Arete; `/v1/models` lists the canonical ID |
+| `ornith-1.5-122b-mixed-2bit` | Ornith mixed 2-bit with Ornith DFlash2 |
+| `ornith-1.5-122b` | Alias for the Ornith model above |
 
 For a local request, read the key from its private file:
 
@@ -223,7 +269,7 @@ with urlopen(request, timeout=300) as response:
 PY
 ```
 
-Change `model` to `arete-27b` to select Arete.
+Change `model` to `ornith-1.5-122b-mixed-2bit` to select Ornith.
 
 `GET /v1/models` lists both configured models even when no engine is loaded.
 The proxy accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and
@@ -254,7 +300,7 @@ Clients that omit the context header use automatic message-prefix affinity.
 Explicit IDs are preferable when a client can supply them: independent chats
 can start with identical messages, and explicit IDs make that separation clear.
 Changing model selects that model's separate conversation state; an attention
-cache from Swift cannot be reused by Arete.
+cache from Swift cannot be reused by Ornith.
 
 ## Storage and limits
 
@@ -266,9 +312,8 @@ removes its own stale run directories at the next startup. It does not delete
 model weights. A shutdown clears conversation continuity; this is a temporary
 cache, not a durable chat archive.
 
-Four conversations is a shared bound across all models and API keys, including
-the resident conversation and its saved copy. Older unused state is evicted
-when that global bound is reached. Keeping the message history
+Four parked conversations is a bound per model, not unlimited storage. Older
+parked state is evicted when that bound is reached. Keeping the message history
 in the client allows the engine to compute its state again if a snapshot has
 been evicted or cleared. A model switch always incurs loading latency.
 
