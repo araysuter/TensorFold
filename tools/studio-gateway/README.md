@@ -10,13 +10,13 @@ their models are not part of the default configuration.
 
 Requests for the resident model reuse it. A request for the other model parks
 the active conversation, stops the old model process, waits for it to exit, and
-starts the requested engine. Requests queue while another request or a model
+starts the requested engine. Snapshot-profile requests queue while another request or a model
 switch is in progress. Streaming replies hold their place in the queue until
 they finish or disconnect. The gateway does not load both models concurrently.
 
 The shared LRU retains up to four conversations total across all models and API
 keys, including the active conversation and its saved copy. The context window
-is configured as 131,072 total input-plus-output tokens.
+defaults to 131,072 total input-plus-output tokens; each profile can set a lower limit.
 After 30 minutes without a request, the gateway parks the active conversation
 and releases the model process. The next request loads the selected model and
 restores its conversation. Cold requests therefore include model-loading and
@@ -31,6 +31,49 @@ Insufficient headroom returns HTTP 503 with `insufficient_memory`; unavailable
 telemetry fails closed. Zero profile budget disables admission for legacy/test
 profiles. The example enables it for both native profiles. This is an admission
 check, not a reservation against another process allocating RAM afterward.
+
+## Concurrent stateless profiles
+
+Set `stateless: true` only for a backend qualified to isolate each request without
+process-wide session RPCs. Its native prefix cache must be disabled. Full input
+history is sent on every turn; this mode does not park contexts on SSD. Existing
+snapshot profiles retain their serialized lifecycle and the four-context global
+LRU. One model process remains resident at a time: model switches wait until
+all admitted requests release their leases.
+
+A concurrent profile additionally sets:
+
+| Field | Meaning |
+| --- | --- |
+| `context_window` | Total input plus output limit advertised by this profile; default 131072. |
+| `max_concurrent` | Maximum active requests, from 1 through 8; match the native `--parallel` capacity. |
+| `memory_required_gib` | Conservative cold-load budget for weights, scratch and one full-context request. |
+| `memory_per_request_gib` | Full-window per-user KV, recurrent, drafter and scratch growth reservation. |
+| `request_reserve_gib` | Profile host reserve; the larger of this and the global reserve applies. |
+
+Admission reads available memory and OS pressure for every request under one
+lock. It reserves each active user's remaining growth to the full configured
+window, crediting only measured process-group growth since that cohort started.
+This avoids counting already allocated KV twice. Retained idle allocations are
+part of the next cohort's baseline, never speculative credit for future users.
+A cold start is checked before and after loading. Missing memory telemetry or
+non-normal memory pressure fails closed.
+
+When RAM cannot cover another user plus the reserve, the gateway immediately
+returns HTTP 503 with `insufficient_memory`. A full configured request-slot cap
+returns HTTP 429 with `concurrency_limit`. Already admitted users continue.
+The client can retry later; no unbounded model-native queue is used to disguise
+RAM admission. A request behind a model switch waits in the existing bounded
+FIFO. A disconnected stateless client closes only its own native connection;
+the shared model and other users remain alive.
+
+For a Liquid profile targeting 96,000 total tokens, use a qualified LFM2 DSpark
+native build with `--context 96000 --parallel 8 --prompt-cache-gib 0`, an 8 GiB
+`request_reserve_gib`, and a measured full-window per-user memory budget. These
+settings describe capacity, not a throughput guarantee. Admission cannot prevent
+another application from allocating RAM after a request has been admitted.
+See the [pinned Liquid runtime and profile guide](LIQUID.md) for reproducible
+source, checkpoint revisions and the concurrency benchmark command.
 
 ## Native runtime requirement
 

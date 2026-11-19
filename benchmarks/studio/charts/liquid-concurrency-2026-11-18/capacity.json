@@ -1,0 +1,71 @@
+{
+  "runtime_commit": "2d5af28e8e82941cbfc261a9694a3dbafa54cca3",
+  "capacity": {
+    "users": 8,
+    "input_tokens": 95000,
+    "completed": 8,
+    "hashes_equal_baseline": true
+  },
+  "minimum_available_gib": 18.280059814453125,
+  "peak_engine_physical_gib": 28.81382305175066,
+  "swap_before_mib": 1367.62,
+  "swap_max_during_capacity_mib": 1367.62,
+  "cancellation_peer_survives": true,
+  "streams": [
+    {
+      "stream": 0,
+      "prompt_tokens": 95000,
+      "output_tokens": 64,
+      "token_sha256": "d466eb573a86dbfbe5259a336732527c0885a971cefeb61ce423a78229e1cf93"
+    },
+    {
+      "stream": 1,
+      "prompt_tokens": 95000,
+      "output_tokens": 64,
+      "token_sha256": "528e15331b94928e1cc8485f2f355c4311748768d986e974d70dcdc8187e79b0"
+    },
+    {
+      "stream": 2,
+      "prompt_tokens": 95000,
+      "output_tokens": 64,
+      "token_sha256": "6315b3c87bbefdd2ba8138c85ef80594001a12d2bed4fd45107f1e8dbb253ea8"
+    },
+    {
+      "stream": 3,
+      "prompt_tokens": 95000,
+      "output_tokens": 64,
+      "token_sha256": "9a7c5344e74a79ef8e6147b6528898b4e44ad5d8f4447dd03a890ab533e53c9c"
+    },
+    {
+      "stream": 4,
+      "prompt_tokens": 95000,
+      "output_tokens": 64,
+      "token_sha256": "f8ab87f3f760bcd5e2af0899e965eaeec27eb1b1bc2013cfd050e697759484a0"
+    },
+    {
+      "stream": 5,
+      "prompt_tokens": 95000,
+      "output_tokens": 64,
+      "token_sha256": "8ac6a7b229f0583b930f98adc52e3111942e6cfcfc107954a5c44aea11a3b057"
+    },
+    {
+      "stream": 6,
+      "prompt_tokens": 95000,
+      "output_tokens": 64,
+      "token_sha256": "efbc8b33a2b6f875fa140b44b9177046b2639224a698d5cbb4df7156884479db"
+    },
+    {
+      "stream": 7,
+      "prompt_tokens": 95000,
+      "output_tokens": 64,
+      "token_sha256": "4587ef6437ece6c7904b33e844d1b716f9ba4f98d8ece9b502f8c81e2f8d03df"
+    }
+  ],
+  "subsequent_host_stress": {
+    "status": "failed",
+    "reason": "host allocation probe grew swap; watchdog stopped its native process and released host buffers",
+    "swap_before_mib": 1367.62,
+    "swap_after_mib": 2560.88,
+    "used_for_inference_no_swap_claim": false
+  }
+}

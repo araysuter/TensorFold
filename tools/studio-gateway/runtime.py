@@ -406,7 +406,7 @@ class ModelManager:
             self.active.dirty = True
             self.active.touched = time.monotonic()
 
-    def cancel_active(self):
+    def cancel_active(self, backend=None):
         # Cancellation may leave native generation in flight after HTTP closes.
         # Stop it before releasing the global lease. Its earlier SSD checkpoint
         # remains available; an incomplete response is never advertised as saved.

@@ -26,7 +26,8 @@ from config import GatewayConfig, KeyFile, ModelConfig, load_config, validate
 
 from errors import GatewayError
 from private_state import Principal, KeyStore, Workspace, Conversation, ContextStore
-from runtime import NativeBackend, ModelManager
+from runtime import NativeBackend
+from concurrency import ConcurrentManager as ModelManager
 from stats import read_stats
 from text_chat import validate_body as validate_text_chat
 
@@ -184,6 +185,10 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
             payload = self._payload(path)
             model = self.server.manager.model(payload.get("model"))
             payload["model"] = model.id
+            if any(payload.get(field, 0) > model.context_window
+                   for field in ("max_tokens", "max_completion_tokens", "max_output_tokens")
+                   if payload.get(field) is not None):
+                raise GatewayError(400, "Output token limit exceeds this model's context window", "invalid_token_limit")
             if model.text_chat_only:
                 if path != "/v1/chat/completions":
                     raise GatewayError(400, "This model supports text chat completions only", "unsupported_model_feature")
@@ -285,13 +290,14 @@ class GatewayHandler(http.server.BaseHTTPRequestHandler):
             done.set()
             watcher.join(timeout=self.server.config.stop_timeout + 2)
             if not finished or disconnected.is_set():
-                self.server.manager.cancel_active()
+                self.server.manager.cancel_active(backend)
 
 
 class GatewayServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
     allow_reuse_address = True
+    request_queue_size = 128
 
     def __init__(self, config: GatewayConfig):
         self.config = validate(config)
