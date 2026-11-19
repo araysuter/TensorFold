@@ -292,8 +292,9 @@ start cold when it no longer matches the saved token prefix.
 
 Use the normal chat-completions request format. The optional
 `X-TensorFold-Context` header selects a conversation; reuse the same identifier
-when resuming it. Conversation namespaces also include the authenticated key
-and model, so separate API keys do not share state. Continue to send the full
+when resuming it. Legacy conversation namespaces also include the authenticated key
+and model. Liquid uses exact token-prefix matching inside its native cache;
+its opaque snapshots may be reused across keys when the full prefix matches. Continue to send the full
 conversation messages in each request, as normal for the OpenAI API.
 
 Clients that omit the context header use automatic message-prefix affinity.
@@ -312,8 +313,9 @@ removes its own stale run directories at the next startup. It does not delete
 model weights. A shutdown clears conversation continuity; this is a temporary
 cache, not a durable chat archive.
 
-Four conversations is a shared bound across all models and API keys, including
-the resident conversation and its saved copy. Older unused state is evicted
+`max_parked` sets the shared bound across all models and API keys, including
+the resident legacy conversation and its saved copy. The generic default is four;
+the qualified Liquid deployment uses eight total, including native SSD states. Older unused state is evicted
 when that global bound is reached. Keeping the message history
 in the client allows the engine to compute its state again if a snapshot has
 been evicted or cleared. A model switch always incurs loading latency.
