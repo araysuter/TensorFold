@@ -420,11 +420,13 @@ class ModelManager:
                     "context_window": 131072, "idle_unload_seconds": self.config.idle_seconds}
 
     def _idle_loop(self):
-        interval = min(5.0, max(0.05, self.config.idle_seconds / 4))
+        interval = min(0.25, max(0.05, self.config.idle_seconds / 4))
         while True:
             with self.condition:
                 if self.closing:
                     return
+                if not self.busy or getattr(self, "group_model", None) is not None:
+                    self.contexts.prune(self.active)
                 due = not self.busy and not self.queue and self.backend is not None and time.monotonic() - self.last_used >= self.config.idle_seconds
                 if not due:
                     self.condition.wait(timeout=interval)

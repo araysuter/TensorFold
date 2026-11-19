@@ -1,0 +1,234 @@
+{
+  "status": "passed",
+  "max_ssd_contexts": 8,
+  "idle_seconds_probe": 2,
+  "legacy_requests": [
+    {
+      "model": "swift-1.5",
+      "cached": {
+        "cached_tokens": 0
+      }
+    },
+    {
+      "model": "arete-27b",
+      "cached": {
+        "cached_tokens": 0
+      }
+    }
+  ],
+  "cold": {
+    "stream": 0,
+    "model": "lfm2.5-24b-a2b",
+    "usage": {
+      "prompt_tokens": 8000,
+      "completion_tokens": 256,
+      "total_tokens": 8256,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "runtime": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 200.2308347437011,
+      "seconds": 1.273530125,
+      "prefill_seconds": 0.942512666,
+      "prefill_widths": [
+        2048,
+        2048,
+        2048,
+        1856
+      ],
+      "prefill_raised": [],
+      "time_to_first_token": 0.942870042,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "7cdd3cd27952",
+      "token_sha256": "7cdd3cd27952382653402efd612c891038a03c32ef198d6974a3fb350a232c2a",
+      "min_rows": 1
+    }
+  },
+  "first_idle": {
+    "health": {
+      "status": "ok",
+      "busy": false,
+      "model": null,
+      "loaded_models": 0,
+      "queued": 0,
+      "context_window": 131072,
+      "idle_unload_seconds": 2,
+      "active_requests": 0,
+      "max_concurrent": 1
+    },
+    "ssd_files": 3,
+    "native_files": 1,
+    "legacy_files": 2
+  },
+  "restored": {
+    "stream": 0,
+    "model": "lfm2.5-24b-a2b",
+    "usage": {
+      "prompt_tokens": 8000,
+      "completion_tokens": 256,
+      "total_tokens": 8256,
+      "prompt_tokens_details": {
+        "cached_tokens": 6144
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "runtime": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 199.60849338053228,
+      "seconds": 1.27750075,
+      "prefill_seconds": 0.237438541,
+      "prefill_widths": [
+        1856
+      ],
+      "prefill_raised": [],
+      "time_to_first_token": 0.408505667,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "7cdd3cd27952",
+      "token_sha256": "7cdd3cd27952382653402efd612c891038a03c32ef198d6974a3fb350a232c2a",
+      "min_rows": 1
+    }
+  },
+  "parallel_restored": [
+    {
+      "stream": 6,
+      "model": "lfm2.5-24b-a2b",
+      "usage": {
+        "prompt_tokens": 8000,
+        "completion_tokens": 256,
+        "total_tokens": 8256,
+        "prompt_tokens_details": {
+          "cached_tokens": 6144
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "runtime": {
+        "enable_thinking": false,
+        "reasoning_effort": "none",
+        "engine": "lanes",
+        "tokens_per_second": 242.63938371583322,
+        "seconds": 1.050942333,
+        "prefill_seconds": 0.43426625,
+        "prefill_widths": [
+          1856
+        ],
+        "prefill_raised": [],
+        "time_to_first_token": 0.60907825,
+        "sampling": "greedy",
+        "drafts": true,
+        "token_sha": "6ff70f00d636",
+        "token_sha256": "6ff70f00d636cad297b18f98187f621ac0044a51804e72eb0ef901ae799ed4d7",
+        "min_rows": 1
+      }
+    },
+    {
+      "stream": 7,
+      "model": "lfm2.5-24b-a2b",
+      "usage": {
+        "prompt_tokens": 8000,
+        "completion_tokens": 256,
+        "total_tokens": 8256,
+        "prompt_tokens_details": {
+          "cached_tokens": 6144
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "runtime": {
+        "enable_thinking": false,
+        "reasoning_effort": "none",
+        "engine": "lanes",
+        "tokens_per_second": 261.1392423103871,
+        "seconds": 0.976490541,
+        "prefill_seconds": 0.490579125,
+        "prefill_widths": [
+          1856
+        ],
+        "prefill_raised": [],
+        "time_to_first_token": 0.830476709,
+        "sampling": "greedy",
+        "drafts": true,
+        "token_sha": "d17d80962529",
+        "token_sha256": "d17d809625292ad5c990844ea18ea5d9be8377d8b81b7e23675bf584febac670",
+        "min_rows": 1
+      }
+    }
+  ],
+  "large_restored": {
+    "stream": 0,
+    "model": "lfm2.5-24b-a2b",
+    "usage": {
+      "prompt_tokens": 95000,
+      "completion_tokens": 64,
+      "total_tokens": 95064,
+      "prompt_tokens_details": {
+        "cached_tokens": 94208
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "runtime": {
+      "enable_thinking": false,
+      "reasoning_effort": "none",
+      "engine": "lanes",
+      "tokens_per_second": 190.06892406036894,
+      "seconds": 0.331458708,
+      "prefill_seconds": 0.481636708,
+      "prefill_widths": [
+        792
+      ],
+      "prefill_raised": [],
+      "time_to_first_token": 3.180632792,
+      "sampling": "greedy",
+      "drafts": true,
+      "token_sha": "d466eb573a86",
+      "token_sha256": "d466eb573a86dbfbe5259a336732527c0885a971cefeb61ce423a78229e1cf93",
+      "min_rows": 1
+    }
+  },
+  "final_idle": {
+    "status": "ok",
+    "busy": false,
+    "model": null,
+    "loaded_models": 0,
+    "queued": 0,
+    "context_window": 131072,
+    "idle_unload_seconds": 2,
+    "active_requests": 0,
+    "max_concurrent": 1
+  },
+  "swap_before_mib": 2553.38,
+  "swap_after_mib": 2553.38,
+  "memory": {
+    "minimum_available_gib": 17.124343872070312,
+    "normal_pressure_all_samples": true,
+    "samples": 269
+  },
+  "lru_after_nine_distinct_liquid_contexts": {
+    "files": 8,
+    "legacy_files": 0,
+    "native_files": 8
+  },
+  "runtime_base": "2d5af28e8e82941cbfc261a9694a3dbafa54cca3",
+  "target_revision": "667408d494bde191c2cb9dd4f4549827816b9275",
+  "drafter_revision": "e052e5b1dd103c38cdd4f8ddc068d7dea4586f55",
+  "platform": "Apple M5 Max, 64 GiB, Metal, Zig 0.17.0",
+  "production_idle_seconds": 1800,
+  "restore_piece_bytes": 16777216
+}

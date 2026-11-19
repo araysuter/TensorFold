@@ -14,8 +14,10 @@ starts the requested engine. Snapshot-profile requests queue while another reque
 switch is in progress. Streaming replies hold their place in the queue until
 they finish or disconnect. The gateway does not load both models concurrently.
 
-The shared LRU retains up to four conversations total across all models and API
-keys, including the active conversation and its saved copy. The context window
+The shared LRU defaults to four saved windows across models and API keys. Set
+`max_parked` to 8 for eight total, including native Liquid SSD images and existing
+Swift/Arete conversation snapshots. The active snapshot profile is protected
+during pruning; the limit is shared across models. The context window
 defaults to 131,072 total input-plus-output tokens; each profile can set a lower limit.
 After 30 minutes without a request, the gateway parks the active conversation
 and releases the model process. The next request loads the selected model and
@@ -35,10 +37,10 @@ check, not a reservation against another process allocating RAM afterward.
 ## Concurrent stateless profiles
 
 Set `stateless: true` only for a backend qualified to isolate each request without
-process-wide session RPCs. Its native prefix cache must be disabled. Full input
-history is sent on every turn; this mode does not park contexts on SSD. Existing
-snapshot profiles retain their serialized lifecycle and the four-context global
-LRU. One model process remains resident at a time: model switches wait until
+process-wide session RPCs. Without a qualified disk adapter, keep its native prefix cache disabled. Full
+input history is sent on every turn. The qualified Liquid disk profile can reuse
+exact prefixes from SSD without process-wide session RPCs. Existing snapshot
+profiles retain their serialized lifecycle and share the same configured LRU. One model process remains resident at a time: model switches wait until
 all admitted requests release their leases.
 
 A concurrent profile additionally sets:
@@ -68,8 +70,9 @@ FIFO. A disconnected stateless client closes only its own native connection;
 the shared model and other users remain alive.
 
 For a Liquid profile targeting 96,000 total tokens, use a qualified LFM2 DSpark
-native build with `--context 96000 --parallel 8 --prompt-cache-gib 0`, an 8 GiB
-`request_reserve_gib`, and a measured full-window per-user memory budget. These
+native build with `--context 96000 --parallel 8`, a bounded RAM cache and a
+measured full-window per-user memory budget. The disk profile uses an 11 GiB
+`request_reserve_gib`: 8 GiB for the host plus 3 GiB for snapshot workspace. These
 settings describe capacity, not a throughput guarantee. Admission cannot prevent
 another application from allocating RAM after a request has been admitted.
 See the [pinned Liquid runtime and profile guide](LIQUID.md) for reproducible
@@ -289,8 +292,9 @@ start cold when it no longer matches the saved token prefix.
 
 Use the normal chat-completions request format. The optional
 `X-TensorFold-Context` header selects a conversation; reuse the same identifier
-when resuming it. Conversation namespaces also include the authenticated key
-and model, so separate API keys do not share state. Continue to send the full
+when resuming it. Legacy conversation namespaces also include the authenticated key
+and model. Liquid uses exact token-prefix matching inside its native cache;
+its opaque snapshots may be reused across keys when the full prefix matches. Continue to send the full
 conversation messages in each request, as normal for the OpenAI API.
 
 Clients that omit the context header use automatic message-prefix affinity.
@@ -309,8 +313,9 @@ removes its own stale run directories at the next startup. It does not delete
 model weights. A shutdown clears conversation continuity; this is a temporary
 cache, not a durable chat archive.
 
-Four conversations is a shared bound across all models and API keys, including
-the resident conversation and its saved copy. Older unused state is evicted
+`max_parked` sets the shared bound across all models and API keys, including
+the resident legacy conversation and its saved copy. The generic default is four;
+the qualified Liquid deployment uses eight total, including native SSD states. Older unused state is evicted
 when that global bound is reached. Keeping the message history
 in the client allows the engine to compute its state again if a snapshot has
 been evicted or cleared. A model switch always incurs loading latency.
