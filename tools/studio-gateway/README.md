@@ -72,6 +72,8 @@ native build with `--context 96000 --parallel 8 --prompt-cache-gib 0`, an 8 GiB
 `request_reserve_gib`, and a measured full-window per-user memory budget. These
 settings describe capacity, not a throughput guarantee. Admission cannot prevent
 another application from allocating RAM after a request has been admitted.
+See the [pinned Liquid runtime and profile guide](LIQUID.md) for reproducible
+source, checkpoint revisions and the concurrency benchmark command.
 
 ## Native runtime requirement
 
