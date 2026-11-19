@@ -1,5 +1,6 @@
 //! Depth policy and shared draft prices supplied by a model.
 pub const Constants = struct {
+    fixed_draft_block: bool = false, // draft work is fixed across positive depths
     shared_step_ms: ?f64 = null, // a shared round's head step, when it differs from the lone price
 
     depth_rate: f64 = 0.15, // weight of the newest round in a depth's acceptance
@@ -12,5 +13,6 @@ pub const Constants = struct {
     grant_slack: i64 = 1, // granted depths: drafts past a grant that verified every draft the stream held
     short_slack: i64 = 0, // granted depths: drafts past a grant that left some of them unverified
     copy_first: bool = false, // a copy ahead takes the next round whole: the head drafts none for it (else one)
+    floor_rates: bool = false, // under a confidence floor a greedy stream keeps its rates' depth too (else it drafts the most)
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // a drafter's own hold pass by blocks and depth: granted holds must pay for it
 };

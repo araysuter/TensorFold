@@ -4,6 +4,7 @@ const ze = @import("ze");
 const kb = @import("xpu_qwen27_kernels");
 const q = @import("qwen27.zig");
 const dtree = @import("drafter_tree.zig");
+const rope_table = @import("rope_table.zig");
 
 const alloc = q.alloc;
 const D = q.D;
@@ -212,6 +213,7 @@ pub const Drafter = struct {
             .pi_host = pi_host,
             .pscr = try d.alloc_(rows * D * 4),
         };
+        if (@min(dr.pred.len, dr.succ.len) < q.VOCAB * RANK * 2) return error.UnexpectedShape; // edge reads a row a token id
         dr.ckpt = c;
         const stage = try d.alloc_(800 << 20);
         defer d.g.free(stage);
@@ -298,8 +300,7 @@ pub const Drafter = struct {
             dr.head = try pack(d, &parts, kk, true);
         }
         dr.logits = try d.alloc_(MAXB * @as(usize, dr.head.n) * 2);
-        var invf: [64]f32 = undefined;
-        for (&invf, 0..) |*f, i| f.* = @floatCast(1.0 / std.math.pow(f64, 1e7, @as(f64, @floatFromInt(2 * i)) / 128.0));
+        const invf = rope_table.drafter();
         dr.invf = try d.upload(std.mem.sliceAsBytes(&invf));
         try dr.use(0);
         return dr;
@@ -490,6 +491,7 @@ pub const Drafter = struct {
         const S: u32 = @intCast(items.len);
         const R = S * L;
         if (S == 0 or S > MAXS or R > MAXB or L > MAXL) return error.TooManyRows;
+        for (items) |it| if (it.pending >= q.VOCAB) return error.InvalidQwenToken; // embed and the codebooks read row id unchecked
         const one = S == 1;
         var tokens: [MAXB]i32 = undefined;
         for (items, 0..) |it, b| {
@@ -579,4 +581,5 @@ pub const Drafter = struct {
 
 pub const Draw = dtree.Draw;
 pub const Round = dtree.Round;
+pub const Note = dtree.Note;
 pub const treeRound = dtree.treeRound;

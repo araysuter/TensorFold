@@ -233,6 +233,14 @@ pub fn who(s: *Stream) depth.Who {
     return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null };
 }
 
+/// cfg.plain_streams: a shared round this wide drafts none, its copies included (each window its pending row).
+fn plainCopies(e: *const Engine, plans: []Plan) void {
+    if (e.cfg.plain_streams == 0 or plans.len < e.cfg.plain_streams) return;
+    for (plans) |*p| if (p.kind == .copy) {
+        p.* = .{ .stream = p.stream, .position = p.position, .kind = .none };
+    };
+}
+
 /// Whether any of a round's streams draws keyed samples (its rows carry their host work).
 pub fn anySampled(plans: []const Plan) bool {
     for (plans) |p| if (p.stream.sampling != null) return true;
@@ -241,11 +249,16 @@ pub fn anySampled(plans: []const Plan) bool {
 
 /// Trim draft prefixes by landing probability to the shared width with the most expected tokens a ms.
 pub fn allocate(e: *Engine, plans: []Plan) !void {
+    plainCopies(e, plans);
     if (e.trim) |t| return trimmed(e, plans, t);
     const a = e.arena.allocator();
     const fixed = try a.alloc(u32, plans.len);
     const probs = try a.alloc([]const f64, plans.len);
-    for (plans, fixed, probs) |p, *fx, *pr| {
+    const cuts = try a.alloc(?usize, plans.len); // the cut each plan's chances hook marked, committed with its cache
+    for (plans, fixed, probs, cuts) |p, *fx, *pr, *mark| {
+        const prior = p.stream.draft_chances_cut;
+        p.stream.draft_chances_cut = null;
+        errdefer p.stream.draft_chances_cut = prior;
         const n = p.count();
         if (p.kind == .forced or n == 0) {
             fx.* = 1 + @as(u32, @intCast(if (p.kind == .forced) n else 0));
@@ -260,15 +273,19 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             const controls = @import("mtp_policy.zig").Controls{ .cap = e.cfg.most_drafts, .floor = e.cfg.draft_confidence };
             pr.* = if (p.kind == .head and e.cfg.draft_confidence != null) chances[0..controls.prefix(chances)] else chances;
         }
+        mark.* = p.stream.draft_chances_cut;
+        p.stream.draft_chances_cut = prior;
     }
-    if (e.cfg.allocate_shared_drafts) for (plans, probs) |p, chances| {
+    if (e.cfg.allocate_shared_drafts) for (plans, probs, cuts) |p, chances, mark| {
         if (p.kind == .copy or p.context_copy) {
             p.stream.draft_chances.clearRetainingCapacity();
+            p.stream.draft_chances_cut = null;
             continue;
         }
         if (p.kind != .head or chances.len == 0) continue;
         p.stream.draft_chances.clearRetainingCapacity();
         try p.stream.draft_chances.appendSlice(e.gpa, chances);
+        p.stream.draft_chances_cut = if (mark) |first| @min(first, chances.len) else null;
     };
     const untimed: @import("table.zig").Table = .{};
     const explicit = e.cfg.draft_confidence != null;
@@ -282,7 +299,11 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     const own = if (live) try lone_costs.prices(e, plans[0]) else untimed;
     const costs = if (explicit) &untimed else if (live) &own else &e.cfg.shared_costs;
     const overhead = if (explicit or live) 0 else e.rule.overheadMs(plans.len, anySampled(plans));
-    const counts = try alloc.allocateDrafts(a, fixed, probs, costs, overhead, if (explicit or live) @max(plans.len, e.cfg.batch_rows) else e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .row_ms = if (explicit or live) 0 else e.rule.row_cost.extraMs(plans.len, anySampled(plans)), .least_rows = if (explicit or live) 0 else e.rule.row_cost.leastRows(plans.len, anySampled(plans)) });
+    const paired = if (explicit or live) null else e.rule.verifyPrice(plans.len, anySampled(plans));
+    const counts = if (paired) |p|
+        try alloc.allocateDrafts(a, fixed, probs, costs, p.fixed, e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .plain_ms = p.plain, .row_ms = p.row, .least_rows = e.rule.row_cost.leastRows(plans.len, anySampled(plans)) })
+    else
+        try alloc.allocateDrafts(a, fixed, probs, costs, overhead, if (explicit or live) @max(plans.len, e.cfg.batch_rows) else e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .row_ms = if (explicit or live) 0 else e.rule.row_cost.extraMs(plans.len, anySampled(plans)), .least_rows = if (explicit or live) 0 else e.rule.row_cost.leastRows(plans.len, anySampled(plans)) });
     const trial = if (live) lone_costs.probe(e, plans[0]) else null;
     if (trial) |count| {
         counts[0] = count;

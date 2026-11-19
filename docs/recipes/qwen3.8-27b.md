@@ -3,8 +3,9 @@
 For opt-in phase timings from native entry to the first completed reply, see the [startup receipt](startup-receipt.md).
 
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
-`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
-the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
+`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) when `--drafter` names
+the drafter, or by itself when the cache holds `z-lab/Qwen3.8-27B-DFlash2`; `--drafter none` serves without it.
+On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
@@ -33,8 +34,11 @@ A lone lane request may propose up to 15/31/63 tree nodes at 16/32/64 rows, incl
 by expected accepted tokens per measured millisecond in the common lane allocator, using its calibrated landing rates.
 The proposal keeps every candidate available until that decision. Copies compete for the same verification window;
 `TF_QWEN27_COPIES=0` disables them. The narrow tensor-unit default keeps copies off.
-The masked drafter block is unchanged. Both device classes use the lane loop by default, including at 16 rows.
-`TF_QWEN27_LANES=0` selects the legacy greedy shortcut; sampled requests retain the shared lane loop.
+The masked drafter block is unchanged. At the tensor-unit 16-row default, an eligible lone greedy request
+uses the long-copy driver; every copy is target-verified and arrivals yield back to the shared lane loop.
+Sampled requests, shared rounds, wider windows and earlier chips retain the lane loop.
+`TF_QWEN27_LANES=1` keeps every request on lanes; `0` requests the lone greedy driver on either device class.
+The lane copy switches do not size the lone driver's tail; its existing cap is `TF_Q27_COPY_ROWS` (default 48).
 Startup names the selected lone loop and width beside the lane window and copy policy.
 `tf-qwen27-bench --model DIR --widths costs` measures rows 1 through 64, with GPU and wall time including keep.
 The wall price excludes the diagnostic's host logit hash and scan.

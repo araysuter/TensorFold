@@ -42,6 +42,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
+    if (std.mem.startsWith(u8, d.name, "qwen3 heads ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.qwen3_heads, .pre_m5 = sources.qwen3_heads };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen27 q8 ")) {
         for (@import("contract").lane_q8.sources) |v| {
             if (!std.mem.eql(u8, v.name, d.name)) continue;
@@ -137,7 +141,15 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "flashnext grouped ")) {
         if (!assemble) return undefined;
-        return .{ .decl = d, .function = fun, .here = sources.flashnext_gx, .pre_m5 = sources.flashnext_gx };
+        const body = try tf.flashnext_grouped_fixture.groupedText(a, std.mem.startsWith(u8, d.name, "flashnext grouped index "));
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "flashnext prompt index ")) {
+        if (!assemble) return undefined;
+        const body = try tf.flashnext_prompt_index_fixture.text(a, true);
+        const pre = try preM5(a, "", body);
+        const here = if (device.tensorUnits()) try std.mem.replaceOwned(u8, a, body, "#include \"../nax.h\"", sources.nax) else pre;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     }
     if (std.mem.startsWith(u8, d.name, "flashnext FSR ")) {
         if (!assemble) return undefined;
@@ -158,6 +170,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
+    if (std.mem.startsWith(u8, d.name, "flint ") or std.mem.startsWith(u8, d.name, "moe_route ")) {
+        if (!assemble) return undefined;
+        const t = try @import("metal_flint.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
         if (!assemble) return undefined;
         const body = try tf.lfm2_moe.source.prompt(device, a, true);
@@ -183,6 +200,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     if (std.mem.startsWith(u8, d.name, "minimax_m3 ")) {
         if (!assemble) return undefined;
         const t = try @import("metal_minimax.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
+    if (std.mem.startsWith(u8, d.name, "uocr ")) {
+        if (!assemble) return undefined;
+        const t = try @import("metal_uocr.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
     }
     if (std.mem.startsWith(u8, d.name, "spark25 attention ")) {
