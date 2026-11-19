@@ -29,6 +29,7 @@ def figure(name,metrics,titles):
  fig.text(.08,.018,'Per-user rates include pauses during overlapping requests. Aggregate rates describe the whole group. Synthetic inputs measure speed, not quality.',fontsize=10.5,color='#536575')
  fig.subplots_adjust(top=.86,bottom=.105,left=.08,right=.985,wspace=.14,hspace=.48)
  fig.savefig(a.output/(name+'.png'),dpi=170,facecolor='white');fig.savefig(a.output/(name+'.svg'),facecolor='white');plt.close(fig)
+ svg=a.output/(name+'.svg');svg.write_text('\n'.join(line.rstrip() for line in svg.read_text().splitlines())+'\n')
 figure('liquid-per-user',['median_effective_prompt_tps','median_decode_tps'],['Effective prompt processing','Output generation per user'])
 figure('liquid-aggregate',['aggregate_prompt_tps','aggregate_decode_tps'],['Aggregate prompt processing','Aggregate output generation'])
 with (a.output/'results.csv').open('w',newline='') as f:

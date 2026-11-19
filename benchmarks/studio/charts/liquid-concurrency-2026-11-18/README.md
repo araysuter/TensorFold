@@ -32,3 +32,24 @@ Reproduce with the command in the Liquid guide; regenerate charts with `python3 
 The [raw baseline](baseline.json) from the same machine’s pre-port whole-prompt build measured 11.9 tok/s median per user and 54.0 tok/s aggregate output at 32K/eight users. The final stepped run measured 27.2 and 64.5 respectively. That is about 2.3x median per-user output and 1.19x aggregate output in this single synthetic trial; it is not a universal speedup guarantee.
 
 Platform scope: M5 Max Metal only. Other chips, CUDA, HIP and Windows are not device-qualified by this receipt. Host suites and known golden differences are separate from these real-checkpoint token-equality checks.
+
+
+[Full-window capacity and cancellation evidence](capacity.json): eight requests of
+95,000 input plus 64 output tokens completed with hashes equal to the earlier
+whole-prefill baseline. Sampled engine footprint peaked near 28.8 GiB, with at
+least 18.3 GiB available and unchanged swap during that capacity run. This does
+not prove eight idle full histories remain resident after all replies; stateless
+requests release their state. A cancelled stream left its peer running.
+
+A subsequent artificial host-allocation stress probe was stopped by the watchdog
+after it grew swap by about 1.2 GiB. Its buffers were released and the previous
+API restored. That failed probe is retained in the receipt and is not counted
+as a no-swap success. Admission cannot stop an unrelated process from allocating
+RAM after a request is admitted. The replacement admission check uses a larger
+conservative per-user configuration to verify two HTTP admissions and a third
+RAM refusal without allocating a host pressure buffer.
+
+The [reservation probe](admission.json) passed: two active users, third request
+HTTP 503 / `insufficient_memory`, recovery after cancellation, unchanged swap.
+The deliberately conservative probe budget was 11.504 GiB/user; production
+retains its measured 2.875 GiB/user budget and 8 GiB host reserve.

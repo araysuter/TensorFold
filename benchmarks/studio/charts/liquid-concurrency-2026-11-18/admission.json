@@ -1,0 +1,16 @@
+{
+  "status": "passed",
+  "context": 96000,
+  "reserve_gib": 8,
+  "reservation_admission": {
+    "active_users": 2,
+    "third_status": 503,
+    "third_code": "insufficient_memory",
+    "probe_per_user_gib": 11.50404052734375
+  },
+  "recovered_after_ram_probe": true,
+  "swap_before_mib": 2560.88,
+  "swap_after_mib": 2560.88,
+  "production_per_user_gib": 2.875,
+  "probe_scope": "Larger conservative profile reservation; no artificial host allocation"
+}
