@@ -145,7 +145,7 @@ def validate(config: GatewayConfig) -> GatewayConfig:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
             raise ValueError(f"invalid {key}")
     for key, low, high in (
-        ("max_parked", 0, 4), ("max_body_bytes", 1024, 32 * 1024 * 1024),
+        ("max_parked", 0, 8), ("max_body_bytes", 1024, 32 * 1024 * 1024),
         ("max_pending", 1, 128),
     ):
         value = getattr(config, key)

@@ -1,0 +1,23 @@
+{
+  "status": "passed",
+  "max_ssd_contexts": 8,
+  "idle_seconds_probe": 2,
+  "sampled_exact": true,
+  "sampled_cached_tokens": 6144,
+  "tool_exact": true,
+  "tool_cached_tokens": 6080,
+  "tool_followup": true,
+  "swap_before_mib": 2553.38,
+  "swap_after_mib": 2553.38,
+  "memory": {
+    "minimum_available_gib": 34.04833984375,
+    "normal_pressure_all_samples": true,
+    "samples": 62
+  },
+  "runtime_base": "2d5af28e8e82941cbfc261a9694a3dbafa54cca3",
+  "target_revision": "667408d494bde191c2cb9dd4f4549827816b9275",
+  "drafter_revision": "e052e5b1dd103c38cdd4f8ddc068d7dea4586f55",
+  "platform": "Apple M5 Max, 64 GiB, Metal, Zig 0.17.0",
+  "production_idle_seconds": 1800,
+  "restore_piece_bytes": 16777216
+}

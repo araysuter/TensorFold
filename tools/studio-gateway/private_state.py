@@ -12,6 +12,7 @@ import secrets
 import shutil
 import stat
 import time
+import threading
 import uuid
 from pathlib import Path
 
@@ -180,6 +181,7 @@ class ContextStore:
     """
     def __init__(self, root: Path, max_parked: int = 4):
         self.root, self.max_parked = root, max_parked
+        self.prune_lock = threading.RLock()
         self.salt = secrets.token_bytes(32)
         self.rows: dict[tuple[str, str, str], Conversation] = {}
 
@@ -235,15 +237,9 @@ class ContextStore:
         return selected
 
     def prune(self, protected: Conversation | None = None):
-        candidates = sorted(self.rows.values(), key=lambda row: row.touched)
-        limit = max(self.max_parked, int(protected is not None))
-        while len(candidates) > limit:
-            row = next((entry for entry in candidates if entry is not protected), None)
-            if row is None:
-                break
-            candidates.remove(row)
-            self.rows.pop((row.model, row.owner, row.id), None)
-            row.path.unlink(missing_ok=True)
+        from disk_contexts import prune
+        with self.prune_lock:
+            prune(self, protected)
 
     def discard_unused(self, row: Conversation, active: Conversation | None):
         if row is not active and not row.saved and not row.dirty:

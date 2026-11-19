@@ -39,7 +39,7 @@ class ConcurrencyTests(unittest.TestCase):
             self.assertEqual(status, 429, raw)
             self.assertTrue(all(job.result()[0] == 200 for job in jobs))
             self.assertEqual(sum(r['event'] == 'start' for r in server.rows()), 1)
-            self.assertEqual(server.server.manager.users, 0)
+            support.eventually(lambda: self.assertEqual(server.server.manager.users, 0))
             self.assertEqual(list(server.state.rglob('*.tfs')), [])
             self.assertFalse(any(r['event'] in ('clear', 'save', 'load') for r in server.rows()))
 
