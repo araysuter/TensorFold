@@ -224,6 +224,10 @@ pub const Drafted = struct {
         try x.enroll(s);
         errdefer x.dropStream(s);
         if (s.head_context == false) return step(x.target.ptr, s, max_rows);
+        if (x.drafter.prefill_owns_features and !x.lanes.getPtr(s).?.opened) {
+            try x.drafter.open(s);
+            x.lanes.getPtr(s).?.opened = true;
+        }
         const done = try step(x.target.ptr, s, max_rows);
         if (!x.lanes.getPtr(s).?.opened) { // the target's lane is open now: the drafter can find its rows
             try x.drafter.open(s);

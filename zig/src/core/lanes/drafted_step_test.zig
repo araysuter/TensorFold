@@ -296,3 +296,24 @@ test "drafts off bypasses legacy streamed-feature prefill while the target compl
 test "drafts off keeps every legacy prompt chunk target-only while the target completes" {
     try legacyPrefill(.chunked);
 }
+
+test "an owned-feature drafter opens before a cold target's first prompt step" {
+    var target: fake.Fake = .{ .gpa = gpa, .prefill_chunks = 3 };
+    defer target.deinit();
+    var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5 } };
+    defer head.deinit();
+    var hd = head.drafter();
+    hd.prefill_owns_features = true;
+    var vt = hd.vtable.*;
+    fake_open, vt.open, lane_target, opened_on_lane = .{ vt.open, countedOpen, &target, 0 };
+    hd.vtable = &vt;
+    var wrapped = try Drafted.init(gpa, target.stepped(), hd);
+    defer wrapped.deinit();
+    const backend = wrapped.backend();
+    var s = try sm.Stream.init(gpa, .{ .id = "cold", .prompt = &long, .max_new = 8 });
+    defer s.deinit(gpa);
+    defer backend.release(&s);
+    while (!try backend.vtable.prefill_step.?(backend.ptr, &s, 0)) {}
+    try std.testing.expectEqual(@as(u32, 1), head.opens);
+    try std.testing.expectEqual(@as(u32, 0), opened_on_lane);
+}

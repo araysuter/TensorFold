@@ -129,7 +129,7 @@ pub const Drafter = struct {
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {
-        return .{ .ptr = d, .hold_timing = .{ .ptr = d, .take = block.takeHoldMs }, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .enroll = enrollFn, .observe_head = observeHeadFn, .open = openFn, .absorb = stage.absorb, .hold = holdFn, .held = heldFn, .release = releaseFn, .chances = chancesFn } };
+        return .{ .ptr = d, .prefill_owns_features = true, .hold_timing = .{ .ptr = d, .take = block.takeHoldMs }, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .enroll = enrollFn, .observe_head = observeHeadFn, .open = openFn, .absorb = stage.absorb, .hold = holdFn, .held = heldFn, .release = releaseFn, .chances = chancesFn } };
     }
 
     /// Borrow stable bare-target costs, never head-inclusive EMA; unbound diagnostics keep their tracked route.

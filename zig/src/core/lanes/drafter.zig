@@ -52,6 +52,7 @@ pub const Drafter = struct {
     kind: []const u8 = "draft model", // descriptive only; the loader identifies the implementation it attached
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
     hold_timing: ?@import("backend.zig").DraftTiming = null, // nonoverlapping encode CPU + settled GPU ms, consumed once without waiting (null: modeled)
+    prefill_owns_features: bool = false, // open before the target captures its first stepped prompt rows
     ptr: *anyopaque,
     vtable: *const VTable,
 
