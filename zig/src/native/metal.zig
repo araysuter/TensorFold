@@ -309,6 +309,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.learn == null) return null;
     // the 27B writes conversation states
     if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null;
+    if (o.learn_conversations and std.mem.eql(u8, t, "lfm2_moe")) return null;
     const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.learn_conversations) return try std.fmt.allocPrint(a, "{s} keeps conversation states on disk for Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash: serve {s} without it", .{ spill.flag(o), name });
     const or_talks: []const u8 = if (dense and std.mem.eql(u8, t, "qwen3_5")) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";
@@ -567,4 +568,14 @@ test "Metal capabilities: fish_omni retains FP8 and includes its native NVFP4 ex
         }
     };
     try std.testing.expect(fp8 and nvfp4);
+}
+
+test "LFM2 conversation disk keeps are admitted while shared-prefix learning remains refused" {
+    const o: api.Open = .{ .dir = "d", .model_type = "lfm2_moe", .learn = "/cache", .learn_conversations = true };
+    try std.testing.expect((try refusal(std.testing.allocator, o, false)) == null);
+    var shared = o;
+    shared.learn_conversations = false;
+    const why = (try refusal(std.testing.allocator, shared, false)).?;
+    defer std.testing.allocator.free(why);
+    try std.testing.expectStringStartsWith(why, "--learn learns prompt prefixes");
 }

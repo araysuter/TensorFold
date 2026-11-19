@@ -4,7 +4,7 @@ const c = @import("config.zig");
 const st = @import("state.zig");
 
 /// One state: conv states by conv layer, then keys and values [kv head][at][head dim] by attention layer.
-pub const Snap = struct { at: u32, bytes: []u8, draft: ?[]u8 = null };
+pub const Snap = struct { at: u32, bytes: []u8, draft: ?[]u8 = null, draft_usable: bool = true };
 
 /// A row's keys or values for every kv head of one attention layer.
 const row_bytes = c.kv_heads * c.head_dim * 2;
@@ -71,4 +71,8 @@ test "a state's bytes: fixed conv states, then a key and value row per kv head a
         @as(u64, 2 * 2 * c.kv_heads * c.head_dim * 2),
         bytes(&attention, 1) - bytes(&attention, 0),
     );
+}
+
+test {
+    _ = @import("snapshot_image.zig");
 }

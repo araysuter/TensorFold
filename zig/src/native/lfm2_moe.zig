@@ -11,7 +11,7 @@ const metal_admit = @import("metal_admit.zig");
 /// --drafter loads LiquidAI's DSpark drafter (LiquidAI/LFM2.5-24B-A2B-DSpark) in front of the engine.
 pub const takes_drafter = true;
 
-const Host = struct {
+pub const Host = struct {
     resident: ?mtl.resident.Resident = null,
     gpa: std.mem.Allocator,
     model: *q.Model,
@@ -23,12 +23,14 @@ const Host = struct {
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
     host: api.LaneHost,
+    disk: ?*api.prompt_cache.rows.Rows = null,
     cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
 
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
         if (h.cache) |*store| store.deinit();
+        if (h.disk) |disk| disk.deinit();
         h.core.deinit();
         if (h.wrap) |*w| w.deinit();
         mtl.resident.streams.drop(h);
@@ -139,6 +141,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .decode_share = o.decode_share, .structures = true });
     h.cache = null;
+    h.disk = null;
     var why: []const u8 = "";
     const dev = model.device;
     const plan = cache_fit.budget(
@@ -157,13 +160,15 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         const S = q.backend.Snaps;
         h.cache = api.prompt_cache.Store.init(gpa, .{
             .ptr = h,
-            .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = S.restore, .drop = Snaps.drop },
-        }, .{ .chunk = chunk }, plan.budget_bytes);
+            .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = S.restore, .drop = Snaps.drop, .rows = &@import("lfm2_disk.zig").image },
+        }, .{ .chunk = chunk, .planned = true, .grid = chunk, .min_prompt = 0, .tail = true }, plan.budget_bytes);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
     }
+    errdefer if (h.disk) |disk| disk.deinit();
     errdefer if (h.cache) |*store| store.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
+    if (o.learn_conversations) try @import("lfm2_disk.zig").attach(h, a, io, o);
     try h.host.start();
     if (h.draft) |d| {
         const mode = if (d.options.bits == 8) "8-bit codes quantized at load (--drafter-bits 8), not the released bf16" else "bf16 matrices as released";
