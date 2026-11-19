@@ -18,6 +18,8 @@ pub const Flag = struct {
     native: bool = false,
     /// The values it honours when only some of the choices.
     native_values: ?[]const []const u8 = null,
+    /// The value names a file or folder: a config file's relative one is read from that file's folder (cli_config.zig).
+    path: bool = false,
 };
 const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
 
@@ -41,18 +43,20 @@ pub const flags = [_]Flag{
     .{ .name = "--host", .native = true },
     .{ .name = "--allowed-host", .kind = .append, .native = true },
     .{ .name = "--allowed-origin", .kind = .append, .native = true },
+    .{ .name = "--cors-origin", .kind = .append, .native = true },
     .{ .name = "--allowed-controls", .native = true },
     .{ .name = "--port", .native = true },
-    .{ .name = "--unix-socket", .native = true },
+    .{ .name = "--config", .native = true }, // a TOML file of these flags, read first (cli_config.zig)
+    .{ .name = "--unix-socket", .path = true, .native = true },
     .{ .name = "--name", .native = true },
-    .{ .name = "--chat-template", .native = true },
-    .{ .name = "--voices", .native = true },
+    .{ .name = "--chat-template", .path = true, .native = true },
+    .{ .name = "--voices", .path = true, .native = true },
     .{ .name = "--default-voice", .native = true },
-} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ [_]Flag{
+} ++ @import("drama_cfg.zig").flags ++ @import("admission_cli.zig").flags ++ @import("connection_cli.zig").flags ++ [_]Flag{
     .{ .name = "--alias", .kind = .append, .native = true },
     .{ .name = "--name-priority", .kind = .append, .native = true },
     .{ .name = "--api-key", .kind = .append, .native = true },
-    .{ .name = "--api-key-file", .native = true },
+    .{ .name = "--api-key-file", .path = true, .native = true },
     .{ .name = "--metrics-open", .kind = .store_true, .native = true },
     .{ .name = "--dashboard", .kind = .store_true, .native = true },
     .{ .name = "--vision", .kind = .store_true, .native = true },
@@ -66,7 +70,7 @@ pub const flags = [_]Flag{
     .{ .name = "--context", .native = true },
     .{ .name = "--profile", .choices = &.{"stable"}, .native = true },
     .{ .name = "--max-frames", .native = true },
-    .{ .name = "--speed-up", .native = !cuda_build },
+    .{ .name = "--speed-up", .path = true, .native = !cuda_build },
     .{ .name = "--max-tokens", .native = true },
     .{ .name = "--temperature", .native = true },
     .{ .name = "--prompt-seed", .kind = .store_true, .native = true },
@@ -100,21 +104,21 @@ pub const flags = [_]Flag{
     .{ .name = "--idle-unload", .native = true },
     .{ .name = "--compact-at", .native = true },
     .{ .name = "--compact-keep", .native = true },
-    .{ .name = "--compact-memory", .native = true },
+    .{ .name = "--compact-memory", .path = true, .native = true },
     .{ .name = "--slide", .kind = .store_true, .native = true },
     .{ .name = "--slide-drift-gate", .kind = .store_true, .native = true },
-    .{ .name = "--slide-graph", .native = true },
+    .{ .name = "--slide-graph", .path = true, .native = true },
     .{ .name = "--drafter", .native = true },
     .{ .name = "--drafter-bits", .choices = &.{ "0", "4" }, .native = true },
     .{ .name = "--rope-yarn", .native = cuda_build },
-    .{ .name = "--record", .native = true },
+    .{ .name = "--record", .path = true, .native = true },
     .{ .name = "--kv-cache", .choices = &.{ "bf16", "fp8" }, .native = true },
     .{ .name = "--prompt-precision", .choices = &.{ "bf16", "int8" }, .native = true },
     .{ .name = "--mtp-drafts", .native = served("--mtp-drafts") },
     .{ .name = "--mtp-confidence", .native = served("--mtp-confidence") },
     .{ .name = "--lane-kernels", .choices = &.{ "auto", "on", "off" } },
     .{ .name = "--prompt-cache-gib", .native = true },
-    .{ .name = "--prompt-cache-disk", .native = true },
+    .{ .name = "--prompt-cache-disk", .path = true, .native = true },
     .{ .name = "--prompt-cache-over-cap", .kind = .store_true, .native = true },
     .{ .name = "--checkpoint-slots", .native = served("--checkpoint-slots") },
     .{ .name = "--spill-gib", .native = served("--spill-gib") },
@@ -127,7 +131,7 @@ pub const flags = [_]Flag{
     .{ .name = "--mlx-cache-gib" },
     .{ .name = "--ssd-experts", .native = builtin.os.tag == .macos },
     .{ .name = "--ple-on-ssd", .kind = .store_true, .native = builtin.os.tag == .macos },
-    .{ .name = "--fsr-route-trace", .native = builtin.os.tag == .macos },
+    .{ .name = "--fsr-route-trace", .path = true, .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
     .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
@@ -146,14 +150,14 @@ pub const flags = [_]Flag{
     .{ .name = "--loops", .native = cuda_build }, // a looped model's recurrent passes (Dory: 1 to 4)
     // the native server's own: shared prompt states (a harness) kept on disk for later sessions and servers
     .{ .name = "--learn", .kind = .store_true, .native = true },
-    .{ .name = "--learn-dir", .native = true },
+    .{ .name = "--learn-dir", .path = true, .native = true },
     .{ .name = "--learn-gib", .native = true },
     .{ .name = "--learn-min-free-gib", .native = true },
     .{ .name = "--learn-conversations", .kind = .store_true, .native = true },
     .{ .name = "--learn-daily-gib", .native = true },
     // the native server's own: drafts copied from a record of the token ids earlier requests read and wrote
     .{ .name = "--recall", .kind = .store_true, .native = true },
-    .{ .name = "--recall-dir", .native = true },
+    .{ .name = "--recall-dir", .path = true, .native = true },
     .{ .name = "--recall-gib", .native = true },
     .{ .name = "--recall-read-only", .kind = .store_true, .native = true },
     // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
@@ -161,11 +165,12 @@ pub const flags = [_]Flag{
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's or the Metal build's.
-pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_TOOL_ID_KEY_FILE", "TENSORFOLD_PHASE_METRICS", "TENSORFOLD_LIBPDFIUM", "TENSORFOLD_MAX_PDF_PAGES", "HF_HOME", "HF_HUB_CACHE", "BRAVE_SEARCH_API_KEY" } ++
+pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_TOOL_ID_KEY_FILE", "TENSORFOLD_PHASE_METRICS", "TENSORFOLD_LIBPDFIUM", "TENSORFOLD_MAX_PDF_PAGES", "TENSORFOLD_DEVICE_CHECK", "HF_HOME", "HF_HUB_CACHE", "BRAVE_SEARCH_API_KEY" } ++
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "TENSORFOLD_P2P_DIAGNOSTICS", "TENSORFOLD_P2P_PROBE" } else [_][]const u8{}) ++
     (if (builtin.os.tag == .macos) [_][]const u8{"TF_Q27_PROFILE"} else [_][]const u8{});
 pub const Args = struct {
     admission: @import("request_admission.zig").Limits = .{},
+    connections: @import("connection_cli.zig").Args = .{},
     model: []const u8 = "",
     host: []const u8 = "127.0.0.1",
     port: u16 = 8080,
@@ -179,6 +184,7 @@ pub const Args = struct {
     api_key: []const []const u8 = &.{},
     allowed_host: []const []const u8 = &.{},
     allowed_origin: []const []const u8 = &.{},
+    cors_origin: []const []const u8 = &.{},
     allowed_controls: ?@import("drama_allow.zig").Policy = null,
     api_key_file: ?[]const u8 = null,
     metrics_open: bool = false,
@@ -265,7 +271,7 @@ pub const Args = struct {
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
 pub const Usage = struct { message: []const u8 = "" };
 
-fn find(name: []const u8) ?Flag {
+pub fn find(name: []const u8) ?Flag {
     for (flags) |f| if (std.mem.eql(u8, f.name, name)) return f;
     return null;
 }
@@ -303,15 +309,8 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
                     return fail(u, a, "argument {s}: expected one argument", .{name});
                 value = argv[i];
             }
-            // --profile names its own refusals (apply); other flags keep the table's generic invalid-choice line
-            if (flag.choices.len > 0 and !std.mem.eql(u8, name, "--profile")) for (flag.choices) |c| {
-                if (std.mem.eql(u8, c, value.?)) break;
-            } else return fail(u, a, "argument {s}: invalid choice: '{s}'", .{ name, value.? });
         } else if (eq != null) return fail(u, a, "argument {s}: ignored explicit argument '{s}'", .{ name, token[eq.? + 1 ..] });
-        if (!flag.native) return fail(u, a, "{s} is not served by the native engine yet; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{name});
-        if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
-            if (std.mem.eql(u8, x, v)) break;
-        } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ name, v });
+        if (std.mem.eql(u8, name, "--config")) return fail(u, a, "argument --config: serve reads it before its other flags; it cannot appear here", .{});
         if (std.mem.eql(u8, name, "--prompt-cache-disk")) {
             if (disk_legacy) |old| return fail(u, a, "argument {s}: not allowed with {s}", .{ name, old });
             disk_named = true;
@@ -320,7 +319,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
             disk_legacy = name;
         }
         if (std.mem.eql(u8, name, "--host") or std.mem.eql(u8, name, "--port")) tcp_flag = name;
-        try apply(a, &out, name, value, u, &repeated);
+        try one(a, &out, &repeated, flag, value, u);
     }
     if (out.unix_socket != null) if (builtin.os.tag == .windows) return fail(u, a, "argument --unix-socket: not served on Windows", .{}) else if (tcp_flag) |t| return fail(u, a, "argument --unix-socket: not allowed with {s}", .{t});
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
@@ -331,26 +330,31 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid redraw configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     if (out.vision_pdf and !out.vision) return fail(u, a, "--vision-pdf needs --vision", .{});
-    if (out.idle_unload < 0 or out.idle_unload > std.math.maxInt(i64) / std.time.ns_per_s) return fail(u, a, "argument --idle-unload: expected a seconds count from 0 (off) under {d}: '{d}'", .{ std.math.maxInt(i64) / std.time.ns_per_s, out.idle_unload });
+    try @import("cli_late.zig").check(a, out, &repeated, u);
     out.alias = repeated.alias.items;
     out.name_priority = repeated.priorities.items;
-    for (out.name_priority) |entry| {
-        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse
-            return fail(u, a, "argument --name-priority: takes ID=background, not '{s}'", .{entry});
-        const id = std.mem.trim(u8, entry[0..eq], " \t");
-        const word = std.mem.trim(u8, entry[eq + 1 ..], " \t");
-        if (id.len == 0 or !std.ascii.eqlIgnoreCase(word, "background"))
-            return fail(u, a, "argument --name-priority: takes ID=background, not '{s}'", .{entry});
-    }
     out.api_key = repeated.keys.items;
-    if (repeated.hosts.items.len > 64 or repeated.origins.items.len > 64) return fail(u, a, "at most 64 --allowed-host and 64 --allowed-origin entries are allowed", .{});
     out.allowed_host = repeated.hosts.items;
     out.allowed_origin = repeated.origins.items;
+    out.cors_origin = repeated.cors.items;
     if (out.slide_drift_gate and !out.slide) return fail(u, a, "--slide-drift-gate needs --slide", .{});
     var env_buf: [192]u8 = undefined; // a prefill variable the lane host would misread: refused here, by name
     if (api.prefill_env.problem(&env_buf)) |why| return fail(u, a, "{s}", .{why});
     try spillWith(u, a, out);
     return out;
+}
+
+/// One flag's own checks and its effect on `out`; a config file's entry is checked with it before the merge.
+pub fn one(a: Allocator, out: *Args, repeated: *Repeated, flag: Flag, value: ?[]const u8, u: *Usage) error{ Usage, OutOfMemory }!void {
+    // --profile names its own refusals (apply); other flags keep the table's generic invalid-choice line
+    if (value) |v| if (flag.choices.len > 0 and !std.mem.eql(u8, flag.name, "--profile")) for (flag.choices) |c| {
+        if (std.mem.eql(u8, c, v)) break;
+    } else return fail(u, a, "argument {s}: invalid choice: '{s}'", .{ flag.name, v });
+    if (!flag.native) return fail(u, a, "{s} is not served by the native engine yet; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{flag.name});
+    if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
+        if (std.mem.eql(u8, x, v)) break;
+    } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ flag.name, v });
+    try apply(a, out, flag.name, value, u, repeated);
 }
 
 /// --spill-gib writes to the conversation store: beside --learn's shared prefixes only with --learn-conversations.
@@ -377,7 +381,7 @@ pub fn gib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usag
     return g;
 }
 
-const Repeated = struct { alias: std.ArrayList([]const u8) = .empty, priorities: std.ArrayList([]const u8) = .empty, keys: std.ArrayList([]const u8) = .empty, hosts: std.ArrayList([]const u8) = .empty, origins: std.ArrayList([]const u8) = .empty };
+pub const Repeated = struct { alias: std.ArrayList([]const u8) = .empty, priorities: std.ArrayList([]const u8) = .empty, keys: std.ArrayList([]const u8) = .empty, hosts: std.ArrayList([]const u8) = .empty, origins: std.ArrayList([]const u8) = .empty, cors: std.ArrayList([]const u8) = .empty };
 
 fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usage, repeated: *Repeated) error{ Usage, OutOfMemory }!void {
     const v = value orelse "";
@@ -408,9 +412,9 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         if (!@import("request_guard.zig").validHost(v)) return fail(u, a, "argument --allowed-host: expected a hostname or bracketed IP without a port: '{s}'", .{v});
         return repeated.hosts.append(a, v);
     }
-    if (is(name, "--allowed-origin")) {
-        if (!@import("request_guard.zig").validOrigin(v)) return fail(u, a, "argument --allowed-origin: expected http(s)://HOST[:PORT] with no path or userinfo: '{s}'", .{v});
-        return repeated.origins.append(a, v);
+    if (is(name, "--allowed-origin") or is(name, "--cors-origin")) {
+        if (!@import("request_guard.zig").validOrigin(v)) return fail(u, a, "argument {s}: expected http(s)://HOST[:PORT] with no path or userinfo: '{s}'", .{ name, v });
+        return if (is(name, "--cors-origin")) repeated.cors.append(a, v) else repeated.origins.append(a, v);
     }
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
     if (try @import("cli_recall.zig").flag(a, out, name, v, u)) return;
@@ -444,6 +448,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         return;
     }
     if (try @import("admission_cli.zig").apply(a, &out.admission, name, v, u)) return;
+    if (try @import("connection_cli.zig").apply(a, &out.connections, name, v, u)) return;
     if (is(name, "--silence-onset-s")) out.silence.onset_seconds = try float(u, a, name, v) else if (is(name, "--silence-onset-voiced-s")) out.silence.onset_voiced_seconds = try float(u, a, name, v) else if (is(name, "--host")) out.host = v else if (is(name, "--port")) {
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
@@ -470,7 +475,9 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.decode_share = try float(u, a, name, v);
         if (!(out.decode_share.? >= 0 and out.decode_share.? < 1)) return fail(u, a, "argument --decode-share: expected a share from 0 to under 1: '{s}'", .{v});
     } else if (is(name, "--prompt-seed")) out.prompt_seed = true else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--instruct-sampling")) out.instruct_sampling = if (try @import("family_sampling.zig").pairsProblem(a, v)) |why| return fail(u, a, "argument {s}: {s}: '{s}'", .{ name, why, v }) else v else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-reserve")) out.thinking_reserve = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--loop-guard-stop")) out.loop_guard_stop = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--prompt-precision")) out.prompt_precision = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--idle-unload")) out.idle_unload = try int(u, a, name, v) else if (is(name, "--compact-at")) {
-        if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
+        out.compact_auto = std.mem.eql(u8, v, "auto"); // each occurrence replaces both fields, so the last one wins
+        out.compact_fraction = null;
+        if (!out.compact_auto) {
             const f = try float(u, a, name, v);
             if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});
             out.compact_fraction = f;

@@ -56,7 +56,10 @@ fn create(s: *Session, a: Allocator, body: Value) void {
     const done = respond(s, a, body, lane, &history);
     const final = done.final;
     const status = if (final) |f| f.strField("status") orelse "" else "";
-    const kept = done.status == 200 and (std.mem.eql(u8, status, "completed") or std.mem.eql(u8, status, "incomplete"));
+    const ended = for ([_][]const u8{ "completed", "incomplete", "cancelled" }) |k| { // a cut reply is kept as written
+        if (std.mem.eql(u8, status, k)) break true;
+    } else false;
+    const kept = done.status == 200 and ended;
     if (kept) remember(s, a, lane, final.?, history.earlier, done.added) else if (done.status != 0) forget(s, body, lane);
     count(s, done.status, if (final) |f| f.strField("id") else null, lane, started);
 }
@@ -126,6 +129,7 @@ fn respond(s: *Session, a: Allocator, body: Value, lane: []const u8, history: *S
     defer entered.held.release();
     if (entered.refusal) |r| return refuse(s, stream_id, gateProblem(a, r));
     if (bodyDenial(s, s.conn.key_scopes, body)) |why| return refuse(s, stream_id, Problem.fromBody(a, 403, scope_reply.text(false, why)));
+    if (json.truthyField(body, "background")) return refuse(s, stream_id, .{ .status = 400, .kind = "invalid_request_error", .message = "background: true is not supported on a socket: POST /v1/responses over HTTP, then poll GET /v1/responses/{id}", .param = "background" });
     const generate = body.get("generate") orelse Value{ .bool = true };
     if (generate != .bool) return refuse(s, stream_id, .{ .status = 400, .kind = "invalid_request_error", .message = "generate must be a boolean", .param = "generate" });
     for ([_][]const u8{ "type", "stream_id", "generate" }) |k| _ = body.object.orderedRemove(k);

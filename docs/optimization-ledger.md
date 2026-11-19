@@ -28,6 +28,9 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]) and the chunks nothing reads ([#2432]).
 - `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
 
+Flash Next CUDA sampled reductions: one check in top-k and batched verify/draft completions prepared (#2920);
+CUDA candidate bytes, parity and served/speed qualification are pending.
+
 ## The table
 
 Each cell is one of these:
@@ -53,7 +56,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 5. State walk | open C[#2392] | open C[#2392] | open [#2215] | open C[#2392] | open C[#2392] |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
 | 7. Host KV tier | yes | open [#1501] | done [#1795] | yes | yes |
-| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | yes | done C[#1413] M¹ |
+| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | open C[#3135] | done C[#1413] M¹ |
 | 9. FP8 KV | done [#886] | yes | done¹ | yes | yes |
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
@@ -73,7 +76,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 25. TP ranks | done H[#655] | done C[#1771] H[#817] | done [#855] | yes | done¹ |
 | 26. Pipeline | open [#2115] | yes | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
-| 28. Scale index | ? | open M[#2760] | ? | ? | ? |
+| 28. Scale index | ? | done M[#2760], open M[#2805] | ? | ? | ? |
 | 29. DSpine | done C[#2633] | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
@@ -85,7 +88,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 5. State walk | yes | yes | yes | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | yes | yes |
 | 7. Host KV tier | yes | yes | yes | yes | yes |
-| 8. Disk cache | yes | yes | yes | yes | done¹ |
+| 8. Disk cache | yes | open [#3135] | open [#3135] | yes | done¹ |
 | 9. FP8 KV | yes | yes | yes | yes | no (FP8 by design) |
 | 10. FP4/FP8 decode | failed [#1448] | no (bf16) | yes | no (EXL3) | yes |
 | 11. Fused proj. | done¹ | done [#1783] | yes | done¹ | done¹ |
@@ -325,8 +328,11 @@ below; these are estimates for planning a port, not results.
    what stays in RAM beside it.
 
 9. **FP8 KV cache.** `--kv-cache fp8` stores keys and values as e4m3 with a scale a row, which halves KV memory for
-   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache; its quality qualification is
-   pending. DeepSeek-V4.1's compressed attention is FP8 by design.
+   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache; it changes tokens against
+   the BF16 cache, so it is not qualified. A diagnostic receipt on FP4-Local at TP=2 measures 6,960 cache bytes a
+   token on each rank against 13,056 (−47%, beside 231 MiB fixed a stream either way), the mean NLL within 0.06%
+   teacher-forced and cold prompts 3 to 5% slower
+   ([receipt](receipts/glm-kv-fp8-3a56d4eb/README.md)). DeepSeek-V4.1's compressed attention is FP8 by design.
 
 10. **Native FP4/FP8 pair decode.** nvcc 13.2 (PTX ISA 9.2) decodes an FP4 or FP8 pair to a bf16 pair in one
     instruction on `sm_120a`/`sm_121a`, where TF decodes in software today (`fp4pair`, `fp8pair` in `fp_pairs.cuh`,
@@ -342,7 +348,7 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | nemotron | +5.9 % (2 streams), +13.3 % (8 streams) | [#1783] |
     | qwen3_5 (27B, DFlash2) | +3.5..+5.0 % decode | [#1783] |
-    | qwen3_5 (Qwen3.8, BF16) | +9.5 % prefill one stream, +8.2 % at 8 | [#1439] |
+    | qwen3_5 (Qwen3.8, BF16) | +9.5 % prefill one stream, +8.2 % at 8 | [#1439]; large-prompt a/b pair prepared, device gate pending (#2911) |
     | gemma4 (31B), spark25 | level | [#1783] |
 
 12. **Residual add plus norm in one launch.** The residual add and the next RMS norm run as one kernel, which saves a
@@ -375,6 +381,8 @@ below; these are estimates for planning a port, not results.
 
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
+    Qwen27 Metal retains its target-verified long-copy tail for an eligible lone greedy request at the M5
+    16-row default; sampled and shared requests keep the lane core ([#3013](https://github.com/ashhart/TensorFold/issues/3013)).
 
 17. **DSpark drafters.** A drafter that ships with the release (DeepSeek-V4.1's `mtp.i` blocks, MiniMax-M3.1's, Kimi
     K3's) drafts from the target's taps with a confidence schedule. Applies wherever a DSpark drafter exists for the
@@ -447,6 +455,10 @@ below; these are estimates for planning a port, not results.
 25. **Tensor parallel ranks.** A model splits over two or more GPUs or hosts, so a model that doesn't fit one box
     runs, and decode reads each rank's share of the weights. Mixed Metal and CUDA ranks are tracked in [#1236].
 
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (C), TP=2 | prompt passes reduce-scatter the experts' slots by rows: rank 0 sends 5.81 → 3.43 MiB a prompt token, cold prefill +26.5..+26.8 % on two GB10s, +30.9..+33.9 % on two RTX PRO 6000s, same replies | [#2977] |
+
 26. **Pipeline stages.** Layer ranges on different nodes, one hidden row a token over Ethernet, so a GB10 and a Mac
     can serve one model ([#2005]). The stage link and its protocol are [#2012] and [#2060]; the 27B as a stage is
     [#2115], logits byte-equal to the whole model at two and three stages.
@@ -457,8 +469,10 @@ below; these are estimates for planning a port, not results.
 28. **Scale index.** An affine checkpoint stores a bf16 scale and bias beside every group's codes, a fifth of the
     bytes at 4 bits in groups of 32, and a tensor holds few distinct pairs. A 16-bit index a group into the tensor's
     table of pairs gives a kernel the same two values from fewer bytes. Flash Next's 4-bit expert kernels read it on
-    Macs before tensor units behind `TF_FLASHNEXT_SCALE_INDEX` ([#2760], plan in [#2751]); the prompt gathers and the
-    dense rows still read the stored arrays. `?` cells: the same count has not been run on those checkpoints.
+    Macs before tensor units ([#2760], plan in [#2751]); its prompt gathers and grouped expert kernels read it too,
+    the routed experts' stored arrays are released and it is the default, `TF_FLASHNEXT_SCALE_INDEX=0` turning it
+    off ([#2805]). The dense rows still read the stored arrays. `?` cells: the same count has not been run on those
+    checkpoints.
 
 29. **DSpine drafter.** Tencent's DSpine-b16 for Qwen3.8-27B, opt-in by `--drafter` with its folder, never the
     default. It reuses DFlash2's taps and tap ring and adds a code bridge and an exact-sender table.
@@ -510,6 +524,7 @@ below; these are estimates for planning a port, not results.
 [#1394]: https://github.com/ashhart/TensorFold/pull/1394
 [#1411]: https://github.com/ashhart/TensorFold/pull/1411
 [#1413]: https://github.com/ashhart/TensorFold/pull/1413
+[#3135]: https://github.com/ashhart/TensorFold/pull/3135
 [#1423]: https://github.com/ashhart/TensorFold/pull/1423
 [#1426]: https://github.com/ashhart/TensorFold/pull/1426
 [#1434]: https://github.com/ashhart/TensorFold/pull/1434
@@ -615,3 +630,5 @@ below; these are estimates for planning a port, not results.
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
+[#2977]: https://github.com/ashhart/TensorFold/pull/2977
+[#2805]: https://github.com/ashhart/TensorFold/pull/2805

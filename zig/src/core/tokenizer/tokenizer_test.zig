@@ -352,6 +352,11 @@ test {
 test {
     _ = @import("identity.zig");
     _ = eos;
+    // the rest of the module's files with tests, so test-tokenizer-host reaches each however lazily it is analyzed
+    _ = @import("regex.zig");
+    _ = @import("steps.zig");
+    _ = @import("tiktoken.zig");
+    _ = @import("unicode.zig");
 }
 
 test "normalized added tokens match compatibility forms but decode their original spelling" {
@@ -515,4 +520,22 @@ fn parseLastId() !void {
 // In a child: if IdTable.put's u32 `id + 1` is unchecked, a safe build panics and only this test fails
 test "a vocabulary id of 2^32 - 1 is refused, not wrapped into the dense id table's length" {
     try std.testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(parseLastId, .{}));
+}
+
+test "security: a tokenizer file cannot name a token id that sizes a huge table" {
+    const a = std.testing.allocator;
+    const template =
+        \\{{"model":{{"type":"BPE","unk_token":null,"continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,
+        \\ "byte_fallback":false,"ignore_merges":false,"vocab":{{"a":0,"b":{d}}},"merges":[]}}}}
+    ;
+    inline for (.{ 4294967295, 4294967294, 16777216 }) |id| {
+        const json = try std.fmt.allocPrint(a, template, .{id});
+        defer a.free(json);
+        try std.testing.expectError(error.InvalidTokenizer, parse(a, json));
+    }
+    const json = try std.fmt.allocPrint(a, template, .{1});
+    defer a.free(json);
+    var t = try parse(a, json);
+    defer t.deinit();
+    try std.testing.expectEqual(@as(?u32, 1), t.vocab.get("b"));
 }

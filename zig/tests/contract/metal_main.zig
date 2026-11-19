@@ -19,8 +19,6 @@ const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
 const pair_k = @import("metal_pair.zig");
 const minimax_k = @import("metal_minimax.zig");
-const attn_k = @import("metal_q27_attn.zig");
-const io_k = @import("metal_q27_attn_io.zig");
 const q27_moe = @import("metal_qwen27_moe.zig");
 const q27_rows = @import("metal_qwen27_moe_rows.zig");
 const flash_pool = @import("metal_flashnext_pool.zig");
@@ -383,6 +381,9 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var h3_list: std.ArrayList(*h3_k.H3) = .empty;
     defer for (h3_list.items) |x| x.deinit();
+    var qwen3_heads: @import("metal_qwen3_heads.zig").Suite = .{};
+    defer qwen3_heads.deinit();
+    try qwen3_heads.collect(a, device, queue, &kernels, o.only);
     var llama_set = llama_k.Set{};
     defer llama_set.deinit(a);
     try llama_set.collect(a, device, queue, tensor, &kernels, o.only);
@@ -417,9 +418,15 @@ pub fn main(init: std.process.Init) !u8 {
     var moe: Moe = .{};
     defer moe.deinit(a);
     try moe.collect(a, device, queue, o, &kernels);
+    var row_wide: @import("metal_row_wide.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer row_wide.deinit();
+    try row_wide.collect(o.only);
     var glm_windows: @import("metal_glm_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
+    var flint: @import("metal_flint.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer flint.deinit();
+    try flint.collect(o.only);
     var nemotron_experts: @import("metal_nemotron_experts.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_experts.deinit();
     try nemotron_experts.collect(o.only);
@@ -444,33 +451,18 @@ pub fn main(init: std.process.Init) !u8 {
     var nemotron_unroll: @import("metal_nemotron_unroll.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_unroll.deinit();
     try nemotron_unroll.collect(o.only);
-    // qwen27 attention_io at the 27B's head counts on one Mac (24 over 4) and on a rank of two (12 over 2)
-    var ios: std.ArrayList(*io_k.Io) = .empty;
-    defer {
-        for (ios.items) |x| {
-            x.deinit();
-            a.destroy(x);
-        }
-        ios.deinit(a);
-    }
-    var io_regs: std.ArrayList(io_k.Reg) = .empty;
-    defer io_regs.deinit(a);
-    for (std.enums.values(attn_k.Heads)) |h| for (std.enums.values(io_k.Which)) |w| try io_regs.append(a, .{ .heads = h, .which = w });
-    try io_regs.appendSlice(a, &.{ .{ .heads = .q27b, .which = .append, .control = true }, .{ .heads = .rank, .which = .device_keep, .control = true } });
-    for (io_regs.items) |r| {
-        if (!wanted(o, io_k.spec(r).name)) continue;
-        const x = try a.create(io_k.Io);
-        errdefer a.destroy(x);
-        x.* = try io_k.Io.init(a, device, queue, r);
-        try ios.append(a, x);
-        try kernels.append(a, x.kernel());
-    }
+    var ios: @import("metal_q27_attn_io.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer ios.deinit();
+    try ios.collect(o.only);
     var attn_rows: @import("metal_q27_attn_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer attn_rows.deinit();
     try attn_rows.collect(o.only);
     var minimax: minimax_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer minimax.deinit();
     try minimax.collect(o.only);
+    var uocr: @import("metal_uocr.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer uocr.deinit();
+    try uocr.collect(o.only);
     var mma_operand: @import("metal_mma_operand.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer mma_operand.deinit();
     try mma_operand.collect(o.only);
@@ -481,14 +473,24 @@ pub fn main(init: std.process.Init) !u8 {
     defer attention_pv.deinit();
     try attention_pv.collect(a, device, queue, &kernels, o.only);
     const flash_grouped = @import("metal_flashnext_grouped.zig");
-    var grouped_probes: [2]flash_grouped.Probe = undefined;
+    var grouped_probes: [4]flash_grouped.Probe = undefined;
     var grouped_made: usize = 0;
     defer for (grouped_probes[0..grouped_made]) |*probe| probe.deinit();
-    for ([_]bool{ false, true }) |control| {
-        if (!wanted(o, flash_grouped.Probe.name(control))) continue;
-        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control };
+    for ([_]bool{ false, true }) |indexed| for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, flash_grouped.Probe.name(control, indexed))) continue;
+        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control, .indexed = indexed };
         grouped_made += 1;
         try kernels.append(a, grouped_probes[grouped_made - 1].kernel());
+    };
+    const flash_prompt_index = @import("metal_flashnext_prompt_index.zig");
+    var prompt_index_probes: [2]flash_prompt_index.Probe = undefined;
+    var prompt_index_made: usize = 0;
+    defer for (prompt_index_probes[0..prompt_index_made]) |*probe| probe.deinit();
+    for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, flash_prompt_index.Probe.name(control))) continue;
+        prompt_index_probes[prompt_index_made] = .{ .a = a, .device = device, .queue = queue, .control = control };
+        prompt_index_made += 1;
+        try kernels.append(a, prompt_index_probes[prompt_index_made - 1].kernel());
     }
     const weight_only = @import("metal_weight_only.zig");
     const weight_source = try weight_only.text(a);

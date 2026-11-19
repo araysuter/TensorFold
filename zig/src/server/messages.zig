@@ -23,7 +23,7 @@ fn withField(cx: *Cx, o: *const json.Object, key: []const u8, value: Value) !*js
     return copy;
 }
 
-/// ``normalize_messages`` (text only): leading system and developer text merged, later ones as ``late_system``; a template that needs a user query gains one user turn after a trailing tool run.
+/// normalize_messages: merge leading system/developer text; add a user turn after tools if a template needs one.
 pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool) errors.Refused!Value {
     return normalizeWith(cx, messages, late_system, needs_user_after_tool, .{});
 }
@@ -173,7 +173,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
         try first.put(cx.a, "content", .{ .string = joined.items });
         try out.insert(cx.a, 0, .{ .object = first });
     }
-    // A template that demands a user query (it raises "No user query found") refuses a conversation whose user turn became tool results; by the template's test a user turn wholly inside a <|im_start|> block is no query, so only a conversation without one gains a placeholder user turn after its last tool run.
+    // A turn in <|im_start|> is no query; a template adds a placeholder only to user-less chats after last tool run.
     if (needs_user_after_tool) {
         var has_query = false;
         var last_tool: ?usize = null;
@@ -198,6 +198,40 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
         }
     }
     return .{ .array = out.items };
+}
+
+/// Only reorder a complete bijection between one assistant's calls and its immediately following results.
+pub fn orderParallelResults(a: std.mem.Allocator, messages: []Value) !void {
+    for (messages, 0..) |message, i| {
+        if (!std.mem.eql(u8, message.strField("role") orelse "", "assistant")) continue;
+        const calls = message.get("tool_calls") orelse continue;
+        if (calls != .array or calls.array.len < 2) continue;
+        const start = i + 1;
+        var end = start;
+        while (end < messages.len and std.mem.eql(u8, messages[end].strField("role") orelse "", "tool")) end += 1;
+        if (end - start != calls.array.len) continue;
+        try orderResultRun(a, calls.array, messages[start..end]);
+    }
+}
+
+fn orderResultRun(a: std.mem.Allocator, calls: []const Value, results: []Value) !void {
+    var positions: std.StringHashMapUnmanaged(usize) = .empty;
+    defer positions.deinit(a);
+    for (calls, 0..) |call, index| {
+        const id = call.strField("id") orelse return;
+        if (id.len == 0) return;
+        const entry = try positions.getOrPut(a, id);
+        if (entry.found_existing) return;
+        entry.value_ptr.* = index;
+    }
+    const ordered = try a.alloc(Value, results.len);
+    defer a.free(ordered);
+    for (results) |result| {
+        const id = result.strField("tool_call_id") orelse return;
+        const entry = positions.fetchRemove(id) orelse return;
+        ordered[entry.value] = result;
+    }
+    @memcpy(results, ordered);
 }
 
 /// ``_normalize_tool_call_arguments``: call arguments as objects for templates; bad ones under ``_invalid_arguments``.

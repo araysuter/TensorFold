@@ -68,6 +68,8 @@ pub fn build(b: *std.Build) void {
     }
     @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
+    @import("zig/build/tokenizer_host.zig").steps(b);
+    @import("zig/build/cluster_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
     @import("zig/build/cache_replay.zig").steps(b);
     @import("zig/build/dsv41_shared.zig").steps(b);
@@ -76,6 +78,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dsv41_draft.zig").steps(b);
     @import("zig/build/dsv41_assets.zig").steps(b);
     const target = b.standardTargetOptions(.{});
+    defer @import("zig/build/host_tests.zig").wire(b, target);
     @import("zig/build/copy_source.zig").steps(b);
     @import("zig/build/checkpoint_io_host.zig").steps(b, target);
     if (target.result.os.tag == .macos) @import("zig/build/masked_values.zig").steps(b, target, .ReleaseSafe);
@@ -99,6 +102,8 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/glm_ocr.zig").hostTests(b, test_step);
     @import("zig/build/dots_mocr.zig").hostTests(b, test_step);
     server_build.webHostTests(b, test_step);
+    server_build.ollamaHostTests(b, test_step);
+    server_build.launchHostTests(b, test_step);
     @import("zig/build/qwen4.zig").steps(b, test_step);
     @import("zig/build/fsr.zig").steps(b, test_step);
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);
@@ -167,6 +172,9 @@ pub fn build(b: *std.Build) void {
     _ = server_build.addTo(b, voice_tool, target, optimize);
     const voice_exe = b.addExecutable(.{ .name = "drama3-voice", .root_module = voice_tool });
     b.step("drama3-voice", "Attested Drama voice files from reference WAVs, coded by drama3-generate --encode").dependOn(&b.addInstallArtifact(voice_exe, .{}).step);
+    // the dashboard page is text, so its test runs on every OS and Linux CI sees it (it ran only in the macOS suite)
+    const dashboard = b.createModule(.{ .root_source_file = b.path("zig/src/server/dashboard_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     // the backend options are declared for every target, so one build script may pass the same flags on every OS
     const cuda_options = @import("zig/build/options.zig").cuda(b);
     const tp_options = @import("zig/build/options.zig").tp(b);
@@ -194,6 +202,7 @@ pub fn build(b: *std.Build) void {
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/release_paths_step.zig").tests(b, test_step);
     @import("zig/build/sessions.zig").add(b, test_step);
+    @import("zig/build/device.zig").steps(b, test_step);
     @import("zig/build/sessions_writes.zig").steps(b);
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
     @import("zig/build/tp_check.zig").add(b, target, test_step);
@@ -245,13 +254,16 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&warning_run.step);
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
     grammar_build.steps(b, target, xgrammar, lanes_cpu);
-    grammar_build.hostTests(b, test_step);
+    grammar_build.hostTests(b, test_step, lanes_cpu);
     contract_build.hostTests(b, gemma4_contract_host);
     @import("zig/build/startup_states_timing.zig").step(b);
     // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
     @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
     @import("zig/build/mcdma_pair.zig").add(b, target);
     @import("zig/build/cache_index_timing.zig").step(b);
+    // the chat template's nesting, step, stack and memory limits (zig/src/core/template/limits_test.zig), on every host
+    const template_limits = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true });
+    b.step("test-template-limits-host", "Chat template nesting, render steps, stack and memory limits without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = template_limits, .filters = &.{"security:"} })).step);
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").tests(b);
     @import("zig/build/checkpoint_config.zig").wire(b);

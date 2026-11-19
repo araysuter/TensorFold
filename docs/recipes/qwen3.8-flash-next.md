@@ -58,11 +58,12 @@ the lane matmul; M1 through M4 use the per-row projection and hyper-connection k
 restore recurrent state, n-gram history and attention state, including incomplete pooled blocks.
 The load-time row check disables drafting when windows do not reproduce serial steps.
 
-`TF_FLASHNEXT_SCALE_INDEX=1` (off by default; M1 through M4, 4-bit experts in groups of 32) has the expert kernels read
-each group's scale and bias through a 16-bit index into its tensor's table of distinct pairs, built at load. The
-kernels get the same two values from 10% fewer weight bytes, so every reply keeps its tokens. Prompt passes still read
-the stored scales and biases, so the index is held beside them. The setting does nothing with tensor units,
-`--ssd-experts` or speed-up mode, and a tensor with more than 65,536 distinct pairs turns it off with a warning.
+On M1 through M4, expert projections stored at 4 bits in groups of 32 are read through a scale index: at load each
+tensor's (scale, bias) pairs become a table and a 16-bit index a group, and the decode, grouped and prompt-gather
+expert kernels read each group's pair through it. They get the same two values from 10% fewer weight bytes, so every
+reply keeps its tokens, and the routed experts' stored scales and biases are released once indexed.
+`TF_FLASHNEXT_SCALE_INDEX=0` keeps and reads the stored arrays instead. The index is not built with tensor units or
+`--ssd-experts`, nor for 6-bit packs, and a tensor with more than 65,536 distinct pairs turns it off with a warning.
 
 On M1 through M4, a decode window of five rows or more runs its 4-bit experts grouped by expert: rows that picked
 the same expert share its launch, so a copy or repeat stretch reads each expert's weights once instead of once a
@@ -489,7 +490,9 @@ A quantized cache changes the output, so its replies differ from bf16's. Drafted
 families refuse `--kv-dtype` before any download.
 
 `--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
-default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
+default is 0.70, for one stream and for concurrent rounds. The native HIP engine defaults to 0.80 for Flash Next on one
+RDNA 3.5 GPU (the Strix Halo and other gfx115x iGPUs) and to 0.3 on other cards, across several GPUs, and for Qwen 3.5,
+3.6 and 3.8. The MLX path refuses it.
 
 ## Native HIP on a Strix Halo iGPU
 
@@ -522,6 +525,10 @@ does not shift norm weights at load, and the uniform 4-bit checkpoint stores its
 taken after removing that offset. Task scores come from the HIP server: greedy, thinking off, GSM8K 300 zero-shot exact
 match, HumanEval 164 pass@1, MMLU-Pro 700 (50 a category, a letter within 16 tokens; replies without one count as wrong,
 159 of them for the uniform 4-bit checkpoint, 14 for oQ4e-mix5 and 4 for oQ4e).
+
+On this iGPU serving alone, draft chains stop at a 0.80 confidence floor by default (other cards and the other HIP
+families stay at 0.3);
+`--mtp-confidence P` overrides it, and `--mtp-drafts N` caps the chain depth at N drafts.
 
 ```bash
 zig build native-hip -Dhip=true -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Doptimize=ReleaseFast
