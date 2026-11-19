@@ -1,5 +1,7 @@
 //! Conversation states on disk (--learn-conversations): rows in blocks states share, each state's own parts in a file.
 const std = @import("std");
+const readWord = @import("rows_touch.zig").readWord;
+const writeWord = @import("rows_touch.zig").writeWord;
 const platform = @import("sys");
 const pc = @import("prompt_cache.zig");
 const modes = @import("cache_modes.zig");
@@ -19,6 +21,7 @@ pub const block_tokens = 256;
 
 /// What a family gives the store: its kept states' image as parts, and copies out of and into kept states.
 pub const Image = struct {
+    streamed_reads: bool = false, // scatter consumes each piece synchronously; blank remains private until its hash passes
     /// A state's image at `at`, its parts in order, appended to `out`.
     parts: *const fn (ptr: *anyopaque, at: u32, out: *std.ArrayList(image.Part), a: Allocator) anyerror!void,
     /// Copy into owned `out`; all GPU producers and copies must complete before returning.
@@ -251,6 +254,7 @@ pub const Rows = struct {
         var s = r.states.orderedRemove(i);
         defer freeState(r.gpa, &s);
         unlinkName(r.dir, s.name, ".st");
+        unlinkName(r.dir, s.name, ".used");
         var wants: std.ArrayList(write.Want) = .empty;
         defer wants.deinit(r.gpa);
         r.wantsOf(r.gpa, &s, &wants) catch {};
@@ -294,6 +298,7 @@ pub const Rows = struct {
     pub fn touch(r: *Rows, i: usize) void {
         r.clock += 1;
         r.states.items[i].used = r.clock;
+        @import("rows_touch.zig").mark(r, i);
     }
 
     /// Room for `bytes` more under the cap: other identities first (least recently opened), then this one's by value.
@@ -405,6 +410,7 @@ pub const Rows = struct {
         const before = r.held();
         for (r.states.items) |*s| {
             unlinkName(r.dir, s.name, ".st");
+            unlinkName(r.dir, s.name, ".used");
             freeState(r.gpa, s);
         }
         r.states.clearRetainingCapacity();
@@ -559,27 +565,6 @@ pub fn unlinkName(dir: []const u8, n: anytype, ext: []const u8) void {
     var buf: [1200]u8 = undefined;
     const p = file.path(&buf, dir, &chain.hex(n), ext, false) catch return;
     _ = platform.c.unlink(p);
-}
-
-fn readWord(p: [:0]const u8) u64 {
-    const fd = platform.c.open(p, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
-    if (fd < 0) return 0;
-    defer _ = platform.c.close(fd);
-    var w: u64 = 0;
-    return if (platform.c.pread(fd, std.mem.asBytes(&w), 8, 0) == 8) w else 0;
-}
-
-fn writeWord(p: [:0]const u8, w: u64) void {
-    var buf: [1200]u8 = undefined;
-    const part = std.fmt.bufPrintSentinel(&buf, "{s}.part", .{p}, 0) catch return;
-    const fd = platform.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
-    if (fd < 0) return;
-    defer _ = platform.c.close(fd);
-    if (platform.c.write(fd, std.mem.asBytes(&w), 8) != 8) {
-        _ = platform.c.unlink(part);
-        return;
-    }
-    _ = platform.c.rename(part, p);
 }
 
 /// `dir` and its parents, 0700.

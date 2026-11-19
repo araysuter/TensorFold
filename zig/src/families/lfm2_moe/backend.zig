@@ -293,7 +293,7 @@ pub const Metal = struct {
         if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             // a drafting stream resumes only a state kept with its drafter's context
-            const drafter_less = drafting and snap.draft == null;
+            const drafter_less = drafting and (snap.draft == null or !snap.draft_usable);
             if (snap.at < ids.len and !drafter_less) if (snapshot.restore(cache, snap)) |_| {
                 at = snap.at;
             } else |_| {};

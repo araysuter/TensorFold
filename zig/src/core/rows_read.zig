@@ -45,6 +45,10 @@ fn one(r: *Rows, name: Name, kind: file.Kind, ext: []const u8, at: u32, ranges: 
     var o = file.open(p, kind, name) catch |err| return bad(r, name, ext, err);
     defer o.close();
     if (o.trailer.payload != n or o.trailer.block != r.keying.block or o.trailer.at != at) return bad(r, name, ext, error.RowsRead);
+    if (r.img.streamed_reads) {
+        @import("rows_read_stream.zig").payload(r, &o, ranges, saved) catch |err| return bad(r, name, ext, err);
+        return o.trailer.payload + o.trailer.meta + @sizeOf(file.Trailer);
+    }
     const stage = try r.staged(n);
     const got = file.payload(&o, stage) catch |err| return bad(r, name, ext, err);
     try scatter(r, name, ext, saved, ranges, got);
@@ -221,4 +225,8 @@ fn noteReadLatency(r: *Rows, ns: i128) void {
     r.file_io.read_ms_ema = if (r.file_io.read_ms_ema == 0) ms else 0.8 * r.file_io.read_ms_ema + 0.2 * ms;
     r.file_io.read_lat.observe(ms);
     r.file_io.last_read_ms = @import("rows_io.zig").wallMs();
+}
+
+test {
+    _ = @import("rows_read_stream.zig");
 }

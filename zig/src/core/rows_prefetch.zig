@@ -376,7 +376,7 @@ pub const Prefetch = struct {
 
 /// A store's prefetcher, made at first use with the environment's limits; `notify` is set if none is.
 pub fn ensure(r: *Rows, io: std.Io, notify: Notify) ?*Prefetch {
-    if (r.fetch == null) r.fetch = make(r, io, .fromEnv()) catch return null;
+    if (r.fetch == null) r.fetch = make(r, io, if (r.img.streamed_reads) .{ .reads = 0, .bytes = 0 } else .fromEnv()) catch return null;
     const f = r.fetch.?;
     f.lock();
     defer f.unlock();

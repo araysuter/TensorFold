@@ -319,6 +319,7 @@ pub const Store = struct {
         else
             s.find(prompt, starts, spans);
         @import("prompt_cache_divergence.zig").report(s, prompt, spans, e);
+        if (e) |entry| if (s.disk) |r| @import("rows_touch.zig").cached(r, entry, starts);
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
         const ordinary = if (s.active_rewind_at == 0)

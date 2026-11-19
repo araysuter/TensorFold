@@ -273,7 +273,7 @@ pub fn meta(o: *const Opened, a: std.mem.Allocator) ![]u8 {
 }
 
 /// `dest.len` bytes at `at` of `fd`, through an aligned bounce buffer (O_DIRECT allows no other).
-fn readUnaligned(fd: c_int, dest: []u8, at: u64) bool {
+pub fn readUnaligned(fd: c_int, dest: []u8, at: u64) bool {
     var bounce: [64 * 1024]u8 align(4096) = undefined;
     var done: usize = 0;
     while (done < dest.len) {
