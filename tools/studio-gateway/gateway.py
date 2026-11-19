@@ -297,6 +297,7 @@ class GatewayServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
     allow_reuse_address = True
+    request_queue_size = 128
 
     def __init__(self, config: GatewayConfig):
         self.config = validate(config)

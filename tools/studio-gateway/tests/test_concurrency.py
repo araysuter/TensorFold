@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import http.client
 import json
+import socket
 import time
 import unittest
 from unittest.mock import patch
@@ -41,6 +42,18 @@ class ConcurrencyTests(unittest.TestCase):
             self.assertEqual(server.server.manager.users, 0)
             self.assertEqual(list(server.state.rglob('*.tfs')), [])
             self.assertFalse(any(r['event'] in ('clear', 'save', 'load') for r in server.rows()))
+
+    def test_eight_connections_survive_a_temporarily_busy_accept_loop(self):
+        with self.gateway() as server:
+            server.server.shutdown()
+            server.thread.join(timeout=2)
+            clients = []
+            try:
+                for _ in range(8):
+                    clients.append(socket.create_connection(server.address, timeout=0.3))
+            finally:
+                for client in clients:
+                    client.close()
 
     def test_future_growth_reservations_admit_two_but_refuse_third(self):
         with self.gateway() as server, ThreadPoolExecutor(max_workers=2) as pool:
@@ -136,6 +149,17 @@ class ConcurrencyTests(unittest.TestCase):
                     with patch('memory.snapshot', side_effect=values):
                         with self.assertRaises(GatewayError):
                             manager._check_slot(manager.model('swift'), 2)
+
+    def test_released_startup_buffers_lower_the_current_cohort_baseline(self):
+        with self.gateway() as server:
+            self.assertEqual(server.completion()[0], 200)
+            manager = server.server.manager
+            manager.base_footprint = 18 * GIB
+            with patch('memory.group_footprint', return_value=15 * GIB):
+                manager._check_slot(manager.model('swift'), 1)
+            with patch('memory.snapshot', return_value=(11 * GIB, 1)), \
+                    patch('memory.group_footprint', return_value=18 * GIB):
+                manager._check_slot(manager.model('swift'), 2)
 
 
 if __name__ == '__main__':

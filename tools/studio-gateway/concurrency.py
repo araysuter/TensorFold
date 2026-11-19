@@ -77,6 +77,7 @@ class ConcurrentManager(ModelManager):
             available = min(available, after)
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             raise GatewayError(503, "Memory status unavailable; retry later", "memory_status_unavailable") from None
+        self.base_footprint = min(self.base_footprint, footprint)
         allocated = max(0, footprint - self.base_footprint)
         growth = max(0, int(count * model.memory_per_request_gib * memory.GIB) - allocated)
         required = int(self._reserve(model) * memory.GIB) + growth

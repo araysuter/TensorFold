@@ -56,6 +56,10 @@ def request(base, model, key, length, stream, tokens, seed, draft, barrier=None)
                    decode_tps=runtime["tokens_per_second"], token_sha256=runtime["token_sha256"])
     except urllib.error.HTTPError as exc:
         row.update(status=exc.code, error="request_rejected")
+    except urllib.error.URLError as exc:
+        row.update(error="URLError", transport_error=type(exc.reason).__name__)
+        if isinstance(exc.reason, OSError):
+            row["transport_errno"] = exc.reason.errno
     except Exception as exc:
         row["error"] = type(exc).__name__
     row["completed"] = time.monotonic()
