@@ -4,7 +4,6 @@ import os
 os.environ['MLX_ENABLE_TF32'] = '0'  # Before importing MLX: qualified FP32 path.
 
 import argparse
-import dataclasses
 import functools
 import hashlib
 import importlib.metadata
@@ -22,28 +21,14 @@ from types import SimpleNamespace
 import mlx.core as mx
 from mlx_lm import server as api
 from request_policy import validate_request
-from attention import install as install_decode_attention
+from request_state import RequestState
+from mlx_lm.generate import generation_stream
 from response_format import configure as configure_response_format
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'studio-gateway'))
 from config import KeyFile
 from private_state import KeyStore
 from errors import GatewayError
-
-
-class NoHistory:
-    """Fresh caches for every request; do not retain copies of long histories."""
-    nbytes = 0
-    def __len__(self):
-        return 0
-    def stats_by_type(self):
-        return {}
-    def fetch_nearest_cache(self, key, prompt):
-        return None, prompt[:]
-    def insert_cache(self, model_key, prompt, cache, **kwargs):
-        cache.clear()
-    def trim_to(self, **kwargs):
-        pass
 
 
 class Provider(api.ModelProvider):
@@ -53,7 +38,6 @@ class Provider(api.ModelProvider):
         return super().load('default_model', None, None)
 
     def _load(self, *args, **kwargs):
-        install_decode_attention()
         super()._load(*args, **kwargs)
         configure_response_format(self.tokenizer)
         if self.cli_args.benchmark_ignore_eos:
@@ -64,7 +48,59 @@ class Provider(api.ModelProvider):
 class Engine(api.ResponseGenerator):
     def __init__(self, provider):
         self.receipts = threading.local()
-        super().__init__(provider, NoHistory())
+        super().__init__(provider, None)
+
+    def _generate(self):
+        self.model_provider.load_default()
+        tasks = []
+        pending = None
+        try:
+            while not self._stop:
+                while len(tasks) < 2:
+                    item = pending or self._next_request(timeout=0.1 if not tasks else None)
+                    pending = None
+                    if item is None:
+                        break
+                    output, request, args = item
+                    images = any(api._image_parts(request.messages))
+                    if tasks and (images or any(t[2] for t in tasks)):
+                        pending = item
+                        break
+                    try:
+                        model, tokenizer = self.model_provider.load(args.model.model, args.model.adapter, args.model.draft)
+                        prompt, _, _, initial, vision = self._tokenize(tokenizer, request, args)
+                        ctx = api.GenerationContext(tokenizer.has_tool_calling, tokenizer.has_thinking,
+                                tokenizer.tool_parser, (api.TextStateMachine.from_tokenizer(tokenizer)
+                                if request.request_type == 'chat' else api.TextStateMachine({})), initial,
+                                prompt, prompt_cache_count=0)
+                        state = RequestState(model, tokenizer, prompt, vision, args, ctx, self.cli_args.prefill_step_size)
+                        output.put(ctx)
+                        tasks.append((state, output, images))
+                    except Exception:
+                        logging.error('Inkling request preparation failed')
+                        output.put(ValueError('Invalid or unsupported Inkling request'))
+                    if images:
+                        break
+                for task in tasks[:]:
+                    state, output, _ = task
+                    try:
+                        with mx.stream(generation_stream):
+                            result = state.advance()
+                        if result is not None:
+                            output.put(result)
+                        if state.done:
+                            output.put(None)
+                            state.close()
+                            tasks.remove(task)
+                    except Exception:
+                        logging.exception('Inkling generation failed')
+                        output.put(ValueError('Inkling generation failed'))
+                        state.close()
+                        tasks.remove(task)
+        finally:
+            for state, _, _ in tasks:
+                state.close()
+            self.model_provider.reset()
 
     def _tokenize(self, tokenizer, request, args):
         if request.request_type == 'text' and isinstance(request.prompt, list):
@@ -80,8 +116,6 @@ class Engine(api.ResponseGenerator):
 
     def generate(self, request, generation_args, progress_callback=None):
         start = time.monotonic()
-        if generation_args.sampling.temperature == 0 and not getattr(request, 'reference_plain', False):
-            generation_args = dataclasses.replace(generation_args, seed=None)
         ctx, responses = super().generate(request, generation_args, progress_callback=progress_callback)
         receipt = {'tokens': 0, 'first': None, 'last': None, 'hash': hashlib.sha256(), 'start': start}
         self.receipts.current = receipt
@@ -192,7 +226,7 @@ def main():
     parser.add_argument('--benchmark-ignore-eos', action='store_true')
     args = parser.parse_args()
     if importlib.metadata.version('mlx') != '0.32.4' or importlib.metadata.version('mlx-lm') != '0.32.3.dev26+g0c4c99192':
-        raise ValueError('Use the qualified MLX 0.32.4 / MLX-LM PR 2061 at 0c4c99192')
+        raise ValueError('Use the qualified MLX 0.32.4 / MLX-LM PR 2086 at 0c4c99192')
     if not 128 <= args.context <= 131072 or args.prefill_step_size not in (256, 512, 1024, 2048):
         raise ValueError('Unqualified context or prefill size')
     os.umask(0o077)

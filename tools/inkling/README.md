@@ -4,7 +4,7 @@ This optional worker exposes an already converted Inkling 2 Mini checkpoint
 through the existing authenticated Studio gateway. It does not add an Inkling
 family to the native Zig engine or change another model's runtime.
 
-Use a dedicated environment with MLX 0.32.4 and MLX-LM PR 2061 pinned to
+Use a dedicated environment with MLX 0.32.4 and MLX-LM PR 2086 (stacked on PR 2061) pinned to
 `0c4c99192230f1943dd468d297f0b8a64ae7b7c2`. Install that exact MLX-LM revision;
 released MLX-LM versions without the Inkling port are unsupported:
 
@@ -52,20 +52,19 @@ remote URLs and filesystem paths are refused. Limits are four images, 4 MiB
 per decoded image, 4 megapixels per image, and an 8 MiB request body. Expanded
 image tokens count toward the prompt plus output context limit.
 
-Text generation uses upstream continuous batching, with one prompt prefilling
-at a time and up to two decoding together. Batched decode uses the same
-single-row attention primitive as solo decoding for each stream, preserving its
-sink/mask arithmetic instead of switching to the upstream batch reference.
-Seeded greedy requests can batch;
-seeded sampling keeps upstream's single-request path. Image requests drain
-text batches and run sequentially because the pinned upstream image path does
-not support batching. There is no qualified speculative drafter in this profile.
+Up to two concurrent text requests retain independent KV/short-convolution
+states while sharing one loaded model. The worker advances bounded prompt
+chunks and upstream `generate_step` iterators in turn on one GPU stream. It
+uses the same single-request model shapes and cache layouts as the solo
+reference, including independent seeded-sampling state. This is interleaved
+serving, not an array-batched kernel or a native Zig lane. Image requests drain
+text requests and run sequentially. No speculative drafter is qualified in
+this profile.
 
 For isolated benchmarking only, add `--benchmark-ignore-eos` to a separate
 worker profile. Never use that flag in the public serving profile. It disables
-EOS stopping to match fixed-output speed tests. `draft: false` selects the
-upstream unbatched reference; other requests use upstream's normal eligibility
-rules. The final response/usage event includes a generated-token SHA-256 and
+EOS stopping to match fixed-output speed tests. `draft` does not enable a drafter in this profile; every request uses the
+upstream ordinary decoding core. The final response/usage event includes a generated-token SHA-256 and
 worker-observed prompt/decode timings. Prompt timing includes worker queueing,
 tokenization and image processing, but excludes cold model loading; client TTFT
 includes gateway and model-loading delays. No prompt cache is reused.
