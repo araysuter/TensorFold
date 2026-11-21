@@ -22,6 +22,14 @@ def main():
         or any(n < 2 or n + args.tokens > 131072 for n in lengths)
     ):
         parser.error("Positive prompt lengths plus output must fit 131072 tokens")
+    if not args.model.is_dir() or not (args.model / "config.json").is_file():
+        parser.error("--model must name an existing local checkpoint directory")
+    if not args.draft.is_file():
+        parser.error("--draft must name an existing local safetensors file")
+    if args.output.is_dir():
+        parser.error("--output must be a file path")
+    args.model = args.model.resolve()
+    args.draft = args.draft.resolve()
     import os
 
     os.environ["MLX_ENABLE_TF32"] = "0"
