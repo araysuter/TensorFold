@@ -1,0 +1,576 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "model": "inkling-2-mini",
+      "streaming": false,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 8.120427499525249,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "The user wants me to call lookup_number with key alpha. I need to actually call the tool.",
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\": \"alpha\"}"
+                },
+                "type": "function",
+                "id": "f7d78c82-966c-45f7-a055-3e30a5d2acd8"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.9707550005987287,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=731946",
+            "reasoning": "The tool returned value 731946. Need reply RESULT=<value>. No extra."
+          },
+          "finish_reason": "stop"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 1.452016083523631,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "The user asks to call lookup_number again. Need do it.",
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\": \"alpha\"}"
+                },
+                "type": "function",
+                "id": "67aaa32a-4487-4bb4-a3b6-3d0c0236e440"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.8527092086151242,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=294617",
+            "reasoning": "Need reply only RESULT=<value> using new value."
+          },
+          "finish_reason": "stop"
+        }
+      ]
+    },
+    {
+      "model": "inkling-2-mini",
+      "streaming": true,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 1.5596063751727343,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning": "The user wants me to call lookup_number with key alpha. I need to actually call the tool.",
+            "tool_calls": [
+              {
+                "id": "578f19f1-2216-40b2-97c8-ce94903111d8",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\": \"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.9734820825979114,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=731946",
+            "reasoning": "The tool returned value 731946. Need reply RESULT=<value>. No extra."
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 1.4487928748130798,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning": "The user asks to call lookup_number again. Need do it.",
+            "tool_calls": [
+              {
+                "id": "807e96d8-70fd-4645-83be-e4aa6f217b23",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\": \"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.8546583745628595,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=294617",
+            "reasoning": "Need reply only RESULT=<value> using new value."
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        }
+      ]
+    },
+    {
+      "model": "lfm2.5-24b-a2b",
+      "streaming": false,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 8.016652459278703,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_2dfa34afbe6734b374845360",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.09829770866781473,
+          "message": {
+            "role": "assistant",
+            "content": "\n\nRESULT=731946"
+          },
+          "finish_reason": "stop"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.11501279100775719,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_a8de9bc4568883c7a880e44a",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.1204778328537941,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_0ecbdd0a5170587020e0bb90",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.09377108328044415,
+          "message": {
+            "role": "assistant",
+            "content": "\n\nRESULT=294617"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "extra_auto_calls": 1,
+      "forced_final_reply": true
+    },
+    {
+      "model": "lfm2.5-24b-a2b",
+      "streaming": true,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 0.10227787494659424,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_2dfa34afbe6734b374845360",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.09103375021368265,
+          "message": {
+            "role": "assistant",
+            "content": "\n\nRESULT=731946"
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.1147369584068656,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_7c7984e58af61963a54dd726",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.11718316655606031,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_3e032206cc34f71b33c76d5a",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.09175308421254158,
+          "message": {
+            "role": "assistant",
+            "content": "\n\nRESULT=294617"
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        }
+      ],
+      "extra_auto_calls": 1,
+      "forced_final_reply": true
+    },
+    {
+      "model": "swift-1.5",
+      "streaming": false,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 9.037595375441015,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_31e728164c228b4ff36cfd58",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.2907005827873945,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=731946"
+          },
+          "finish_reason": "stop"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.33837595861405134,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_530e0f0cbedc22a571aef193",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.30568441562354565,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=294617"
+          },
+          "finish_reason": "stop"
+        }
+      ]
+    },
+    {
+      "model": "swift-1.5",
+      "streaming": true,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 0.790675500407815,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_91fecdd6c548c410f28ad2f7",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.31125312577933073,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=731946"
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.34886308293789625,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_cbec865a310b759d2f200720",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.3220072500407696,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=294617"
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        }
+      ]
+    },
+    {
+      "model": "arete-27b",
+      "streaming": false,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 17.369446417316794,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_5220af8e87c13a6af286d163",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.6890515414997935,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=731946"
+          },
+          "finish_reason": "stop"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.8781414162367582,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_dfee4f20b264031b97f344c5",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.7738580834120512,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=294617"
+          },
+          "finish_reason": "stop"
+        }
+      ]
+    },
+    {
+      "model": "arete-27b",
+      "streaming": true,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 2.789244540967047,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_35a79f3d28fbdf82adc0f330",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.68179633282125,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=731946"
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.8790457081049681,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_864e38fbce897056e269efae",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\":\"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.7878272505477071,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=294617"
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        }
+      ]
+    }
+  ]
+}
