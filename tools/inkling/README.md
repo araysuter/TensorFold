@@ -93,6 +93,29 @@ remote URLs and filesystem paths are refused. Limits are four images, 4 MiB
 per decoded image, 4 megapixels per image, and an 8 MiB request body. Expanded
 image tokens count toward the prompt plus output context limit.
 
+Function tools on `/v1/chat/completions` are decoded into OpenAI-style
+`tool_calls`, including streamed calls with unique IDs. The adapter recognizes
+Inkling's named message headers and translates native `args` objects into JSON
+`function.arguments` strings. Only functions declared in the request are
+accepted. Send the returned assistant message followed by a `role: "tool"`
+message with its `tool_call_id`; the client executes the requested function.
+`tool_choice: "none"` removes active tool definitions for an answer-only turn.
+
+For all configured model IDs, run the protocol check from the repository root:
+
+```sh
+python3 tools/check_tool_calls.py http://127.0.0.1:8080 \
+  --models inkling-2-mini lfm2.5-24b-a2b swift-1.5 arete-27b \
+  --api-key-env TENSORFOLD_API_KEY --output tool-calls.json
+```
+
+The check covers streaming, nonstreaming, argument JSON, IDs across repeated
+calls, and changed tool-result replay. An `auto` request may legitimately ask
+for another tool call; the report records that behavior and uses an explicit
+`none` retry to test the final reply. Liquid exhibited that extra auto call in
+both the native runtime with caching disabled and the independent MLX reference.
+It is not repaired by parsing a different text format.
+
 Up to two concurrent text requests retain independent KV/short-convolution
 states while sharing one loaded model. The worker advances bounded prompt
 chunks and upstream `generate_step` iterators in turn on one GPU stream. It

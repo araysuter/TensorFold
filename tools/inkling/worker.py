@@ -24,6 +24,7 @@ from request_policy import validate_request
 from request_state import RequestState
 from mlx_lm.generate import generation_stream
 from response_format import configure as configure_response_format
+from tool_format import prepare_request_tools
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'studio-gateway'))
 from config import KeyFile
@@ -188,7 +189,7 @@ class Handler(api.APIHandler):
             size = int(lengths[0])
             if not 0 < size <= 8 * 1024**2:
                 raise ValueError('Invalid body size')
-            body = json.loads(self.rfile.read(size))
+            body = prepare_request_tools(json.loads(self.rfile.read(size)))
             validate_request(body, self.response_generator.cli_args.name,
                              self.response_generator.cli_args.context,
                              self.response_generator.cli_args.benchmark_ignore_eos)
