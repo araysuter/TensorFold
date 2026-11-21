@@ -1,0 +1,103 @@
+{
+  "status": "passed",
+  "experimental": true,
+  "api_enabled": false,
+  "reason": "Exact verification was slower than plain decoding",
+  "repetitions": 1,
+  "users": 1,
+  "output_tokens": 256,
+  "verify_width": 2,
+  "draft_projection_bits": 8,
+  "mlx": "0.32.4",
+  "mlx_lm_commit": "0c4c99192230f1943dd468d297f0b8a64ae7b7c2",
+  "target": "araysuter/Inkling-2-Mini-MLX-5bit",
+  "target_revision": "4e7ff0e11667a88bae9a7a9323e93d498899aa8b",
+  "draft": "thinkingmachines/Inkling-2-Mini/mtp.safetensors",
+  "draft_revision": "6e7c8248f75265bdd4fbab5273304243b5d8c2cb",
+  "device": "Apple M5 Max",
+  "ram_gib": 64,
+  "os": "macOS 27.0.1",
+  "cases": [
+    {
+      "input_tokens": 4000,
+      "exact": true,
+      "plain": {
+        "prefill_seconds": 2.301324250176549,
+        "prompt_tps": 1738.1296875888459,
+        "decode_tps": 42.47812288474616,
+        "accepted": 0,
+        "proposed": 0,
+        "rounds": 0,
+        "peak_gb": 23.1759688,
+        "generated_tokens": 256,
+        "token_sha256": "cb492e5698b1463558108f6024f874a3dbadde4836f00bdccc9bb681e7a4d18b"
+      },
+      "candidate": {
+        "prefill_seconds": 2.28443400003016,
+        "prompt_tps": 1750.9807680796164,
+        "decode_tps": 41.39858489989846,
+        "accepted": 123,
+        "proposed": 131,
+        "rounds": 132,
+        "peak_gb": 23.1759688,
+        "generated_tokens": 256,
+        "token_sha256": "cb492e5698b1463558108f6024f874a3dbadde4836f00bdccc9bb681e7a4d18b"
+      },
+      "generation_speedup": 0.9745860242511949
+    },
+    {
+      "input_tokens": 8000,
+      "exact": true,
+      "plain": {
+        "prefill_seconds": 4.688809082843363,
+        "prompt_tps": 1706.1901772184508,
+        "decode_tps": 41.68757516758388,
+        "accepted": 0,
+        "proposed": 0,
+        "rounds": 0,
+        "peak_gb": 23.61610375,
+        "generated_tokens": 256,
+        "token_sha256": "4ce9e57c440a9f5734d987b24446199ada4d2ee318135b9abe4c4096e0a824c5"
+      },
+      "candidate": {
+        "prefill_seconds": 4.722699291072786,
+        "prompt_tps": 1693.9465138342014,
+        "decode_tps": 40.73553790953844,
+        "accepted": 124,
+        "proposed": 131,
+        "rounds": 131,
+        "peak_gb": 23.616157014,
+        "generated_tokens": 256,
+        "token_sha256": "4ce9e57c440a9f5734d987b24446199ada4d2ee318135b9abe4c4096e0a824c5"
+      },
+      "generation_speedup": 0.9771625657232819
+    },
+    {
+      "input_tokens": 32000,
+      "exact": true,
+      "plain": {
+        "prefill_seconds": 22.629801915958524,
+        "prompt_tps": 1414.0645207076964,
+        "decode_tps": 38.2755063143392,
+        "accepted": 0,
+        "proposed": 0,
+        "rounds": 0,
+        "peak_gb": 24.56936425,
+        "generated_tokens": 256,
+        "token_sha256": "fde2c4268350e3d28499626b69e573a8ad0f14ebc113b952b5c07d894166dd16"
+      },
+      "candidate": {
+        "prefill_seconds": 22.68128041550517,
+        "prompt_tps": 1410.8550934419227,
+        "decode_tps": 17.71233039432019,
+        "accepted": 5,
+        "proposed": 249,
+        "rounds": 250,
+        "peak_gb": 24.569368346,
+        "generated_tokens": 256,
+        "token_sha256": "fde2c4268350e3d28499626b69e573a8ad0f14ebc113b952b5c07d894166dd16"
+      },
+      "generation_speedup": 0.46275887897750945
+    }
+  ]
+}
