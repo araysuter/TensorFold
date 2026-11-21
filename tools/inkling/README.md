@@ -17,6 +17,47 @@ python3 -m venv "$INKLING_ENV"
 The worker
 sets `MLX_ENABLE_TF32=0` before importing MLX to preserve the qualified FP32 path.
 
+## Quick local API
+
+After the root README's pinned environment and download steps, run from the
+repository root in that same shell. This direct worker binds only to loopback;
+it is useful for trying the API. For model switching, RAM admission and idle
+unloading, use the gateway configuration below.
+
+```sh
+install -d -m 700 "$HOME/.config/tensorfold"
+export INKLING_KEY_FILE="$HOME/.config/tensorfold/inkling-local.key"
+# Create a new key file; the exclusive open preserves any existing file.
+.venv-inkling/bin/python - <<'PYKEY'
+import os, secrets
+from pathlib import Path
+p = Path(os.environ["INKLING_KEY_FILE"])
+fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as f:
+    f.write(secrets.token_hex(32) + "\n")
+PYKEY
+.venv-inkling/bin/python tools/inkling/worker.py \
+  --model "$MODEL_DIR" --name inkling-2-mini --context 131072 \
+  --port 8080 --api-key-file "$INKLING_KEY_FILE"
+```
+
+If the key file already exists, skip its creation and reuse it. In another
+terminal, send a streaming request (keep the key file private):
+
+```sh
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $(cat "$HOME/.config/tensorfold/inkling-local.key")" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"inkling-2-mini","messages":[{"role":"user","content":"Say hello."}],"max_tokens":128,"stream":true}'
+```
+
+In an OpenAI-compatible client, use base URL `http://127.0.0.1:8080/v1`,
+model `inkling-2-mini`, and the generated key. The dedicated worker has no
+gateway RAM-admission guard; stop it before running another large model.
+The 128K setting is a total input-plus-output limit, not preallocated history.
+
+## Gateway profile
+
 Configure a gateway model with these fields, replacing environment, source and
 checkpoint paths with absolute paths on the serving host:
 
@@ -81,6 +122,6 @@ It compares generated-token hashes to each stream's solo/plain reference and
 fails on disagreement. This is a throughput check, not a quality benchmark.
 
 An [experimental DSpark benchmark](DSpark.md) is available separately. Its
-exact-output verifier was slower in the measured paired runs, so it is not
-used by the API worker. For long prompts over a reverse proxy, use streaming;
+exact-output verifier is not used by the API worker: short-context gains
+did not hold at 32K. See the [follow-up speed/rejection graph and results](../../benchmarks/inkling-2026-11-20/README.md). For long prompts over a reverse proxy, use streaming;
 the worker emits prompt-progress keepalives while filling the context.

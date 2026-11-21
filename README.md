@@ -14,22 +14,68 @@ The optional [Studio gateway](tools/studio-gateway/README.md) supervises one
 model at a time. Its deployed runtime remains separately pinned and qualified;
 synchronizing this source tree does not upgrade that binary.
 
+## Suggested model: Inkling 2 Mini MLX 5-bit
+
+For a 64 GB Apple Silicon setup, start with
+[Inkling 2 Mini MLX 5-bit](https://huggingface.co/araysuter/Inkling-2-Mini-MLX-5bit).
+It supports text and images through this fork's optional MLX adapter, with a
+**131,072-token input-plus-output window** and up to **two interleaved text
+requests** when RAM admission allows. Images run sequentially. This is a
+practical starting recommendation, not a matched quality ranking over Swift,
+Liquid or Arete. Native Zig support for Inkling is not provided by this adapter.
+
+On M5 Max with 64 GiB RAM, ordinary serving measured **39–43 generated tok/s
+solo**, **19–21 tok/s per user with two active**, and roughly **1,400–1,730 prompt
+tok/s solo** at 4K–32K. Speculative experiments reached 49.7 tok/s at 4K but
+regressed at 32K, so drafting stays disabled. These are one-attempt speed probes.
+
+![Inkling generation speed and draft rejection](benchmarks/inkling-2026-11-20/speed-and-rejection.svg)
+
+[Benchmark details and raw results](benchmarks/inkling-2026-11-20/README.md) ·
+[API adapter setup, images and limits](tools/inkling/README.md)
+
+### Try it locally
+
+Use an Apple Silicon Mac and a separate Python environment. Set `MODEL_DIR` to
+an absolute directory for replaceable weights; on a Mac using Time Machine,
+exclude that directory and its download cache before downloading.
+
+```sh
+python3 -m venv .venv-inkling
+.venv-inkling/bin/python -m pip install 'mlx==0.32.4' 'transformers==5.23.0' pillow \
+  'git+https://github.com/ml-explore/mlx-lm.git@0c4c99192230f1943dd468d297f0b8a64ae7b7c2'
+export MODEL_DIR="/absolute/path/to/models/inkling-2-mini-5bit"
+.venv-inkling/bin/hf download araysuter/Inkling-2-Mini-MLX-5bit \
+  --revision 4e7ff0e11667a88bae9a7a9323e93d498899aa8b --local-dir "$MODEL_DIR"
+MLX_ENABLE_TF32=0 .venv-inkling/bin/python -m mlx_lm.generate \
+  --model "$MODEL_DIR" --prompt "Write a short Python function to deduplicate a list." \
+  --max-tokens 256 --temp 0
+```
+
+The pinned MLX-LM revision includes the Inkling port; a stock version without
+that port will not load this architecture. To expose an authenticated local
+OpenAI-compatible API, follow the [short server setup](tools/inkling/README.md#quick-local-api).
+
 ## Models through one Studio API
 
-The default Studio setup advertises **Swift-1.5** and **Arete-27B MLX 5-bit**.
-Both use native TensorFold, the Qwen3.8-27B DFlash2 drafter, and a **131,072-token
+The current Studio API advertises `inkling-2-mini`, `lfm2.5-24b-a2b`,
+`swift-1.5` and `arete-27b`. The checked-in starter configuration contains
+**Swift-1.5** and **Arete-27B MLX 5-bit**; add Inkling using its adapter guide
+or Liquid using the [Liquid profile guide](tools/studio-gateway/LIQUID.md).
+Swift and Arete use native TensorFold, the Qwen3.8-27B DFlash2 drafter, and a **131,072-token
 input-plus-output window with one active request at a time**. Only the selected
 model and its drafter are loaded in RAM; the other model's weights stay on SSD.
 Swift and Arete both have [native image profiles](tools/studio-gateway/VISION.md).
 
-The gateway retains up to four conversations **total across all models and API
-keys**, including the active conversation. After 30 minutes idle, it saves the
+The shared snapshot limit is configurable; the current Studio profile uses
+eight slots total across supported models and API keys. Inkling keeps fresh
+KV per request and does not retain completed histories or consume SSD slots. After 30 minutes idle, it saves the
 conversation and unloads the engine. Temporary conversation state is cleared
 when the gateway shuts down. A cold request includes model-loading and
-conversation-restoration time. RAM admission checks keep a 6 GiB host reserve
+conversation-restoration time. RAM admission checks retain the configured host reserve
 and return HTTP 503 when other work leaves insufficient headroom.
 
-Start with Swift for the locally tested reasoning workload. Choose Arete when
+Swift remains an option for the historical locally tested reasoning workload. Choose Arete when
 you want the NousResearch model with its original BF16 vision tower and our
 5-bit language quantization. There is no matched local quality score for Arete.
 
@@ -62,7 +108,7 @@ python3 tools/studio-gateway/gateway.py \
   --config "$HOME/.config/tensorfold/studio-gateway.json"
 ```
 
-Clients keep one `/v1` base URL and API key, choosing `swift-1.5` or `arete-27b`
+Clients keep one `/v1` base URL and API key, choosing a configured model ID
 in the request's `model` field. Keep downloaded weights and conversion staging
 in Time Machine-excluded directories; private configuration, keys and snapshots
 stay outside Git. See [sharing this fork](docs/studio/SHARING.md).
@@ -74,7 +120,8 @@ the default two-model configuration.
 
 TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
-Serving needs no Python or MLX installation.
+Native serving needs no Python or MLX installation; the optional Inkling
+adapter described above requires its separate MLX environment.
 
 Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) and follow [CONTRIBUTING.md](CONTRIBUTING.md#contributing-with-agents).
 
