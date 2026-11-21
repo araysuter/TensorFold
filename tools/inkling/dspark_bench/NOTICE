@@ -1,0 +1,3 @@
+The draft model definitions in model.py are derived from oMLX, licensed under Apache-2.0.
+Source: https://github.com/jundot/omlx/blob/2cf8fce68a4c95942f57be92b3a1b8015687d5d3/omlx/patches/inkling2/dspark.py
+Unused server integration helpers were omitted.

@@ -79,3 +79,8 @@ Use `tools/bench_studio_concurrency.py` against the isolated benchmark profile
 with `--context 131072 --levels 1,2 --lengths 4000,8000,32000 --tokens 256`.
 It compares generated-token hashes to each stream's solo/plain reference and
 fails on disagreement. This is a throughput check, not a quality benchmark.
+
+An [experimental DSpark benchmark](DSpark.md) is available separately. Its
+exact-output verifier was slower in the measured paired runs, so it is not
+used by the API worker. For long prompts over a reverse proxy, use streaming;
+the worker emits prompt-progress keepalives while filling the context.
