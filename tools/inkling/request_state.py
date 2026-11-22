@@ -72,7 +72,8 @@ class RequestState:
                 self.detokenizer.finalize()
         text, finish = api._apply_stop_words(self.stop_reader, self.detokenizer.last_segment, finish_reason=finish)
         self.done = finish is not None
-        return api.Response(text, token, logprobs[token].item(), finish,
+        logprob = logprobs[token].item() if getattr(self.args, 'logprobs', False) else 0.0
+        return api.Response(text, token, logprob, finish,
                             api._format_top_logprobs(logprobs, self.args.top_logprobs, self.tokenizer))
 
     def close(self):

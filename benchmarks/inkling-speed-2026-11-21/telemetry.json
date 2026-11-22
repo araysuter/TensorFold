@@ -1,0 +1,17 @@
+{
+  "status": "passed_with_capacity_limit",
+  "profiles": {
+    "baseline": {
+      "exit_code": 2,
+      "minimum_available_gib": 14.567718505859375,
+      "maximum_physical_gib": 31.310126185417175,
+      "maximum_swap_growth_mib": 0
+    },
+    "optimized": {
+      "exit_code": 2,
+      "minimum_available_gib": 12.488510131835938,
+      "maximum_physical_gib": 33.901999935507774,
+      "maximum_swap_growth_mib": 0
+    }
+  }
+}

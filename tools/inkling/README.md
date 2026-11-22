@@ -17,6 +17,30 @@ python3 -m venv "$INKLING_ENV"
 The worker
 sets `MLX_ENABLE_TF32=0` before importing MLX to preserve the qualified FP32 path.
 
+## M5 Max streaming tuning
+
+The worker materializes a selected token probability only when the client
+requests log probabilities. Ordinary responses avoid that extra GPU dispatch
+and wait; requested probabilities and top-probability output are retained.
+
+For the qualified M5 Max 8-bit profile, add these existing MLX controls to the
+model's gateway `env` object, or export them before starting the direct worker:
+
+```json
+{
+  "MLX_ENABLE_TF32": "0",
+  "MLX_METAL_FAST_SYNCH": "1",
+  "MLX_MAX_OPS_PER_BUFFER": "200",
+  "MLX_MAX_MB_PER_BUFFER": "200"
+}
+```
+
+Keep MLX 0.32.4 and the pinned model port above. These controls were measured
+on M5 Max, not qualified for other chips. The checkpoint, three loop passes,
+BF16 KV caches, 512-row prefill and 128K context limit are unchanged. Do not add
+`--benchmark-ignore-eos` to a serving profile. See the
+[before/after results and rejected experiments](../../benchmarks/inkling-speed-2026-11-21/README.md).
+
 ## Quick local API
 
 After the root README's pinned environment and download steps, run from the
