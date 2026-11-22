@@ -1,0 +1,43 @@
+{
+  "status": "passed",
+  "modes": [
+    {
+      "streaming": false,
+      "admitted": 2,
+      "solo": {
+        "token_sha256": "ea78878eba639c6fc8e132afa23bb49880d84287d8a2665fc39c32ba63f3ca9f",
+        "finish_reason": "length"
+      },
+      "concurrent": [
+        {
+          "token_sha256": "ea78878eba639c6fc8e132afa23bb49880d84287d8a2665fc39c32ba63f3ca9f",
+          "finish_reason": "length"
+        },
+        {
+          "token_sha256": "ea78878eba639c6fc8e132afa23bb49880d84287d8a2665fc39c32ba63f3ca9f",
+          "finish_reason": "length"
+        }
+      ],
+      "exact": true
+    },
+    {
+      "streaming": true,
+      "admitted": 2,
+      "solo": {
+        "token_sha256": "ea78878eba639c6fc8e132afa23bb49880d84287d8a2665fc39c32ba63f3ca9f",
+        "finish_reason": "length"
+      },
+      "concurrent": [
+        {
+          "token_sha256": "ea78878eba639c6fc8e132afa23bb49880d84287d8a2665fc39c32ba63f3ca9f",
+          "finish_reason": "length"
+        },
+        {
+          "token_sha256": "ea78878eba639c6fc8e132afa23bb49880d84287d8a2665fc39c32ba63f3ca9f",
+          "finish_reason": "length"
+        }
+      ],
+      "exact": true
+    }
+  ]
+}

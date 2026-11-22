@@ -60,7 +60,9 @@ stock select's subnormal and NaN behavior. Whole SDPA outputs match at cache bou
 and dtypes retain the upstream implementation. No new GPU kernel or reduction is introduced.
 
 The isolated gateway accepted two simultaneous sampled text requests in both streaming modes;
-each matched its solo answer. Images, selected and top-three log probabilities, and the
+each matched its solo answer and [generated-token hash](api-hashes.json). The hash fixture asks
+“Explain why hash tables can have collisions in two sentences.” with temperature 0.7, seed 1234,
+and a 96-token output cap. Images, selected and top-three log probabilities, and the
 [tool round-trip checks](api-tools.json) passed. These are protocol and exactness checks, not quality scores.
 The existing 128K limit, two-text/one-image concurrency, and 8 GiB host reserve are unchanged.
 
