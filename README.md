@@ -34,6 +34,12 @@ regressed at 32K, so drafting stays disabled. These are one-attempt speed probes
 [Benchmark details and raw results](benchmarks/inkling-2026-11-20/README.md) ·
 [API adapter setup, images and limits](tools/inkling/README.md)
 
+The deployed 8-bit profile has a separate
+[streaming optimization receipt](benchmarks/inkling-speed-2026-11-21/README.md):
+it preserves three passes and the same weights while avoiding unused GPU
+probability readbacks and tuning M5 command submission. Its measurements apply
+to the 8-bit checkpoint, not the 5-bit figures above.
+
 ### Try it locally
 
 Use an Apple Silicon Mac and a separate Python environment. Set `MODEL_DIR` to
