@@ -164,8 +164,7 @@ class DecodeMaskMetalTests(unittest.TestCase):
                     visible = visible & (distance < window)
                 clipped = mx.clip(distance, 0, extent - 1)
 
-                # Each tile places consecutive words in the columns the mask
-                # will select. The loop includes all subnormal and NaN words.
+                # Each tile covers consecutive visible words, including every subnormal and NaN encoding.
                 columns = min(size, extent)
                 for start in range(0, 1 << 16, heads * columns):
                     with self.subTest(size=size, offset=offset, index=index, start=start):

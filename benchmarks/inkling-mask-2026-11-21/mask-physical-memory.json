@@ -1,0 +1,9 @@
+{
+  "scope": "Kernel lifetime maximum of the process running the alternating 1026/2K/32K/64K test, sampled during final 64K pairs",
+  "processes": [
+    {
+      "current_physical_gib": 30.742575615644455,
+      "lifetime_peak_physical_gib": 33.97875115275383
+    }
+  ]
+}

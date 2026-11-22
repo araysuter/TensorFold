@@ -1,0 +1,72 @@
+{
+  "status": "passed",
+  "code_head": "e8cf064f019136147f9c215445d6ea1410e86955",
+  "unit_tests": {
+    "passed": 28,
+    "failed": 0,
+    "skipped": 0
+  },
+  "negative_controls": [
+    {
+      "label": "base_no_install",
+      "tests": 1,
+      "failures": 1,
+      "errors": 0,
+      "skips": 0
+    },
+    {
+      "label": "raw_copy_subnormal_regression",
+      "tests": 1,
+      "failures": 37,
+      "errors": 0,
+      "skips": 0
+    }
+  ],
+  "api_contract": {
+    "sampled_nonstream": {
+      "passed": true,
+      "finish_reason": "length",
+      "admitted": 2,
+      "capacity_limited": false,
+      "rejections": []
+    },
+    "sampled_stream": {
+      "passed": true,
+      "finish_reason": "length",
+      "admitted": 2,
+      "capacity_limited": false,
+      "rejections": []
+    },
+    "text_logprobs_requested": {
+      "passed": true,
+      "probabilities": 64,
+      "same_tokens": true
+    },
+    "chat_logprobs_top3": {
+      "passed": true,
+      "probabilities": 64
+    },
+    "vision": {
+      "passed": true,
+      "answer": "The left shape is a red square, and the right shape is a blue circle."
+    },
+    "status": "passed"
+  },
+  "qualification": {
+    "code_head": "e8cf064f019136147f9c215445d6ea1410e86955",
+    "status": "passed",
+    "mask-head-units": 0,
+    "mask-negative-controls": 0,
+    "mask-head-eight-k": 0,
+    "mask-head-contexts": 0,
+    "quant-reproducer": 0,
+    "mask-api-contract": 0,
+    "mask-api-tools": 0
+  },
+  "gateway_unit_tests": {
+    "passed": 71,
+    "failed": 0,
+    "skipped": 0,
+    "command": "python3 -m unittest discover -s tools/studio-gateway/tests"
+  }
+}

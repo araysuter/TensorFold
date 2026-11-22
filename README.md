@@ -40,6 +40,10 @@ it preserves three passes and the same weights while avoiding unused GPU
 probability readbacks and tuning M5 command submission. Its measurements apply
 to the 8-bit checkpoint, not the 5-bit figures above.
 
+The 8-bit profile also has an
+[exact decode-mask optimization receipt](benchmarks/inkling-mask-2026-11-21/README.md),
+with alternating baseline comparisons on the pinned M5 Max runtime.
+
 ### Try it locally
 
 Use an Apple Silicon Mac and a separate Python environment. Set `MODEL_DIR` to

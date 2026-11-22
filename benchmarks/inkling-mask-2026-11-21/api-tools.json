@@ -1,0 +1,143 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "model": "inkling-2-mini",
+      "streaming": false,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 1.3665929166600108,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "The user wants me to call lookup_number with key alpha. I need to actually call the tool.",
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\": \"alpha\"}"
+                },
+                "type": "function",
+                "id": "012e7513-83c7-44f6-99ab-1281021fee70"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.8638290828093886,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=731946",
+            "reasoning": "The tool returned value 731946. Need reply RESULT=<value>. No extra."
+          },
+          "finish_reason": "stop"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 1.2680294578894973,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "The user asks to call lookup_number again. Need do it.",
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\": \"alpha\"}"
+                },
+                "type": "function",
+                "id": "1435995e-9554-4c69-9623-9aac94be410d"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.7728581251576543,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=294617",
+            "reasoning": "Need reply only RESULT=<value> using new value."
+          },
+          "finish_reason": "stop"
+        }
+      ]
+    },
+    {
+      "model": "inkling-2-mini",
+      "streaming": true,
+      "passed": true,
+      "replies": [
+        {
+          "status": 200,
+          "elapsed_s": 1.3499561250209808,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning": "The user wants me to call lookup_number with key alpha. I need to actually call the tool.",
+            "tool_calls": [
+              {
+                "id": "c8d12bde-0b04-47d9-8dfd-234ccbf4050e",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\": \"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.8676347499713302,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=731946",
+            "reasoning": "The tool returned value 731946. Need reply RESULT=<value>. No extra."
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 1.2712452495470643,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning": "The user asks to call lookup_number again. Need do it.",
+            "tool_calls": [
+              {
+                "id": "70e5b434-1231-4e62-9729-a261edd6b434",
+                "type": "function",
+                "function": {
+                  "name": "lookup_number",
+                  "arguments": "{\"key\": \"alpha\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "stream_done": true
+        },
+        {
+          "status": 200,
+          "elapsed_s": 0.7851929999887943,
+          "message": {
+            "role": "assistant",
+            "content": "RESULT=294617",
+            "reasoning": "Need reply only RESULT=<value> using new value."
+          },
+          "finish_reason": "stop",
+          "stream_done": true
+        }
+      ]
+    }
+  ]
+}
