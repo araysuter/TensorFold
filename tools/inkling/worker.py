@@ -40,6 +40,8 @@ class Provider(api.ModelProvider):
 
     def _load(self, *args, **kwargs):
         super()._load(*args, **kwargs)
+        from decode_mask import install
+        install(self.model)
         configure_response_format(self.tokenizer)
         if self.cli_args.benchmark_ignore_eos:
             self.tokenizer.eos_token_ids = set()

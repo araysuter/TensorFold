@@ -41,6 +41,12 @@ BF16 KV caches, 512-row prefill and 128K context limit are unchanged. Do not add
 `--benchmark-ignore-eos` to a serving profile. See the
 [before/after results and rejected experiments](../../benchmarks/inkling-speed-2026-11-21/README.md).
 
+The pinned M5 Max worker also builds single-row attention masks from the known
+cache layout, retaining the original BF16 select and SDPA operations. This is
+installed on each loaded model's own attention modules; unsupported shapes,
+dtypes, runtimes and chips retain the upstream method. See the
+[decode-mask qualification receipt](../../benchmarks/inkling-mask-2026-11-21/README.md).
+
 ## Quick local API
 
 After the root README's pinned environment and download steps, run from the
